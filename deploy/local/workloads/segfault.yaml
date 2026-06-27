@@ -1,0 +1,52 @@
+# The crash workload for the live smoke test. A baked-in null-deref binary
+# (segfault.c) faults by SIGSEGV (signal 11); the kernel routes the fault to
+# coredrop's core_pattern handler, which streams a core + /proc snapshot +
+# manifest to the bucket.
+#
+# Why a child, not PID 1: the container's entry shell is PID 1 in its PID
+# namespace. We run the faulting binary as a backgrounded child of that shell so
+# the synchronous fatal signal is the ordinary case (never namespace-init
+# special handling) and the dump is unambiguous. The child shares the
+# container's cgroup, so cgroup identity resolution still lands on this pod.
+#
+# `ulimit -c unlimited` is LOAD-BEARING: a 0 core soft-limit suppresses the dump
+# entirely, so the kernel never invokes the pipe handler and no core is captured.
+# It is inherited by the child.
+#
+# SECRET_FOO is planted so the smoke test can prove `environ` redaction in the
+# stored proc-snapshot: coredrop redacts it (keyword key) to `<redacted>`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crash-segfault
+  labels: { app: crash-segfault }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: crash-segfault }
+  template:
+    metadata:
+      labels: { app: crash-segfault }
+    spec:
+      containers:
+        - name: app
+          image: docker.io/library/coredrop-segfault:dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              ulimit -c unlimited
+              echo up
+              while true; do
+                /usr/local/bin/segfault & p=$!
+                wait $p
+                echo "segfault child exited; respawning"
+                sleep 5
+              done
+          env:
+            - name: SECRET_FOO
+              value: "s3cr3t-smoke-canary-do-not-store"
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }

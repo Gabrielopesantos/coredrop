@@ -1,0 +1,6 @@
+apiVersion: v2
+name: coredrop
+description: Standalone Kubernetes coredump handler - captures fault cores and /proc snapshots to object storage with JSON manifest sidecars.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

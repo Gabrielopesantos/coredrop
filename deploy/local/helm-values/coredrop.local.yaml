@@ -1,0 +1,27 @@
+# Local overlay for the live smoke test: locally-built image + in-cluster MinIO.
+# The object-store endpoint is injected by up.sh as a numeric ClusterIP (the
+# kernel-exec'd handler runs in the host netns and can't use cluster DNS).
+image:
+  repository: docker.io/library/coredrop
+  tag: dev
+  pullPolicy: IfNotPresent
+
+capture:
+  cluster: "local"
+  backend: "standalone"
+  objectStore:
+    url: "s3://coredrop-cores"
+    # endpoint: injected via `--set capture.objectStore.endpoint=http://<clusterIP>:9000`
+    region: "us-east-1"
+    allowHttp: true
+    accessKeyId: "minioadmin"
+    secretAccessKey: "minioadmin"
+
+# k3s runs its OWN containerd; its CRI socket is under /run/k3s, not the
+# upstream /run/containerd default. crictl enrichment needs this exact path.
+cri:
+  runtimeEndpoint: "unix:///run/k3s/containerd/containerd.sock"
+  socketHostPath: "/run/k3s/containerd/containerd.sock"
+  crictlPath: "/usr/local/bin/crictl"
+
+logLevel: info

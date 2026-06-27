@@ -1,0 +1,94 @@
+# Single-node minio: the S3-compatible object store coredrop streams cores,
+# proc-snapshots, and manifests to. Applied with `-n <namespace>` by up.sh, so no
+# namespace is hard-coded here. Credentials are the dev defaults; this is a
+# single-trust-boundary local setup only.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: object-store
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+    spec:
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              value: "minioadmin"
+            - name: MINIO_ROOT_PASSWORD
+              value: "minioadmin"
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: s3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}   # ephemeral - fine for local testing
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: console
+      port: 9001
+      targetPort: console
+---
+# One-shot bucket creation (minio does not auto-create buckets). Retries until
+# minio is reachable, then is idempotent (`mb --ignore-existing`). The bucket
+# name must match capture.objectStore.url in the Helm overlay (coredrop-cores).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-make-bucket
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: quay.io/minio/mc:latest
+          command:
+            - sh
+            - -c
+            - |
+              until mc alias set local http://minio:9000 minioadmin minioadmin; do
+                echo "waiting for minio..."; sleep 3
+              done
+              mc mb --ignore-existing local/coredrop-cores
+              echo "bucket ready"

@@ -1,0 +1,57 @@
+image:
+  repository: ghcr.io/coredrop/coredrop
+  tag: "" # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+securityContext:
+  privileged: true
+
+hostPID: true
+
+# Capture config: the daemon installs core_pattern and writes the handler
+# config to a hostPath. The kernel exec's the handler in host namespaces
+# with a clean environment, so it reads the hostPath file, not these vars.
+capture:
+  # Cluster name - the first segment of the object key.
+  cluster: "local"
+  # Core sink: "standalone" (stream to object store) | "systemd-coredump"
+  # (chain to the node's systemd-coredump; core.present stays false in manifest).
+  backend: "standalone"
+  # Pass `environ` through un-redacted. Leave false; cores are secret-bearing.
+  noRedact: false
+  # Host paths the kernel-exec'd handler resolves directly (host mount ns).
+  hostBinDir: "/opt/coredrop/bin"
+  hostRunDir: "/run/coredrop"
+  # S3-compatible / GCS / Azure object store for the core + proc-snapshot + manifest.
+  # Leave `url` empty to run with no upload (cores discarded, pipe still drains).
+  # Static creds go into the store-secret.yaml Secret; leave empty for workload identity.
+  objectStore:
+    url: "" # e.g. "s3://crash-cores"
+    endpoint: "" # e.g. "http://minio:9000" (leave empty for cloud)
+    region: "us-east-1"
+    allowHttp: true # plaintext endpoint (in-cluster MinIO)
+    accessKeyId: ""
+    secretAccessKey: ""
+
+# CRI socket for crictl enrichment (post-drain identity: namespace, pod name,
+# container name, image, restart count). Mounted read-only from the host.
+cri:
+  runtimeEndpoint: "unix:///run/containerd/containerd.sock"
+  # Host path of the CRI socket - mounted so the in-pod crictl can reach it.
+  socketHostPath: "/run/containerd/containerd.sock"
+  # Path to the crictl binary inside the container image.
+  crictlPath: "/usr/local/bin/crictl"
+
+logLevel: info
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+tolerations:
+  - operator: Exists
+
+nodeSelector: {}

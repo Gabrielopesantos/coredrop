@@ -48,8 +48,12 @@ pub struct CoreStats {
     /// sha256 (hex) of the *stored* object - the zstd-compressed bytes.
     /// `None` when nothing was stored (`DiscardBackend`).
     pub sha256: Option<String>,
-    /// The stream ended early or errored mid-drain.
+    /// The stored core is incomplete (stream error, size cap, or a failed
+    /// forward to the chained backend).
     pub truncated: bool,
+    /// Why the core is truncated: `size_cap` | `stream_error` |
+    /// `forward_failed`. `None` when not truncated.
+    pub truncated_reason: Option<String>,
 }
 
 /// Sink for the kernel's core stream. Implementations must consume `reader`
@@ -76,6 +80,7 @@ impl CaptureBackend for DiscardBackend {
                         stored_bytes: 0,
                         sha256: None,
                         truncated: false,
+                        truncated_reason: None,
                     });
                 }
                 Ok(n) => bytes += n as u64,
@@ -86,6 +91,7 @@ impl CaptureBackend for DiscardBackend {
                         stored_bytes: 0,
                         sha256: None,
                         truncated: true,
+                        truncated_reason: Some("stream_error".to_string()),
                     });
                 }
             }

@@ -61,6 +61,7 @@ fn base_config(proc_dir: &std::path::Path) -> HandlerConfig {
         store_options: vec![],
         crictl_path: "/bin/false".into(), // degraded -- cgroup-only identity
         cri_runtime_endpoint: None,
+        max_core_bytes: 0, // unlimited -- cap behavior tested explicitly
     }
 }
 
@@ -163,6 +164,57 @@ async fn handler_run_uploads_core_snapshot_and_writes_manifest() {
         .expect("proc_snapshot in manifest");
     assert_eq!(snap_ref.object_key, snap_key);
     assert!(snap_ref.file_count > 0);
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// 2a -- size cap: only the first `max_core_bytes` land in the store; the
+/// manifest records the full drained size and truncation reason.
+#[tokio::test]
+async fn handler_run_size_cap_truncates_stored_core() {
+    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+    let container_id = "abc123def456abc123def456";
+    let ts: i64 = 1_749_600_000;
+    let pid = 4243;
+    let core_payload: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+
+    let tmp = unique_tmp("sizecap");
+    let proc_dir = tmp.join("proc");
+    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(&proc_dir);
+    config.max_core_bytes = 1_000;
+    let args = CaptureArgs {
+        host_pid: pid,
+        signal: 11,
+        timestamp: ts,
+        exe: "!usr!bin!crasher".into(),
+    };
+
+    let mut core_in: &[u8] = &core_payload;
+    run(args, &config, &mut core_in, Some(store.clone()))
+        .await
+        .unwrap();
+
+    let core_key = upload::core_object_key("test", pod_uid, container_id, ts);
+    let stored_core = get_object(&store, &core_key).await;
+    assert_eq!(
+        unzstd(&stored_core).await,
+        &core_payload[..1_000],
+        "stored core holds exactly the first cap bytes"
+    );
+
+    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts);
+    let manifest: Manifest =
+        serde_json::from_slice(&get_object(&store, &manifest_key).await).unwrap();
+    assert!(manifest.core.truncated);
+    assert_eq!(manifest.core.truncated_reason.as_deref(), Some("size_cap"));
+    assert_eq!(
+        manifest.core.size_bytes,
+        Some(core_payload.len() as u64),
+        "size_bytes records the full drained size"
+    );
 
     std::fs::remove_dir_all(&tmp).ok();
 }

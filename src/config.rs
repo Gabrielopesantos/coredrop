@@ -17,6 +17,13 @@ use crate::upload::{self, ALLOWED_STORE_OPTS};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/run/coredrop/handler.json";
 
+/// Default cap on stored (uncompressed) core bytes per crash: 2 GiB.
+pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn default_max_core_bytes() -> u64 {
+    DEFAULT_MAX_CORE_BYTES
+}
+
 /// Everything the kernel-exec'd handler needs that env can't deliver. The
 /// daemon fills it from its own env and writes it; the handler reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +47,11 @@ pub struct HandlerConfig {
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     /// `None` lets crictl use its own default / `CONTAINER_RUNTIME_ENDPOINT`.
     pub cri_runtime_endpoint: Option<String>,
+    /// Max uncompressed core bytes stored per crash; `0` = unlimited. The
+    /// remainder is drained but not stored (`serde(default)` keeps configs
+    /// written by older daemons parseable).
+    #[serde(default = "default_max_core_bytes")]
+    pub max_core_bytes: u64,
 }
 
 impl Default for HandlerConfig {
@@ -54,6 +66,7 @@ impl Default for HandlerConfig {
             store_options: Vec::new(),
             crictl_path: "/usr/local/bin/crictl".to_string(),
             cri_runtime_endpoint: None,
+            max_core_bytes: DEFAULT_MAX_CORE_BYTES,
         }
     }
 }
@@ -83,6 +96,10 @@ impl HandlerConfig {
             crictl_path: std::env::var("CRICTL_PATH")
                 .unwrap_or_else(|_| "/usr/local/bin/crictl".to_string()),
             cri_runtime_endpoint: std::env::var("CONTAINER_RUNTIME_ENDPOINT").ok(),
+            max_core_bytes: std::env::var("CAPTURE_MAX_CORE_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_MAX_CORE_BYTES),
         }
     }
 
@@ -153,6 +170,7 @@ mod tests {
             ],
             crictl_path: "/usr/local/bin/crictl".into(),
             cri_runtime_endpoint: Some("unix:///run/containerd/containerd.sock".into()),
+            max_core_bytes: 1024,
         };
         let path = tmp("rt");
         cfg.write(&path).unwrap();

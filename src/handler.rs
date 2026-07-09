@@ -216,6 +216,7 @@ pub async fn run(
                 None
             },
             truncated: stats.truncated,
+            truncated_reason: stats.truncated_reason.clone(),
             codec: "zstd".to_string(),
         },
         proc_snapshot: proc_ref,
@@ -280,7 +281,11 @@ fn build_backend(
         CaptureBackendKind::Standalone => match (object_key, store) {
             (Some(key), Some(store)) => {
                 info!(key = %key, "streaming core to object store (standalone backend)");
-                Box::new(StandaloneBackend::new(store.clone(), key))
+                Box::new(StandaloneBackend::new(
+                    store.clone(),
+                    key,
+                    config.max_core_bytes,
+                ))
             }
             _ => {
                 info!("no object store configured or identity unresolved; discarding core");

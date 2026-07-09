@@ -66,6 +66,11 @@ struct DaemonArgs {
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     #[arg(long, env = "CONTAINER_RUNTIME_ENDPOINT")]
     cri_runtime_endpoint: Option<String>,
+
+    /// Max uncompressed core bytes stored per crash; 0 = unlimited. The
+    /// remainder of the stream is drained but not stored.
+    #[arg(long, env = "CAPTURE_MAX_CORE_BYTES", default_value_t = coredrop::config::DEFAULT_MAX_CORE_BYTES)]
+    max_core_bytes: u64,
 }
 
 impl DaemonArgs {
@@ -83,6 +88,7 @@ impl DaemonArgs {
             store_options,
             crictl_path: self.crictl_path.clone(),
             cri_runtime_endpoint: self.cri_runtime_endpoint.clone(),
+            max_core_bytes: self.max_core_bytes,
         }
     }
 }

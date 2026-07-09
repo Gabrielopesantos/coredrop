@@ -71,13 +71,18 @@ pub async fn put_object(store: &Arc<dyn ObjectStore>, key: &str, bytes: Vec<u8>)
 pub struct StandaloneBackend {
     store: Arc<dyn ObjectStore>,
     key: ObjectPath,
+    /// Max uncompressed bytes stored per core; `0` = unlimited. The stream
+    /// past the cap is still drained (the kernel blocks until EOF) but not
+    /// stored.
+    max_core_bytes: u64,
 }
 
 impl StandaloneBackend {
-    pub fn new(store: Arc<dyn ObjectStore>, key: &str) -> Self {
+    pub fn new(store: Arc<dyn ObjectStore>, key: &str, max_core_bytes: u64) -> Self {
         Self {
             store,
             key: ObjectPath::from(key),
+            max_core_bytes,
         }
     }
 }
@@ -86,22 +91,32 @@ impl StandaloneBackend {
 impl CaptureBackend for StandaloneBackend {
     async fn drain_core(&self, reader: &mut (dyn AsyncRead + Unpin + Send)) -> Result<CoreStats> {
         let sink = BufWriter::new(self.store.clone(), self.key.clone());
-        let (bytes, stored_bytes, sha256, truncated) =
-            stream_core_through_zstd(reader, sink).await?;
+        let (bytes, stored_bytes, sha256, truncated_reason) =
+            stream_core_through_zstd(reader, sink, self.max_core_bytes).await?;
         Ok(CoreStats {
             bytes,
             stored_bytes,
             sha256: Some(sha256),
-            truncated,
+            truncated: truncated_reason.is_some(),
+            truncated_reason,
         })
     }
 }
 
-async fn stream_core_through_zstd<R, W>(core: &mut R, sink: W) -> Result<(u64, u64, String, bool)>
+async fn stream_core_through_zstd<R, W>(
+    core: &mut R,
+    sink: W,
+    max_core_bytes: u64,
+) -> Result<(u64, u64, String, Option<String>)>
 where
     R: AsyncRead + Unpin + ?Sized,
     W: AsyncWrite + Unpin,
 {
+    let cap = if max_core_bytes == 0 {
+        u64::MAX
+    } else {
+        max_core_bytes
+    };
     let hashing = HashingWriter {
         inner: sink,
         hasher: Sha256::new(),
@@ -110,21 +125,33 @@ where
     let mut encoder = ZstdEncoder::new(hashing);
 
     let mut buf = vec![0u8; CORE_READ_CHUNK];
-    let mut uncompressed = 0u64;
-    let mut truncated = false;
+    let mut drained = 0u64;
+    let mut written = 0u64;
+    let mut truncated_reason: Option<String> = None;
     loop {
         match core.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                uncompressed += n as u64;
-                encoder
-                    .write_all(&buf[..n])
-                    .await
-                    .context("writing core into zstd encoder")?;
+                drained += n as u64;
+                let take = (n as u64).min(cap.saturating_sub(written)) as usize;
+                if take > 0 {
+                    encoder
+                        .write_all(&buf[..take])
+                        .await
+                        .context("writing core into zstd encoder")?;
+                    written += take as u64;
+                }
+                if take < n && truncated_reason.is_none() {
+                    warn!(
+                        cap,
+                        "core exceeds size cap - storing first {cap} bytes, draining the rest"
+                    );
+                    truncated_reason = Some("size_cap".to_string());
+                }
             }
             Err(e) => {
-                warn!(error = %e, uncompressed, "core stream read error - finalizing partial object as truncated");
-                truncated = true;
+                warn!(error = %e, drained, "core stream read error - finalizing partial object as truncated");
+                truncated_reason = Some("stream_error".to_string());
                 break;
             }
         }
@@ -141,10 +168,10 @@ where
         ..
     } = encoder.into_inner();
     Ok((
-        uncompressed,
+        drained,
         stored_bytes,
         hex_lower(&hasher.finalize()),
-        truncated,
+        truncated_reason,
     ))
 }
 
@@ -359,7 +386,7 @@ mod tests {
         let store = Arc::new(InMemory::new());
         let key = core_object_key("local", "pod-aaa", "cid-bbb", 42);
 
-        let backend = StandaloneBackend::new(store.clone(), &key);
+        let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader: &[u8] = &core;
         let stats = backend.drain_core(&mut reader).await.unwrap();
 
@@ -409,7 +436,7 @@ mod tests {
         let store = Arc::new(InMemory::new());
         let key = core_object_key("local", "pod-x", "cid-y", 7);
 
-        let backend = StandaloneBackend::new(store.clone(), &key);
+        let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader = FlakyReader {
             chunk: chunk.clone(),
             sent: false,
@@ -417,6 +444,7 @@ mod tests {
         let stats = backend.drain_core(&mut reader).await.unwrap();
 
         assert!(stats.truncated);
+        assert_eq!(stats.truncated_reason.as_deref(), Some("stream_error"));
         assert_eq!(stats.bytes, chunk.len() as u64);
         assert!(
             stats.stored_bytes > 0,
@@ -431,6 +459,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unzstd(&stored).await, chunk);
+    }
+
+    #[tokio::test]
+    async fn caps_stored_core_but_drains_and_counts_everything() {
+        let core: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let store = Arc::new(InMemory::new());
+        let key = core_object_key("local", "pod-cap", "cid-cap", 9);
+
+        let backend = StandaloneBackend::new(store.clone(), &key, 10_000);
+        let mut reader: &[u8] = &core;
+        let stats = backend.drain_core(&mut reader).await.unwrap();
+
+        assert_eq!(stats.bytes, 50_000, "full stream drained and counted");
+        assert!(stats.truncated);
+        assert_eq!(stats.truncated_reason.as_deref(), Some("size_cap"));
+
+        let stored = store
+            .get(&ObjectPath::from(key.as_str()))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(
+            unzstd(&stored).await,
+            &core[..10_000],
+            "stored object holds exactly the first cap bytes"
+        );
     }
 
     #[test]

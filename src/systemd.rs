@@ -73,6 +73,7 @@ impl CaptureBackend for SystemdCoredumpBackend {
             stored_bytes: 0,
             sha256: None,
             truncated,
+            truncated_reason: truncated.then(|| "forward_failed".to_string()),
         })
     }
 }

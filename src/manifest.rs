@@ -60,6 +60,10 @@ pub struct CoreRef {
     /// Compressed size in bytes (what's stored in the object store).
     pub stored_bytes: Option<u64>,
     pub truncated: bool,
+    /// Why the core is truncated: `size_cap` | `stream_error` |
+    /// `forward_failed`. Absent when not truncated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated_reason: Option<String>,
     /// Compression codec applied to the stored object.
     pub codec: String,
 }
@@ -103,6 +107,7 @@ mod tests {
                 size_bytes: Some(1_000_000),
                 stored_bytes: Some(200_000),
                 truncated: false,
+                truncated_reason: None,
                 codec: "zstd".into(),
             },
             proc_snapshot: Some(ProcSnapshotRef {

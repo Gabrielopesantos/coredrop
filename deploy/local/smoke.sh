@@ -55,6 +55,10 @@ mc alias set "$MC_ALIAS" "http://127.0.0.1:$LOCAL_PORT" minioadmin minioadmin >/
   || die "minio not reachable on 127.0.0.1:$LOCAL_PORT"
 
 # --- 4. poll the bucket for a captured object set -----------------------------
+# Start from a clean slate: stale objects from a previous run would otherwise
+# satisfy (or break) the assertions below.
+mc rm --recursive --force "$MC_ALIAS/$BUCKET" >/dev/null 2>&1 || true
+
 log "polling s3://$BUCKET for a captured manifest (up to ${SMOKE_TIMEOUT}s)"
 manifest_key=""
 deadline=$(( SECONDS + SMOKE_TIMEOUT ))
@@ -132,6 +136,35 @@ if [ -s "$WORKDIR/snap.tar" ]; then
   fi
 else
   warn "  proc-snapshot tar missing or empty"; fail=1
+fi
+
+# --- 8b. rate limit: the crash-looping container is suppressed past its budget -
+# The workload faults every ~5s and the default budget is 3 cores/hour, so a
+# suppressed manifest (core.skipped_reason=rate_limit, no core sibling) must
+# appear shortly after the third full capture.
+log "waiting for a rate-limit-suppressed manifest (up to ${SMOKE_TIMEOUT}s)"
+suppressed_key=""
+deadline=$(( SECONDS + SMOKE_TIMEOUT ))
+while :; do
+  for k in $(mc ls --recursive "$MC_ALIAS/$BUCKET" 2>/dev/null \
+    | awk '{print $NF}' | grep -- '-manifest\.json$'); do
+    reason="$(mc cat "$MC_ALIAS/$BUCKET/$k" 2>/dev/null | jq -r '.core.skipped_reason // empty')"
+    if [ "$reason" = "rate_limit" ]; then suppressed_key="$k"; break; fi
+  done
+  [ -n "$suppressed_key" ] && break
+  [ "$SECONDS" -ge "$deadline" ] && break
+  sleep 5
+done
+if [ -n "$suppressed_key" ]; then
+  log "  suppressed manifest found: $suppressed_key"
+  sup_core="${suppressed_key%-manifest.json}-core.zst"
+  if mc stat "$MC_ALIAS/$BUCKET/$sup_core" >/dev/null 2>&1; then
+    warn "  suppressed crash stored a core anyway: $sup_core"; fail=1
+  else
+    log "  suppressed crash stored no core (good)"
+  fi
+else
+  warn "  no rate-limit-suppressed manifest appeared (rate limit not exercised)"; fail=1
 fi
 
 # --- 9. uninstall restores core_pattern (CorePatternGuard drop path) ----------

@@ -66,6 +66,47 @@ impl RateLimiter {
         }
     }
 
+    /// Give back a slot recorded by `check_and_record` whose upload stored
+    /// nothing (e.g. the object store was unreachable). Without the refund, a
+    /// transient store outage would eat the whole budget with zero cores
+    /// stored. Best-effort: errors are logged and swallowed.
+    pub fn refund(&self, container_id: &str, recorded_at: i64) {
+        if self.max_per_hour == 0 {
+            return;
+        }
+        if let Err(e) = self.locked_refund(container_id, recorded_at) {
+            warn!(error = %e, path = %self.state_path.display(),
+                "rate-limit refund failed; one budget slot stays consumed");
+        }
+    }
+
+    fn locked_refund(&self, container_id: &str, recorded_at: i64) -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.state_path)?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let mut state: RateState = serde_json::from_slice(&bytes).unwrap_or_default();
+
+        if let Some(times) = state.events.get_mut(container_id) {
+            if let Some(pos) = times.iter().rposition(|t| *t == recorded_at) {
+                times.remove(pos);
+            }
+            if times.is_empty() {
+                state.events.remove(container_id);
+            }
+        }
+
+        let json = serde_json::to_vec(&state)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.write_all(&json)?;
+        Ok(())
+    }
+
     fn locked_check_and_record(
         &self,
         container_id: &str,
@@ -198,6 +239,34 @@ mod tests {
         std::fs::write(&path, b"{not json!").unwrap();
         let rl = RateLimiter::new(&path, 1);
         assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
+        assert_eq!(
+            rl.check_and_record("cid-a", 1001),
+            RateDecision::Suppressed { recent: 1 }
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn refund_restores_a_consumed_slot() {
+        let path = tmp_state("refund");
+        let rl = RateLimiter::new(&path, 1);
+        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
+        assert_eq!(
+            rl.check_and_record("cid-a", 1001),
+            RateDecision::Suppressed { recent: 1 }
+        );
+        rl.refund("cid-a", 1000);
+        assert_eq!(rl.check_and_record("cid-a", 1002), RateDecision::Allowed);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn refund_without_matching_record_is_harmless() {
+        let path = tmp_state("refund-nop");
+        let rl = RateLimiter::new(&path, 1);
+        rl.refund("cid-never-seen", 1000); // state file doesn't even exist
+        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
+        rl.refund("cid-a", 999); // wrong timestamp - removes nothing
         assert_eq!(
             rl.check_and_record("cid-a", 1001),
             RateDecision::Suppressed { recent: 1 }

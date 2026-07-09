@@ -117,9 +117,10 @@ pub async fn run(
 
     // Rate limit: consult only when a core would actually upload (standalone
     // backend with identity + store). The systemd backend owns its own limits.
+    let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
+    let mut rate_recorded = false;
     let rate_suppressed = match (&identity, &store, config.backend_kind()) {
         (Some(id), Some(_), CaptureBackendKind::Standalone) => {
-            let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
             match limiter.check_and_record(&id.container_id, args.timestamp) {
                 RateDecision::Suppressed { recent } => {
                     warn!(
@@ -130,7 +131,10 @@ pub async fn run(
                     );
                     true
                 }
-                RateDecision::Allowed => false,
+                RateDecision::Allowed => {
+                    rate_recorded = true;
+                    false
+                }
             }
         }
         _ => false,
@@ -155,6 +159,11 @@ pub async fn run(
     {
         Ok(stats) => stats,
         Err(e) => {
+            // Nothing was stored: give the budget slot back, or a transient
+            // store outage would exhaust the budget with zero cores kept.
+            if rate_recorded && let Some(id) = &identity {
+                limiter.refund(&id.container_id, args.timestamp);
+            }
             info!(
                 outcome = Outcome::Failed.as_str(),
                 host_pid = args.host_pid,

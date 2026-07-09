@@ -278,6 +278,63 @@ async fn handler_run_rate_limit_suppresses_core_keeps_manifest() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
+/// 2a -- rate limit refund: a crash whose core upload fails must not consume
+/// budget; the next crash still gets a full capture.
+#[tokio::test]
+async fn handler_run_failed_upload_refunds_rate_budget() {
+    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+    let container_id = "abc123def456abc123def456";
+    let pid = 4245;
+
+    let tmp = unique_tmp("refund");
+    let proc_dir = tmp.join("proc");
+    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+
+    let mut config = base_config(&proc_dir);
+    config.max_cores_per_hour = 1;
+
+    // First crash: the store rejects the core upload -> run() errors, slot refunded.
+    let failing: Arc<dyn ObjectStore> = Arc::new(FailCoreStore {
+        inner: Arc::new(InMemory::new()),
+    });
+    let args = CaptureArgs {
+        host_pid: pid,
+        signal: 11,
+        timestamp: 1_749_600_000,
+        exe: "!usr!bin!crasher".into(),
+    };
+    let mut core_in: &[u8] = b"core payload";
+    assert!(
+        run(args, &config, &mut core_in, Some(failing))
+            .await
+            .is_err(),
+        "core upload failure must surface as an error"
+    );
+
+    // Second crash: budget of 1 must still be available.
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+    let args = CaptureArgs {
+        host_pid: pid,
+        signal: 11,
+        timestamp: 1_749_600_010,
+        exe: "!usr!bin!crasher".into(),
+    };
+    let mut core_in: &[u8] = b"core payload";
+    run(args, &config, &mut core_in, Some(store.clone()))
+        .await
+        .unwrap();
+
+    let core_key = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010);
+    get_object(&store, &core_key).await;
+    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let manifest: Manifest =
+        serde_json::from_slice(&get_object(&store, &manifest_key).await).unwrap();
+    assert!(manifest.core.present, "refunded budget must allow the core");
+    assert!(manifest.core.skipped_reason.is_none());
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 /// 2a -- no store: run completes Ok, core discarded, no manifest written.
 #[tokio::test]
 async fn handler_run_without_store_discards_silently() {
@@ -383,6 +440,98 @@ impl ObjectStore for FailManifestStore {
         location: &ObjectPath,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+// ── FailCoreStore ─────────────────────────────────────────────────────────────
+//
+// Rejects `-core.zst` writes on both the single-put and multipart paths
+// (BufWriter picks per payload size); everything else delegates. Used in the
+// rate-limit refund test.
+
+struct FailCoreStore {
+    inner: Arc<InMemory>,
+}
+
+impl fmt::Display for FailCoreStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FailCoreStore")
+    }
+}
+
+impl fmt::Debug for FailCoreStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FailCoreStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for FailCoreStore {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        if location.as_ref().ends_with("-core.zst") {
+            return Err(object_store::Error::Generic {
+                store: "FailCoreStore",
+                source: Box::new(std::io::Error::other("injected core upload failure")),
+            });
+        }
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        if location.as_ref().ends_with("-core.zst") {
+            return Err(object_store::Error::Generic {
+                store: "FailCoreStore",
+                source: Box::new(std::io::Error::other("injected core upload failure")),
+            });
+        }
         self.inner.put_multipart_opts(location, opts).await
     }
 

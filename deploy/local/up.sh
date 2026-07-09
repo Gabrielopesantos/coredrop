@@ -40,6 +40,10 @@ helm upgrade --install "$RELEASE" "$REPO_ROOT/charts/coredrop" \
 
 log "applying demo crash workload -> namespace $DEMO_NAMESPACE"
 kubectl apply -n "$DEMO_NAMESPACE" -f "$SCRIPT_DIR/workloads/segfault.yaml" >/dev/null
+# Restart the workload so re-ups get a fresh container id: the per-container
+# rate-limit budget (/run/coredrop/recent.json on the node) survives helm
+# uninstall, and a re-used container would start smoke already suppressed.
+kubectl -n "$DEMO_NAMESPACE" rollout restart deployment/crash-segfault >/dev/null 2>&1 || true
 
 log "workload applied; it faults on a short loop. Running smoke test (polls the bucket)"
 "$SCRIPT_DIR/smoke.sh"

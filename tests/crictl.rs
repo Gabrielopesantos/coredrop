@@ -3,6 +3,11 @@ use std::os::unix::fs::PermissionsExt;
 use coredrop::config::HandlerConfig;
 use coredrop::crictl;
 
+/// Serializes tests that write executable scripts and spawn subprocesses.
+/// Without it, a concurrent test's fork can inherit another test's open
+/// write-fd for a script, making that script's exec fail with ETXTBSY.
+static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn unique_tmp(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -47,6 +52,7 @@ const FAKE_CRICTL_JSON: &str = r#"{
 /// extracted correctly.
 #[tokio::test]
 async fn inspect_fake_script_parses_container_info() {
+    let _guard = SPAWN_LOCK.lock().await;
     let tmp = unique_tmp("fake");
     std::fs::create_dir_all(&tmp).unwrap();
 
@@ -73,6 +79,7 @@ async fn inspect_fake_script_parses_container_info() {
 /// 2b - non-zero exit: crictl exits 1 → inspect degrades to None.
 #[tokio::test]
 async fn inspect_nonzero_exit_returns_none() {
+    let _guard = SPAWN_LOCK.lock().await;
     let tmp = unique_tmp("fail");
     std::fs::create_dir_all(&tmp).unwrap();
 
@@ -89,6 +96,7 @@ async fn inspect_nonzero_exit_returns_none() {
 /// 2b - nonexistent binary: spawn fails → inspect degrades to None, no panic.
 #[tokio::test]
 async fn inspect_nonexistent_binary_returns_none() {
+    let _guard = SPAWN_LOCK.lock().await;
     let config = config_with_crictl("/nonexistent/path/to/crictl");
     let info = crictl::inspect("any-id", &config).await;
     assert!(info.is_none(), "missing binary must degrade to None");

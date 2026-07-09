@@ -102,6 +102,12 @@ pub async fn run(
     );
 
     let identity = read_cgroup_identity(proc_root, args.host_pid);
+    if identity.is_none() {
+        warn!(
+            host_pid = args.host_pid,
+            "no kubernetes cgroup identity resolved; uploads will be skipped"
+        );
+    }
     let cluster = config.cluster.as_str();
     let store = store_override.or_else(|| config.object_store());
 
@@ -142,10 +148,22 @@ pub async fn run(
             store.as_ref(),
         )
     };
-    let stats = backend
+    let stats = match backend
         .drain_core(core_in)
         .await
-        .context("draining core stream")?;
+        .context("draining core stream")
+    {
+        Ok(stats) => stats,
+        Err(e) => {
+            info!(
+                outcome = Outcome::Failed.as_str(),
+                host_pid = args.host_pid,
+                error = %e,
+                "capture complete"
+            );
+            return Err(e);
+        }
+    };
     let uploaded = stats.sha256.is_some();
     info!(
         core_bytes = stats.bytes,
@@ -265,7 +283,59 @@ pub async fn run(
         _ => warn!("no store or no cgroup identity; manifest skipped"),
     }
 
+    // One summary line per capture, whatever the path taken - the log
+    // interface operators alert on.
+    let outcome = if identity.is_none() {
+        Outcome::SkippedNonK8s
+    } else if rate_suppressed {
+        Outcome::SuppressedRateLimit
+    } else if config.backend_kind() == CaptureBackendKind::SystemdCoredump {
+        Outcome::ForwardedSystemd
+    } else if store.is_none() {
+        Outcome::NoStoreDiscard
+    } else if uploaded {
+        Outcome::Uploaded
+    } else {
+        Outcome::Failed
+    };
+    info!(
+        outcome = outcome.as_str(),
+        host_pid = args.host_pid,
+        container_id = identity
+            .as_ref()
+            .map(|id| id.container_id.as_str())
+            .unwrap_or("<none>"),
+        core_key = core_key.as_deref().unwrap_or("<none>"),
+        core_bytes = stats.bytes,
+        truncated = stats.truncated,
+        "capture complete"
+    );
+
     Ok(())
+}
+
+/// Terminal state of one capture, for the single `capture complete` summary
+/// log line.
+enum Outcome {
+    Uploaded,
+    ForwardedSystemd,
+    SuppressedRateLimit,
+    SkippedNonK8s,
+    NoStoreDiscard,
+    Failed,
+}
+
+impl Outcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Uploaded => "uploaded",
+            Outcome::ForwardedSystemd => "forwarded-systemd",
+            Outcome::SuppressedRateLimit => "suppressed-rate-limit",
+            Outcome::SkippedNonK8s => "skipped-non-k8s",
+            Outcome::NoStoreDiscard => "no-store-discard",
+            Outcome::Failed => "failed",
+        }
+    }
 }
 
 fn build_backend(

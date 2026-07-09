@@ -26,6 +26,7 @@ use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::crictl;
 use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
+use crate::ratelimit::{RateDecision, RateLimiter};
 use crate::redact::Redactor;
 use crate::snapshot::ProcSnapshot;
 use crate::systemd::{self, SystemdCoredumpBackend};
@@ -108,14 +109,39 @@ pub async fn run(
         .as_ref()
         .map(|id| upload::core_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp));
 
+    // Rate limit: consult only when a core would actually upload (standalone
+    // backend with identity + store). The systemd backend owns its own limits.
+    let rate_suppressed = match (&identity, &store, config.backend_kind()) {
+        (Some(id), Some(_), CaptureBackendKind::Standalone) => {
+            let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
+            match limiter.check_and_record(&id.container_id, args.timestamp) {
+                RateDecision::Suppressed { recent } => {
+                    warn!(
+                        container_id = %id.container_id,
+                        recent,
+                        max_per_hour = config.max_cores_per_hour,
+                        "per-container core budget exhausted - discarding core, keeping snapshot + manifest"
+                    );
+                    true
+                }
+                RateDecision::Allowed => false,
+            }
+        }
+        _ => false,
+    };
+
     // Step 2: Drain core (releases the kernel's pipe).
-    let backend = build_backend(
-        config,
-        &snapshot,
-        &args,
-        core_key.as_deref(),
-        store.as_ref(),
-    );
+    let backend: Box<dyn CaptureBackend> = if rate_suppressed {
+        Box::new(DiscardBackend)
+    } else {
+        build_backend(
+            config,
+            &snapshot,
+            &args,
+            core_key.as_deref(),
+            store.as_ref(),
+        )
+    };
     let stats = backend
         .drain_core(core_in)
         .await
@@ -217,6 +243,7 @@ pub async fn run(
             },
             truncated: stats.truncated,
             truncated_reason: stats.truncated_reason.clone(),
+            skipped_reason: rate_suppressed.then(|| "rate_limit".to_string()),
             codec: "zstd".to_string(),
         },
         proc_snapshot: proc_ref,

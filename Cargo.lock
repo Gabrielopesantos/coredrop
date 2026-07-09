@@ -296,6 +296,7 @@ dependencies = [
  "clap",
  "futures-util",
  "object_store",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

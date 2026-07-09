@@ -71,6 +71,11 @@ struct DaemonArgs {
     /// remainder of the stream is drained but not stored.
     #[arg(long, env = "CAPTURE_MAX_CORE_BYTES", default_value_t = coredrop::config::DEFAULT_MAX_CORE_BYTES)]
     max_core_bytes: u64,
+
+    /// Max core uploads per container per hour; 0 = unlimited. Suppressed
+    /// crashes still get a proc snapshot and manifest, just no core.
+    #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = coredrop::config::DEFAULT_MAX_CORES_PER_HOUR)]
+    max_cores_per_hour: u32,
 }
 
 impl DaemonArgs {
@@ -89,6 +94,8 @@ impl DaemonArgs {
             crictl_path: self.crictl_path.clone(),
             cri_runtime_endpoint: self.cri_runtime_endpoint.clone(),
             max_core_bytes: self.max_core_bytes,
+            max_cores_per_hour: self.max_cores_per_hour,
+            rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
         }
     }
 }

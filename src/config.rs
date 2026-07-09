@@ -24,6 +24,26 @@ fn default_max_core_bytes() -> u64 {
     DEFAULT_MAX_CORE_BYTES
 }
 
+/// Default per-container core-upload budget per hour.
+pub const DEFAULT_MAX_CORES_PER_HOUR: u32 = 3;
+
+fn default_max_cores_per_hour() -> u32 {
+    DEFAULT_MAX_CORES_PER_HOUR
+}
+
+fn default_rate_state_path() -> String {
+    "/run/coredrop/recent.json".to_string()
+}
+
+/// Rate-limit state file derived from the handler-config path: a `recent.json`
+/// sibling on the same hostPath, so no extra flag or mount is needed.
+pub fn rate_state_path_for(config_path: &str) -> String {
+    Path::new(config_path)
+        .parent()
+        .map(|p| p.join("recent.json").to_string_lossy().into_owned())
+        .unwrap_or_else(default_rate_state_path)
+}
+
 /// Everything the kernel-exec'd handler needs that env can't deliver. The
 /// daemon fills it from its own env and writes it; the handler reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +72,13 @@ pub struct HandlerConfig {
     /// written by older daemons parseable).
     #[serde(default = "default_max_core_bytes")]
     pub max_core_bytes: u64,
+    /// Max core uploads per container per hour; `0` = unlimited. Suppressed
+    /// crashes still get a proc snapshot and manifest, just no core.
+    #[serde(default = "default_max_cores_per_hour")]
+    pub max_cores_per_hour: u32,
+    /// Rate-limit state file, sibling of the handler config on the hostPath.
+    #[serde(default = "default_rate_state_path")]
+    pub rate_state_path: String,
 }
 
 impl Default for HandlerConfig {
@@ -67,6 +94,8 @@ impl Default for HandlerConfig {
             crictl_path: "/usr/local/bin/crictl".to_string(),
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
+            max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
+            rate_state_path: default_rate_state_path(),
         }
     }
 }
@@ -100,6 +129,14 @@ impl HandlerConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_MAX_CORE_BYTES),
+            max_cores_per_hour: std::env::var("CAPTURE_MAX_CORES_PER_HOUR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_MAX_CORES_PER_HOUR),
+            rate_state_path: rate_state_path_for(
+                &std::env::var("CAPTURE_CONFIG_PATH")
+                    .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
+            ),
         }
     }
 
@@ -171,6 +208,8 @@ mod tests {
             crictl_path: "/usr/local/bin/crictl".into(),
             cri_runtime_endpoint: Some("unix:///run/containerd/containerd.sock".into()),
             max_core_bytes: 1024,
+            max_cores_per_hour: 5,
+            rate_state_path: "/run/coredrop/recent.json".into(),
         };
         let path = tmp("rt");
         cfg.write(&path).unwrap();

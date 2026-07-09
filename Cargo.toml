@@ -48,6 +48,9 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# flock for the rate-limit state file (already transitive via tar -> xattr)
+rustix = { version = "1", features = ["fs"] }
+
 # Errors
 anyhow = "1"
 

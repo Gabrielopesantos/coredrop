@@ -6,6 +6,7 @@ pub mod core_pattern;
 pub mod crictl;
 pub mod handler;
 pub mod manifest;
+pub mod ratelimit;
 pub mod redact;
 pub mod snapshot;
 pub mod systemd;

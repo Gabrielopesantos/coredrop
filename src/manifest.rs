@@ -64,6 +64,10 @@ pub struct CoreRef {
     /// `forward_failed`. Absent when not truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated_reason: Option<String>,
+    /// Why no core was stored despite a configured store: `rate_limit`.
+    /// Absent when a core is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
     /// Compression codec applied to the stored object.
     pub codec: String,
 }
@@ -108,6 +112,7 @@ mod tests {
                 stored_bytes: Some(200_000),
                 truncated: false,
                 truncated_reason: None,
+                skipped_reason: None,
                 codec: "zstd".into(),
             },
             proc_snapshot: Some(ProcSnapshotRef {

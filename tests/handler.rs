@@ -61,7 +61,14 @@ fn base_config(proc_dir: &std::path::Path) -> HandlerConfig {
         store_options: vec![],
         crictl_path: "/bin/false".into(), // degraded -- cgroup-only identity
         cri_runtime_endpoint: None,
-        max_core_bytes: 0, // unlimited -- cap behavior tested explicitly
+        max_core_bytes: 0,     // unlimited -- cap behavior tested explicitly
+        max_cores_per_hour: 0, // unlimited -- rate limit tested explicitly
+        rate_state_path: proc_dir
+            .parent()
+            .unwrap()
+            .join("recent.json")
+            .to_string_lossy()
+            .into_owned(),
     }
 }
 
@@ -215,6 +222,58 @@ async fn handler_run_size_cap_truncates_stored_core() {
         Some(core_payload.len() as u64),
         "size_bytes records the full drained size"
     );
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// 2a -- rate limit: with a budget of 1, the second crash gets no core object
+/// but still gets a proc snapshot and a manifest marked `rate_limit`.
+#[tokio::test]
+async fn handler_run_rate_limit_suppresses_core_keeps_manifest() {
+    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+    let container_id = "abc123def456abc123def456";
+    let pid = 4244;
+
+    let tmp = unique_tmp("ratelimit");
+    let proc_dir = tmp.join("proc");
+    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(&proc_dir);
+    config.max_cores_per_hour = 1;
+
+    for (i, ts) in [1_749_600_000i64, 1_749_600_010].into_iter().enumerate() {
+        let args = CaptureArgs {
+            host_pid: pid,
+            signal: 11,
+            timestamp: ts,
+            exe: "!usr!bin!crasher".into(),
+        };
+        let mut core_in: &[u8] = b"core payload for rate limit test";
+        run(args, &config, &mut core_in, Some(store.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("run {i} failed: {e}"));
+    }
+
+    // First crash: full capture.
+    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000);
+    get_object(&store, &core1).await;
+
+    // Second crash: no core object...
+    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010);
+    assert!(
+        store.get(&ObjectPath::from(core2.as_str())).await.is_err(),
+        "suppressed crash must not store a core"
+    );
+    // ...but proc snapshot and manifest are still written.
+    let snap2 = upload::proc_snapshot_object_key("test", pod_uid, container_id, 1_749_600_010);
+    get_object(&store, &snap2).await;
+    let manifest2_key = upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let manifest2: Manifest =
+        serde_json::from_slice(&get_object(&store, &manifest2_key).await).unwrap();
+    assert!(!manifest2.core.present);
+    assert!(manifest2.core.object_key.is_none());
+    assert_eq!(manifest2.core.skipped_reason.as_deref(), Some("rate_limit"));
 
     std::fs::remove_dir_all(&tmp).ok();
 }

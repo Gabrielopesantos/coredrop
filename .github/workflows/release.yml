@@ -32,8 +32,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
       - name: Build image (native arch)
         run: nix build .#image
       - name: Push per-arch image
@@ -41,9 +41,9 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION#app-v}"
-          nix run nixpkgs#skopeo -- login ghcr.io \
+          nix develop -c skopeo login ghcr.io \
             -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
-          nix run nixpkgs#skopeo -- copy \
+          nix develop -c skopeo copy \
             "docker-archive:$(readlink -f result)" \
             "docker://${IMAGE}:${VERSION}-${{ matrix.arch }}"
 
@@ -71,20 +71,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
       - name: Guard tag matches Chart.yaml version
         env:
           TAG: ${{ github.ref_name }}
         run: |
           TAG_VER="${TAG#chart-v}"
-          CHART_VER="$(nix run nixpkgs#yq-go -- '.version' charts/coredrop/Chart.yaml)"
+          CHART_VER="$(nix develop -c yq '.version' charts/coredrop/Chart.yaml)"
           if [ "$TAG_VER" != "$CHART_VER" ]; then
             echo "tag $TAG_VER != Chart.yaml version $CHART_VER" >&2
             exit 1
           fi
       - name: Package and push chart
         run: |
-          nix run nixpkgs#kubernetes-helm -- registry login ghcr.io \
+          nix develop -c helm registry login ghcr.io \
             -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
-          nix run nixpkgs#kubernetes-helm -- package charts/coredrop
-          nix run nixpkgs#kubernetes-helm -- push coredrop-*.tgz "${CHART_REPO}"
+          nix develop -c helm package charts/coredrop
+          nix develop -c helm push coredrop-*.tgz "${CHART_REPO}"

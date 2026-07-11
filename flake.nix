@@ -1,7 +1,7 @@
 {
   description = "coredrop - standalone Kubernetes coredump handler";
 
-  inputs.nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0";
+  inputs.nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/*";
 
   outputs =
     { self, ... }@inputs:
@@ -15,7 +15,10 @@
         inputs.nixpkgs.lib.genAttrs supportedSystems (
           system:
           f {
-            pkgs = import inputs.nixpkgs {
+            # Clean pkgs for the release binary/image - no unfree/insecure config.
+            pkgs = import inputs.nixpkgs { inherit system; };
+            # devShell-only pkgs: lima needs allowUnfree + an insecure permit.
+            devPkgs = import inputs.nixpkgs {
               inherit system;
               config = {
                 allowUnfree = true;
@@ -27,10 +30,10 @@
     in
     {
       devShells = forEachSupportedSystem (
-        { pkgs }:
+        { devPkgs, ... }:
         {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
+          default = devPkgs.mkShell {
+            packages = with devPkgs; [
               cargo
               rustc
               clippy
@@ -47,9 +50,12 @@
               podman
               minio-client # `mc`
               zstd
+              # CI/release tooling, resolved through the pinned flake input.
+              skopeo
+              yq-go
             ];
             env = {
-              RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+              RUST_SRC_PATH = "${devPkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
             };
             shellHook = ''
               echo "dev shell"
@@ -60,7 +66,7 @@
       );
 
       packages = forEachSupportedSystem (
-        { pkgs }:
+        { pkgs, ... }:
         let
           pkg = (fromTOML (builtins.readFile ./Cargo.toml)).package;
           # Static (musl) build: the daemon installs this binary onto the node

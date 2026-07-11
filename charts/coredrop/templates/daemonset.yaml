@@ -52,15 +52,9 @@ spec:
               value: "{{ .Values.capture.hostRunDir }}/handler.json"
             - name: CAPTURE_CLUSTER
               value: {{ .Values.capture.cluster | quote }}
-            - name: CAPTURE_BACKEND
-              value: {{ .Values.capture.backend | quote }}
             {{- if .Values.capture.noRedact }}
             - name: CAPTURE_NO_REDACT
               value: "true"
-            {{- end }}
-            {{- if .Values.capture.systemdCoredumpPath }}
-            - name: CAPTURE_SYSTEMD_COREDUMP_PATH
-              value: {{ .Values.capture.systemdCoredumpPath | quote }}
             {{- end }}
             - name: CAPTURE_MAX_CORE_BYTES
               value: {{ .Values.capture.maxCoreBytes | int64 | quote }}

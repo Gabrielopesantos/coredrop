@@ -24,7 +24,7 @@ use object_store::ObjectStore;
 use tokio::io::AsyncRead;
 use tracing::{debug, info, warn};
 
-use crate::backend::{CaptureBackend, CaptureBackendKind, DiscardBackend};
+use crate::backend::{CaptureBackend, DiscardBackend};
 use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::crictl;
@@ -33,7 +33,6 @@ use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
 use crate::ratelimit::{RateDecision, RateLimiter};
 use crate::redact::Redactor;
 use crate::snapshot::ProcSnapshot;
-use crate::systemd::{self, SystemdCoredumpBackend};
 use crate::upload::{self, StandaloneBackend};
 
 /// The positional args the kernel passes after the `capture` subcommand,
@@ -132,12 +131,12 @@ pub async fn run(
         .as_ref()
         .map(|id| upload::core_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp));
 
-    // Rate limit: consult only when a core would actually upload (standalone
-    // backend with identity + store). The systemd backend owns its own limits.
+    // Rate limit: consult only when a core would actually upload
+    // (identity + store resolved).
     let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
     let mut rate_recorded = false;
-    let rate_suppressed = match (&identity, &store, config.backend_kind()) {
-        (Some(id), Some(_), CaptureBackendKind::Standalone) => {
+    let rate_suppressed = match (&identity, &store) {
+        (Some(id), Some(_)) => {
             match limiter.check_and_record(&id.container_id, args.timestamp) {
                 RateDecision::Suppressed { recent } => {
                     warn!(
@@ -160,14 +159,16 @@ pub async fn run(
     // Step 2: Drain core (releases the kernel's pipe).
     let backend: Box<dyn CaptureBackend> = if rate_suppressed {
         Box::new(DiscardBackend)
+    } else if let (Some(key), Some(store)) = (core_key.as_deref(), store.as_ref()) {
+        info!(key = %key, "streaming core to object store");
+        Box::new(StandaloneBackend::new(
+            store.clone(),
+            key,
+            config.max_core_bytes,
+        ))
     } else {
-        build_backend(
-            config,
-            &snapshot,
-            &args,
-            core_key.as_deref(),
-            store.as_ref(),
-        )
+        info!("no object store configured or identity unresolved; discarding core");
+        Box::new(DiscardBackend)
     };
     let stats = match backend
         .drain_core(core_in)
@@ -269,7 +270,7 @@ pub async fn run(
         schema_version: 1,
         captured_at: format_timestamp(args.timestamp),
         cluster: cluster.to_string(),
-        node: systemd::node_hostname(),
+        node: node_hostname(),
         signal: args.signal,
         signal_name: signal_name(args.signal).map(str::to_string),
         exe: args.exe.clone(),
@@ -324,8 +325,6 @@ pub async fn run(
         Outcome::SkippedNonK8s
     } else if rate_suppressed {
         Outcome::SuppressedRateLimit
-    } else if config.backend_kind() == CaptureBackendKind::SystemdCoredump {
-        Outcome::ForwardedSystemd
     } else if store.is_none() {
         Outcome::NoStoreDiscard
     } else if uploaded {
@@ -380,65 +379,15 @@ pub async fn run(
     Ok(())
 }
 
-fn build_backend(
-    config: &HandlerConfig,
-    snapshot: &ProcSnapshot,
-    args: &CaptureArgs,
-    object_key: Option<&str>,
-    store: Option<&Arc<dyn ObjectStore>>,
-) -> Box<dyn CaptureBackend> {
-    match config.backend_kind() {
-        CaptureBackendKind::SystemdCoredump => {
-            let program = config
-                .systemd_coredump_path
-                .clone()
-                .unwrap_or_else(|| systemd::DEFAULT_SYSTEMD_COREDUMP_PATH.to_string());
-            let uid = snapshot_file(snapshot, "status")
-                .and_then(|s| systemd::status_first_field(s, "Uid:"))
-                .unwrap_or_else(|| "0".to_string());
-            let gid = snapshot_file(snapshot, "status")
-                .and_then(|s| systemd::status_first_field(s, "Gid:"))
-                .unwrap_or_else(|| "0".to_string());
-            let core_limit = snapshot_file(snapshot, "limits")
-                .and_then(systemd::parse_core_limit)
-                .unwrap_or_else(|| u64::MAX.to_string());
-            let hostname = systemd::node_hostname();
-            info!(program = %program, "forwarding core to systemd-coredump (chaining backend)");
-            Box::new(SystemdCoredumpBackend::new(
-                program,
-                systemd::build_forward_args(
-                    args.host_pid,
-                    &uid,
-                    &gid,
-                    args.signal,
-                    args.timestamp,
-                    &core_limit,
-                    &hostname,
-                ),
-            ))
-        }
-        CaptureBackendKind::Standalone => {
-            if let (Some(key), Some(store)) = (object_key, store) {
-                info!(key = %key, "streaming core to object store (standalone backend)");
-                Box::new(StandaloneBackend::new(
-                    store.clone(),
-                    key,
-                    config.max_core_bytes,
-                ))
-            } else {
-                info!("no object store configured or identity unresolved; discarding core");
-                Box::new(DiscardBackend)
-            }
-        }
-    }
-}
-
-fn snapshot_file<'a>(snapshot: &'a ProcSnapshot, name: &str) -> Option<&'a [u8]> {
-    snapshot
-        .files
-        .iter()
-        .find(|f| f.name == name)
-        .map(|f| f.bytes.as_slice())
+/// The node hostname for the manifest and k8s Events. Reads
+/// `/proc/sys/kernel/hostname`; falls back to `localhost`.
+#[must_use]
+pub fn node_hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
 }
 
 fn read_cgroup_identity(proc_root: &Path, pid: i32) -> Option<CgroupIdentity> {

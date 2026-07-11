@@ -11,7 +11,6 @@ pub mod manifest;
 pub mod ratelimit;
 pub mod redact;
 pub mod snapshot;
-pub mod systemd;
 pub mod upload;
 
 /// Host path the `DaemonSet` installs the binary to, so the kernel can exec it as

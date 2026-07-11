@@ -55,10 +55,8 @@ fn write_fixture_proc(proc_dir: &std::path::Path, pid: i32, pod_uid: &str, conta
 fn base_config(proc_dir: &std::path::Path) -> HandlerConfig {
     HandlerConfig {
         cluster: "test".into(),
-        backend: "standalone".into(),
         no_redact: false,
         proc_root: proc_dir.to_str().unwrap().to_string(),
-        systemd_coredump_path: None,
         store_url: None,
         store_options: vec![],
         crictl_path: "/bin/false".into(), // degraded -- cgroup-only identity

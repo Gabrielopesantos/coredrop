@@ -23,7 +23,6 @@ use tracing::warn;
 #[serde(rename_all = "kebab-case")]
 pub enum Outcome {
     Uploaded,
-    ForwardedSystemd,
     SuppressedRateLimit,
     SkippedNonK8s,
     NoStoreDiscard,
@@ -35,7 +34,6 @@ impl Outcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Outcome::Uploaded => "uploaded",
-            Outcome::ForwardedSystemd => "forwarded-systemd",
             Outcome::SuppressedRateLimit => "suppressed-rate-limit",
             Outcome::SkippedNonK8s => "skipped-non-k8s",
             Outcome::NoStoreDiscard => "no-store-discard",

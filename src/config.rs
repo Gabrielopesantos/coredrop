@@ -12,7 +12,6 @@ use anyhow::{Context, Result};
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::CaptureBackendKind;
 use crate::upload;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/run/coredrop/handler.json";
@@ -66,14 +65,10 @@ pub fn event_socket_path_for(config_path: &str) -> String {
 pub struct HandlerConfig {
     /// Cluster name - the first path segment of the object key.
     pub cluster: String,
-    /// Capture backend selector: `standalone` (default) | `systemd-coredump`.
-    pub backend: String,
     /// Pass `environ` through un-redacted.
     pub no_redact: bool,
     /// `/proc` root (overridable for tests / non-standard layouts).
     pub proc_root: String,
-    /// systemd-coredump binary path for the chaining backend.
-    pub systemd_coredump_path: Option<String>,
     /// Object-store URL (e.g. `s3://crash-artifacts`); `None` disables upload.
     pub store_url: Option<String>,
     /// `object_store` config options (the `AWS_*` / cloud keys) forwarded verbatim.
@@ -106,10 +101,8 @@ impl Default for HandlerConfig {
     fn default() -> Self {
         Self {
             cluster: "local".to_string(),
-            backend: "standalone".to_string(),
             no_redact: false,
             proc_root: "/proc".to_string(),
-            systemd_coredump_path: None,
             store_url: None,
             store_options: Vec::new(),
             crictl_path: "/usr/local/bin/crictl".to_string(),
@@ -133,10 +126,8 @@ impl HandlerConfig {
         let store_options = upload::store_options_from_env();
         Self {
             cluster: std::env::var("CAPTURE_CLUSTER").unwrap_or_else(|_| "local".to_string()),
-            backend: std::env::var("CAPTURE_BACKEND").unwrap_or_else(|_| "standalone".to_string()),
             no_redact: env_flag("CAPTURE_NO_REDACT"),
             proc_root: std::env::var("CAPTURE_PROC_ROOT").unwrap_or_else(|_| "/proc".to_string()),
-            systemd_coredump_path: std::env::var("CAPTURE_SYSTEMD_COREDUMP_PATH").ok(),
             store_url,
             store_options,
             crictl_path: std::env::var("CRICTL_PATH")
@@ -200,11 +191,6 @@ impl HandlerConfig {
     }
 
     #[must_use]
-    pub fn backend_kind(&self) -> CaptureBackendKind {
-        CaptureBackendKind::parse(&self.backend)
-    }
-
-    #[must_use]
     pub fn object_store(&self) -> Option<Arc<dyn ObjectStore>> {
         let url = self.store_url.as_deref()?;
         upload::object_store_from_url_opts(url, self.store_options.clone())
@@ -233,10 +219,8 @@ mod tests {
     fn write_then_read_round_trips() {
         let cfg = HandlerConfig {
             cluster: "prod".into(),
-            backend: "standalone".into(),
             no_redact: true,
             proc_root: "/proc".into(),
-            systemd_coredump_path: Some("/usr/lib/systemd/systemd-coredump".into()),
             store_url: Some("s3://crash-artifacts".into()),
             store_options: vec![
                 ("AWS_ACCESS_KEY_ID".into(), "minioadmin".into()),
@@ -267,14 +251,6 @@ mod tests {
             event_socket_path_for("/run/coredrop/handler.json"),
             "/run/coredrop/events.sock"
         );
-    }
-
-    #[test]
-    fn backend_kind_parses_from_config() {
-        let mut cfg = HandlerConfig::default();
-        assert_eq!(cfg.backend_kind(), CaptureBackendKind::Standalone);
-        cfg.backend = "systemd-coredump".into();
-        assert_eq!(cfg.backend_kind(), CaptureBackendKind::SystemdCoredump);
     }
 
     #[test]

@@ -38,10 +38,6 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_CLUSTER", default_value = "local")]
     cluster: String,
 
-    /// Capture backend: `standalone` (default) | `systemd-coredump`.
-    #[arg(long, env = "CAPTURE_BACKEND", default_value = "standalone")]
-    backend: String,
-
     /// Pass `environ` through un-redacted.
     #[arg(long, env = "CAPTURE_NO_REDACT")]
     no_redact: bool,
@@ -49,10 +45,6 @@ struct DaemonArgs {
     /// `/proc` root (overridable for tests / non-standard layouts).
     #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = "/proc")]
     proc_root: String,
-
-    /// systemd-coredump binary path for the chaining backend.
-    #[arg(long, env = "CAPTURE_SYSTEMD_COREDUMP_PATH")]
-    systemd_coredump_path: Option<String>,
 
     /// Object-store URL for the streamed core (e.g. `s3://crash-artifacts`);
     /// unset disables upload. Store creds come from env (`AWS_*` etc.), not flags.
@@ -88,10 +80,8 @@ impl DaemonArgs {
         let store_options = coredrop::upload::store_options_from_env();
         HandlerConfig {
             cluster: self.cluster.clone(),
-            backend: self.backend.clone(),
             no_redact: self.no_redact,
             proc_root: self.proc_root.clone(),
-            systemd_coredump_path: self.systemd_coredump_path.clone(),
             store_url: self.store_url.clone().filter(|s| !s.is_empty()),
             store_options,
             crictl_path: self.crictl_path.clone(),
@@ -138,7 +128,6 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     info!(
         handler = %args.handler_path,
         config = %args.config_path,
-        backend = %args.backend,
         cluster = %args.cluster,
         "coredrop starting"
     );
@@ -196,7 +185,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     };
 
     if let Some(socket) = events_socket {
-        let node = coredrop::systemd::node_hostname();
+        let node = coredrop::handler::node_hostname();
         tokio::spawn(coredrop::k8s_events::run_listener(socket, node));
     }
 

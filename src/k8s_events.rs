@@ -48,7 +48,6 @@ fn k8s_reason(outcome: Outcome) -> Option<&'static str> {
     match outcome {
         Outcome::Uploaded => Some("CoreDumped"),
         Outcome::SuppressedRateLimit => Some("CoreDumpSuppressed"),
-        Outcome::ForwardedSystemd => Some("CoreForwardedSystemd"),
         Outcome::NoStoreDiscard => Some("CoreDiscardedNoStore"),
         _ => None,
     }
@@ -364,10 +363,6 @@ mod tests {
         assert_eq!(
             k8s_reason(Outcome::SuppressedRateLimit),
             Some("CoreDumpSuppressed")
-        );
-        assert_eq!(
-            k8s_reason(Outcome::ForwardedSystemd),
-            Some("CoreForwardedSystemd")
         );
         assert_eq!(
             k8s_reason(Outcome::NoStoreDiscard),

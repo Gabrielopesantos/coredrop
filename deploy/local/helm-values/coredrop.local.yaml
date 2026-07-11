@@ -8,7 +8,6 @@ image:
 
 capture:
   cluster: "local"
-  backend: "standalone"
   objectStore:
     url: "s3://coredrop-cores"
     config:

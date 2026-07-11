@@ -22,13 +22,7 @@ hostPID: true
 capture:
   # Cluster name - the first segment of the object key.
   cluster: "local"
-  # Core sink: "standalone" (stream to object store) | "systemd-coredump"
-  # (chain to the node's systemd-coredump; core.present stays false in manifest).
-  backend: "standalone"
-  # Host path of systemd-coredump binary, for backend "systemd-coredump".
-  # Leave empty to use the daemon's built-in default.
-  systemdCoredumpPath: ""
-  # Truncate stored cores at this many bytes (2 GiB default).
+  # -- Truncate stored cores at this many bytes (2 GiB default).
   maxCoreBytes: 2147483648
   # Per-container core upload rate limit; excess crashes still get a manifest,
   # core payload is skipped.

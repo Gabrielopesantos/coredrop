@@ -50,8 +50,8 @@ pub struct ManifestIdentity {
 /// Reference to the captured core object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreRef {
-    /// Whether a core was actually stored (`false` for systemd-coredump backend
-    /// or when no store is configured).
+    /// Whether a core was actually stored (`false` when no store is
+    /// configured).
     pub present: bool,
     pub object_key: Option<String>,
     pub sha256: Option<String>,
@@ -60,8 +60,8 @@ pub struct CoreRef {
     /// Compressed size in bytes (what's stored in the object store).
     pub stored_bytes: Option<u64>,
     pub truncated: bool,
-    /// Why the core is truncated: `size_cap` | `stream_error` |
-    /// `forward_failed`. Absent when not truncated.
+    /// Why the core is truncated: `size_cap` | `stream_error`. Absent when
+    /// not truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated_reason: Option<String>,
     /// Why no core was stored despite a configured store: `rate_limit`.

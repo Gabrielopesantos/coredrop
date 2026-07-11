@@ -245,6 +245,17 @@ pub const ALLOWED_STORE_OPTS: &[&str] = &[
     "AZURE_STORAGE_TENANT_ID",
 ];
 
+/// Collect the `object_store` config options ([`ALLOWED_STORE_OPTS`]) present
+/// in the process environment. Shared by the daemon (building the config it
+/// writes for the handler) and the handler (its own `from_env` fallback when
+/// the daemon-written config is unreadable).
+#[must_use]
+pub fn store_options_from_env() -> Vec<(String, String)> {
+    std::env::vars()
+        .filter(|(k, _)| ALLOWED_STORE_OPTS.contains(&k.as_str()))
+        .collect()
+}
+
 /// Retry policy for cloud uploads. `object_store` defaults to 10 retries over
 /// 3 minutes; the handler may be holding the kernel's core pipe mid-multipart,
 /// so bound the worst case tighter.

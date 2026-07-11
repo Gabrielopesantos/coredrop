@@ -6,6 +6,7 @@ pub mod core_pattern;
 pub mod crictl;
 pub mod events;
 pub mod handler;
+pub mod k8s_events;
 pub mod manifest;
 pub mod ratelimit;
 pub mod redact;

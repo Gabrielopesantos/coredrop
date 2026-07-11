@@ -85,9 +85,7 @@ struct DaemonArgs {
 
 impl DaemonArgs {
     fn to_handler_config(&self) -> HandlerConfig {
-        let store_options = std::env::vars()
-            .filter(|(k, _)| coredrop::upload::ALLOWED_STORE_OPTS.contains(&k.as_str()))
-            .collect();
+        let store_options = coredrop::upload::store_options_from_env();
         HandlerConfig {
             cluster: self.cluster.clone(),
             backend: self.backend.clone(),
@@ -155,7 +153,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         info!("capture events disabled (--no-events)");
         None
     } else if let Some(path) = &config.event_socket_path {
-        match coredrop::events::bind_socket(path) {
+        match coredrop::k8s_events::bind_socket(path) {
             Ok(socket) => {
                 info!(path = %path, "capture event socket bound");
                 Some(socket)
@@ -199,7 +197,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
 
     if let Some(socket) = events_socket {
         let node = coredrop::systemd::node_hostname();
-        tokio::spawn(coredrop::events::run_listener(socket, node));
+        tokio::spawn(coredrop::k8s_events::run_listener(socket, node));
     }
 
     shutdown_signal().await?;

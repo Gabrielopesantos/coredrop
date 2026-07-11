@@ -13,7 +13,7 @@ use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::CaptureBackendKind;
-use crate::upload::{self, ALLOWED_STORE_OPTS};
+use crate::upload;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/run/coredrop/handler.json";
 
@@ -130,9 +130,7 @@ impl HandlerConfig {
         let store_url = std::env::var("CAPTURE_STORE_URL")
             .ok()
             .filter(|s| !s.is_empty());
-        let store_options: Vec<(String, String)> = std::env::vars()
-            .filter(|(k, _)| ALLOWED_STORE_OPTS.contains(&k.as_str()))
-            .collect();
+        let store_options = upload::store_options_from_env();
         Self {
             cluster: std::env::var("CAPTURE_CLUSTER").unwrap_or_else(|_| "local".to_string()),
             backend: std::env::var("CAPTURE_BACKEND").unwrap_or_else(|_| "standalone".to_string()),

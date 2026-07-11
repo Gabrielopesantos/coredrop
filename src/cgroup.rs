@@ -24,6 +24,7 @@ pub struct CgroupIdentity {
 /// Parse the contents of `/proc/<pid>/cgroup`. `None` for a process that is not
 /// a Kubernetes container - the handler then cannot build a key and skips the
 /// upload rather than guessing.
+#[must_use]
 pub fn parse_cgroup(content: &str) -> Option<CgroupIdentity> {
     content.lines().find_map(|line| {
         let path = line.rsplit(':').next().unwrap_or(line);
@@ -32,6 +33,7 @@ pub fn parse_cgroup(content: &str) -> Option<CgroupIdentity> {
 }
 
 /// Pull `(podUID, containerID)` out of one cgroup path.
+#[must_use]
 pub fn parse_cgroup_path(path: &str) -> Option<CgroupIdentity> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let pod_uid = segments.iter().find_map(|s| extract_pod_uid(s))?;
@@ -44,6 +46,7 @@ pub fn parse_cgroup_path(path: &str) -> Option<CgroupIdentity> {
 
 /// Pull the podUID from a pod-level cgroup slice path - the directory whose
 /// final segment names a pod but not a container.
+#[must_use]
 pub fn parse_pod_slice_path(path: &str) -> Option<String> {
     let last = path.split('/').rfind(|s| !s.is_empty())?;
     if extract_container_id(last).is_some() {
@@ -81,6 +84,7 @@ fn extract_container_id(seg: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

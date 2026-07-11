@@ -40,8 +40,9 @@ fn default_rate_state_path() -> String {
 pub fn rate_state_path_for(config_path: &str) -> String {
     Path::new(config_path)
         .parent()
-        .map(|p| p.join("recent.json").to_string_lossy().into_owned())
-        .unwrap_or_else(default_rate_state_path)
+        .map_or_else(default_rate_state_path, |p| {
+            p.join("recent.json").to_string_lossy().into_owned()
+        })
 }
 
 /// Everything the kernel-exec'd handler needs that env can't deliver. The
@@ -102,12 +103,9 @@ impl Default for HandlerConfig {
 
 impl HandlerConfig {
     /// Build from the daemon's environment.
+    #[must_use]
     pub fn from_env() -> Self {
-        let env_flag = |k: &str| {
-            std::env::var(k)
-                .map(|v| !v.is_empty() && v != "0")
-                .unwrap_or(false)
-        };
+        let env_flag = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty() && v != "0");
         let store_url = std::env::var("CAPTURE_STORE_URL")
             .ok()
             .filter(|s| !s.is_empty());
@@ -143,7 +141,13 @@ impl HandlerConfig {
     /// Read the config from `path`. `None` when absent or unparseable - the
     /// handler then falls back to [`Self::from_env`].
     pub fn read(path: &str) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::debug!(error = %e, path, "handler config not readable; falling back to env");
+                return None;
+            }
+        };
         match serde_json::from_slice(&bytes) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
@@ -155,6 +159,11 @@ impl HandlerConfig {
 
     /// Serialize the config to `path` (creating the parent dir), so the
     /// kernel-exec'd handler can read it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the parent dir cannot be created or the file cannot be
+    /// written.
     pub fn write(&self, path: &str) -> Result<()> {
         if let Some(parent) = Path::new(path).parent() {
             std::fs::create_dir_all(parent)
@@ -165,10 +174,12 @@ impl HandlerConfig {
         Ok(())
     }
 
+    #[must_use]
     pub fn backend_kind(&self) -> CaptureBackendKind {
         CaptureBackendKind::parse(&self.backend)
     }
 
+    #[must_use]
     pub fn object_store(&self) -> Option<Arc<dyn ObjectStore>> {
         let url = self.store_url.as_deref()?;
         upload::object_store_from_url_opts(url, self.store_options.clone())
@@ -176,6 +187,7 @@ impl HandlerConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

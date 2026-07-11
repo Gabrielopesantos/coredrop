@@ -16,15 +16,26 @@ const MAX_ELF_PREFIX: u64 = 2 * 1024 * 1024;
 
 /// Read the GNU build-id from an executable path (e.g. `/proc/<pid>/exe`).
 /// Returns `None` on any error - build-id is best-effort.
+#[must_use]
 pub fn build_id_from_path(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::debug!(error = %e, path = %path.display(), "opening exe for build-id failed; omitted");
+            return None;
+        }
+    };
     let mut buf = Vec::new();
-    file.take(MAX_ELF_PREFIX).read_to_end(&mut buf).ok()?;
+    if let Err(e) = file.take(MAX_ELF_PREFIX).read_to_end(&mut buf) {
+        tracing::debug!(error = %e, path = %path.display(), "reading exe for build-id failed; omitted");
+        return None;
+    }
     build_id_from_bytes(&buf)
 }
 
 /// Parse the GNU build-id out of an ELF image prefix, hex-encoded. `None` if
 /// the bytes are not an ELF we can parse or carry no build-id note.
+#[must_use]
 pub fn build_id_from_bytes(elf: &[u8]) -> Option<String> {
     if elf.len() < 64 || &elf[0..4] != b"\x7fELF" {
         return None;
@@ -43,14 +54,14 @@ pub fn build_id_from_bytes(elf: &[u8]) -> Option<String> {
     let (phoff, phentsize, phnum) = if is64 {
         (
             read_u64(elf, 0x20, le)?,
-            read_u16(elf, 0x36, le)? as u64,
-            read_u16(elf, 0x38, le)? as u64,
+            u64::from(read_u16(elf, 0x36, le)?),
+            u64::from(read_u16(elf, 0x38, le)?),
         )
     } else {
         (
-            read_u32(elf, 0x1C, le)? as u64,
-            read_u16(elf, 0x2A, le)? as u64,
-            read_u16(elf, 0x2C, le)? as u64,
+            u64::from(read_u32(elf, 0x1C, le)?),
+            u64::from(read_u16(elf, 0x2A, le)?),
+            u64::from(read_u16(elf, 0x2C, le)?),
         )
     };
 
@@ -129,15 +140,21 @@ fn read_u64(b: &[u8], o: usize, le: bool) -> Option<u64> {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+        s.push(char::from(HEX[usize::from(b >> 4)]));
+        s.push(char::from(HEX[usize::from(b & 0xf)]));
     }
     s
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation
+)]
 pub(crate) mod tests {
     use super::*;
 

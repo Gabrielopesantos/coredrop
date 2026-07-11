@@ -5,7 +5,7 @@
 //!     process the kernel exec's per fault. Snapshots `/proc`, drains the core
 //!     to the object store, enriches identity via crictl, writes a JSON
 //!     manifest sidecar.
-//!   - daemon (`coredrop`): the long-running DaemonSet container. Installs
+//!   - daemon (`coredrop`): the long-running `DaemonSet` container. Installs
 //!     `core_pattern` so faults route to the handler, writes the handler
 //!     config to a hostPath the kernel-exec'd handler can read (the kernel
 //!     exec's with a clean environment), and holds the restore guard until
@@ -26,7 +26,7 @@ use coredrop::handler::{CaptureArgs, run as run_handler};
 #[derive(Debug, Parser)]
 #[command(name = "coredrop", version, about)]
 struct DaemonArgs {
-    /// Host path the kernel exec's as the core_pattern handler.
+    /// Host path the kernel exec's as the `core_pattern` handler.
     #[arg(long, env = "CAPTURE_HANDLER_PATH", default_value = coredrop::DEFAULT_HANDLER_PATH)]
     handler_path: String,
 
@@ -116,14 +116,14 @@ async fn main() -> Result<()> {
     let _bin = argv.next();
     if argv.next().as_deref() == Some("capture") {
         let rest: Vec<String> = argv.collect();
-        let args = CaptureArgs::parse(&rest)?;
+        let capture_args = CaptureArgs::parse(&rest)?;
         // The kernel exec's with a clean environment, so read the daemon-written
         // hostPath config, not env. Absent (local/test runs) -> env.
         let config_path = std::env::var("CAPTURE_CONFIG_PATH")
             .unwrap_or_else(|_| coredrop::config::DEFAULT_CONFIG_PATH.to_string());
         let config = HandlerConfig::read(&config_path).unwrap_or_else(HandlerConfig::from_env);
         let mut stdin = tokio::io::stdin();
-        return run_handler(args, &config, &mut stdin, None).await;
+        return run_handler(capture_args, &config, &mut stdin, None).await;
     }
 
     run_daemon(DaemonArgs::parse()).await

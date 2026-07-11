@@ -27,6 +27,7 @@ pub enum CaptureBackendKind {
 
 impl CaptureBackendKind {
     /// Parse a deploy-time backend selector. Unknown / empty falls back to `Standalone`.
+    #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "systemd-coredump" | "systemd_coredump" | "systemd" => Self::SystemdCoredump,
@@ -100,6 +101,7 @@ impl CaptureBackend for DiscardBackend {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

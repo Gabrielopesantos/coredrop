@@ -29,12 +29,14 @@ const CORE_READ_CHUNK: usize = 256 * 1024;
 /// Build the core's object key: `{cluster}/{podUID}/{containerID}/{timestamp}-core.zst`.
 /// Handler-derivable from the cgroup - no UUIDs; the manifest carries the
 /// human-readable identity from crictl.
+#[must_use]
 pub fn core_object_key(cluster: &str, pod_uid: &str, container_id: &str, timestamp: i64) -> String {
     format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-core.zst")
 }
 
 /// Build the `/proc` snapshot's object key, mirroring `core_object_key`'s
 /// scheme - same prefix, distinct suffix.
+#[must_use]
 pub fn proc_snapshot_object_key(
     cluster: &str,
     pod_uid: &str,
@@ -45,6 +47,7 @@ pub fn proc_snapshot_object_key(
 }
 
 /// Build the JSON manifest's object key, sibling to the core.
+#[must_use]
 pub fn manifest_object_key(
     cluster: &str,
     pod_uid: &str,
@@ -57,6 +60,10 @@ pub fn manifest_object_key(
 /// Buffered single-shot PUT of a small object (the proc snapshot tar or the
 /// manifest JSON). Unlike the multi-GB core (which *streams*), these are
 /// bounded and already in memory.
+///
+/// # Errors
+///
+/// Fails when the object store PUT fails.
 pub async fn put_object(store: &Arc<dyn ObjectStore>, key: &str, bytes: Vec<u8>) -> Result<()> {
     store
         .put(&ObjectPath::from(key), PutPayload::from(bytes))
@@ -133,7 +140,9 @@ where
             Ok(0) => break,
             Ok(n) => {
                 drained += n as u64;
-                let take = (n as u64).min(cap.saturating_sub(written)) as usize;
+                // min() keeps the value <= n, so the conversion back to usize cannot fail.
+                let take =
+                    usize::try_from((n as u64).min(cap.saturating_sub(written))).unwrap_or(n);
                 if take > 0 {
                     encoder
                         .write_all(&buf[..take])
@@ -242,7 +251,7 @@ pub const ALLOWED_STORE_OPTS: &[&str] = &[
 fn retry_config() -> object_store::RetryConfig {
     object_store::RetryConfig {
         max_retries: 3,
-        retry_timeout: std::time::Duration::from_secs(60),
+        retry_timeout: std::time::Duration::from_mins(1),
         ..Default::default()
     }
 }
@@ -329,6 +338,7 @@ pub fn object_store_from_url_opts(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use async_compression::tokio::bufread::ZstdDecoder;

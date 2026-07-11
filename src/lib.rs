@@ -12,6 +12,6 @@ pub mod snapshot;
 pub mod systemd;
 pub mod upload;
 
-/// Host path the DaemonSet installs the binary to, so the kernel can exec it as
+/// Host path the `DaemonSet` installs the binary to, so the kernel can exec it as
 /// the `core_pattern` pipe target. Overridable via `CAPTURE_HANDLER_PATH`.
 pub const DEFAULT_HANDLER_PATH: &str = "/opt/coredrop/bin/coredrop";

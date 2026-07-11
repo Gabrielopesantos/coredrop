@@ -33,6 +33,7 @@ pub struct SystemdCoredumpBackend {
 }
 
 impl SystemdCoredumpBackend {
+    #[must_use]
     pub fn new(program: String, args: Vec<String>) -> Self {
         Self { program, args }
     }
@@ -110,6 +111,7 @@ where
 
 /// Build systemd-coredump's canonical `%P %u %g %s %t %c %h` positional
 /// argument vector.
+#[must_use]
 pub fn build_forward_args(
     host_pid: i32,
     uid: &str,
@@ -132,11 +134,15 @@ pub fn build_forward_args(
 
 /// Read the first whitespace-delimited field of a `/proc/<pid>/status` line
 /// whose label is `key` (e.g. `Uid:` / `Gid:`).
+#[must_use]
 pub fn status_first_field(status: &[u8], key: &str) -> Option<String> {
     let text = String::from_utf8_lossy(status);
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix(key) {
-            return rest.split_whitespace().next().map(|s| s.to_string());
+            return rest
+                .split_whitespace()
+                .next()
+                .map(std::string::ToString::to_string);
         }
     }
     None
@@ -144,6 +150,7 @@ pub fn status_first_field(status: &[u8], key: &str) -> Option<String> {
 
 /// Recover systemd-coredump's `%c` (core-size soft limit) from a
 /// `/proc/<pid>/limits` snapshot.
+#[must_use]
 pub fn parse_core_limit(limits: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(limits);
     for line in text.lines() {
@@ -161,6 +168,7 @@ pub fn parse_core_limit(limits: &[u8]) -> Option<String> {
 
 /// The node hostname for systemd-coredump's `%h`. Reads
 /// `/proc/sys/kernel/hostname`; falls back to `localhost`.
+#[must_use]
 pub fn node_hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
@@ -170,6 +178,7 @@ pub fn node_hostname() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::io::Read as _;

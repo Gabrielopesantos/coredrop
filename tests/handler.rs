@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fmt;
 use std::io;
 use std::sync::Arc;

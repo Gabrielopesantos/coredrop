@@ -50,12 +50,16 @@ impl Default for Redactor {
     fn default() -> Self {
         Self {
             enabled: true,
-            keywords: DEFAULT_KEYWORDS.iter().map(|k| k.to_string()).collect(),
+            keywords: DEFAULT_KEYWORDS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 }
 
 impl Redactor {
+    #[must_use]
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -64,6 +68,7 @@ impl Redactor {
     }
 
     /// Redact secret values in a raw `/proc/<pid>/environ` blob.
+    #[must_use]
     pub fn redact_environ(&self, raw: &[u8]) -> Vec<u8> {
         if !self.enabled {
             return raw.to_vec();
@@ -154,6 +159,8 @@ fn is_base64url_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+' | b'=')
 }
 
+// Precision loss casting len to f64 is irrelevant: env values are far below 2^52 bytes.
+#[allow(clippy::cast_precision_loss)]
 fn shannon_entropy(s: &str) -> f64 {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
@@ -168,13 +175,14 @@ fn shannon_entropy(s: &str) -> f64 {
         .iter()
         .filter(|&&c| c > 0)
         .map(|&c| {
-            let p = c as f64 / len;
+            let p = f64::from(c) / len;
             -p * p.log2()
         })
         .sum()
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

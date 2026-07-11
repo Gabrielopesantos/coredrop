@@ -20,6 +20,7 @@ const DEFAULT_PIPE_LIMIT: u32 = 16;
 
 /// Build the `core_pattern` value routing cores to our handler:
 /// `|<handler> capture %P %s %t %E`.
+#[must_use]
 pub fn build_pattern(handler_path: &str) -> String {
     format!("|{handler_path} capture %P %s %t %E")
 }
@@ -35,6 +36,11 @@ pub struct CorePatternGuard {
 
 impl CorePatternGuard {
     /// Install against the real host sysctls.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `core_pattern` cannot be read or written (see
+    /// [`Self::install_at`]).
     pub fn install(handler_path: &str) -> Result<Self> {
         Self::install_at(
             handler_path,
@@ -44,6 +50,11 @@ impl CorePatternGuard {
     }
 
     /// Install against caller-supplied sysctl paths (the test seam).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the pattern file cannot be read (to save the previous
+    /// value) or written. A failed `core_pipe_limit` write only warns.
     pub fn install_at(
         handler_path: &str,
         pattern_path: PathBuf,
@@ -86,6 +97,7 @@ impl Drop for CorePatternGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

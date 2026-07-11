@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::os::unix::fs::PermissionsExt;
 
 use coredrop::config::HandlerConfig;
@@ -59,7 +61,7 @@ async fn inspect_fake_script_parses_container_info() {
     let script = tmp.join("crictl");
     write_executable(
         &script,
-        &format!("#!/bin/sh\nprintf '%s' '{}'\n", FAKE_CRICTL_JSON),
+        &format!("#!/bin/sh\nprintf '%s' '{FAKE_CRICTL_JSON}'\n"),
     );
 
     let config = config_with_crictl(script.to_str().unwrap());

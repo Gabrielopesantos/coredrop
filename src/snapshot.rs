@@ -78,7 +78,13 @@ impl ProcSnapshot {
             });
         }
 
-        let exe_target = std::fs::read_link(base.join("exe")).ok();
+        let exe_target = match std::fs::read_link(base.join("exe")) {
+            Ok(target) => Some(target),
+            Err(e) => {
+                tracing::debug!(error = %e, pid, "reading exe symlink failed; exe and build-id omitted");
+                None
+            }
+        };
         if let Some(target) = &exe_target {
             files.push(SnapshotFile {
                 name: "exe".to_string(),
@@ -97,6 +103,10 @@ impl ProcSnapshot {
 
     /// Render the snapshot to an in-memory tar for object-store upload. Any
     /// file the cap truncated is named in a `TRUNCATED` manifest entry.
+    ///
+    /// # Errors
+    ///
+    /// Fails when tar serialization fails (in-memory, so effectively never).
     pub fn to_tar(&self) -> std::io::Result<Vec<u8>> {
         let mut builder = tar::Builder::new(Vec::new());
         for f in &self.files {
@@ -129,27 +139,44 @@ fn append_tar(
 }
 
 fn read_capped(path: &Path) -> Option<(Vec<u8>, bool)> {
-    let file = std::fs::File::open(path).ok()?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::debug!(error = %e, path = %path.display(), "snapshot file unreadable; skipped");
+            return None;
+        }
+    };
     let mut buf = Vec::new();
     // Read one byte past the cap: a file of exactly MAX_FILE_BYTES is then
     // distinguishable from a longer one (buf.len() > cap means content continued).
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut buf).ok()?;
+    if let Err(e) = file.take(MAX_FILE_BYTES + 1).read_to_end(&mut buf) {
+        tracing::debug!(error = %e, path = %path.display(), "snapshot file read failed; skipped");
+        return None;
+    }
     let truncated = buf.len() as u64 > MAX_FILE_BYTES;
     if truncated {
-        buf.truncate(MAX_FILE_BYTES as usize);
+        buf.truncate(usize::try_from(MAX_FILE_BYTES).unwrap_or(usize::MAX));
     }
     Some((buf, truncated))
 }
 
 fn read_fd_listing(fd_dir: &Path) -> Option<String> {
     let mut entries: Vec<(u64, String)> = Vec::new();
-    for dirent in std::fs::read_dir(fd_dir).ok()? {
+    let dirents = match std::fs::read_dir(fd_dir) {
+        Ok(dirents) => dirents,
+        Err(e) => {
+            tracing::debug!(error = %e, path = %fd_dir.display(), "fd dir unreadable; fd listing omitted");
+            return None;
+        }
+    };
+    for dirent in dirents {
         let Ok(dirent) = dirent else { continue };
         let name = dirent.file_name().to_string_lossy().into_owned();
         let num: u64 = name.parse().unwrap_or(u64::MAX);
-        let target = std::fs::read_link(dirent.path())
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "<unreadable>".to_string());
+        let target = std::fs::read_link(dirent.path()).map_or_else(
+            |_| "<unreadable>".to_string(),
+            |p| p.to_string_lossy().into_owned(),
+        );
         entries.push((num, format!("{name} -> {target}")));
     }
     entries.sort_by_key(|(n, _)| *n);
@@ -163,6 +190,11 @@ fn read_fd_listing(fd_dir: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use crate::buildid::tests::synthetic_elf_with_build_id;
@@ -284,7 +316,7 @@ mod tests {
             seen.insert(path, bytes);
         }
         assert_eq!(
-            seen.get("maps").map(|v| v.as_slice()),
+            seen.get("maps").map(std::vec::Vec::as_slice),
             Some(&b"map-bytes"[..])
         );
         assert_eq!(seen.len(), snap.files.len());

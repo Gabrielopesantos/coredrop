@@ -47,6 +47,10 @@ pub struct CaptureArgs {
 }
 
 impl CaptureArgs {
+    /// # Errors
+    ///
+    /// Fails when the argument count is not 4 or when pid/signal/timestamp
+    /// are not parseable integers.
     pub fn parse(args: &[String]) -> Result<Self> {
         let [pid, sig, ts, exe] = args else {
             bail!(
@@ -72,6 +76,15 @@ impl CaptureArgs {
 /// `core_in` is the core stream (normally `tokio::io::stdin()`; injected in
 /// tests as a byte slice). `store_override` injects a pre-built `ObjectStore`
 /// for tests; `None` falls back to the URL-derived store from `config`.
+///
+/// # Errors
+///
+/// Fails when no object store is configured or reachable, or when draining
+/// the core stream or writing the manifest fails. Best-effort stages
+/// (proc snapshot, crictl enrichment, rate-limit state IO) degrade instead
+/// of erroring.
+// Sequential capture pipeline; splitting it would only scatter the stages.
+#[allow(clippy::too_many_lines)]
 pub async fn run(
     args: CaptureArgs,
     config: &HandlerConfig,
@@ -277,19 +290,18 @@ pub async fn run(
     };
 
     // Write manifest to store (blob-first ordering: core → snapshot → manifest).
-    match (&identity, &store) {
-        (Some(id), Some(store)) => {
-            let key =
-                upload::manifest_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp);
-            match serde_json::to_vec_pretty(&manifest) {
-                Ok(json) => match upload::put_object(store, &key, json).await {
-                    Ok(()) => info!(key = %key, "manifest written"),
-                    Err(e) => warn!(error = %e, key = %key, "manifest write failed"),
-                },
-                Err(e) => warn!(error = %e, "manifest serialization failed"),
-            }
+    if let (Some(id), Some(store)) = (&identity, &store) {
+        let key =
+            upload::manifest_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp);
+        match serde_json::to_vec_pretty(&manifest) {
+            Ok(json) => match upload::put_object(store, &key, json).await {
+                Ok(()) => info!(key = %key, "manifest written"),
+                Err(e) => warn!(error = %e, key = %key, "manifest write failed"),
+            },
+            Err(e) => warn!(error = %e, "manifest serialization failed"),
         }
-        _ => warn!("no store or no cgroup identity; manifest skipped"),
+    } else {
+        warn!("no store or no cgroup identity; manifest skipped");
     }
 
     // One summary line per capture, whatever the path taken - the log
@@ -312,8 +324,7 @@ pub async fn run(
         host_pid = args.host_pid,
         container_id = identity
             .as_ref()
-            .map(|id| id.container_id.as_str())
-            .unwrap_or("<none>"),
+            .map_or("<none>", |id| id.container_id.as_str()),
         core_key = core_key.as_deref().unwrap_or("<none>"),
         core_bytes = stats.bytes,
         truncated = stats.truncated,
@@ -384,20 +395,19 @@ fn build_backend(
                 ),
             ))
         }
-        CaptureBackendKind::Standalone => match (object_key, store) {
-            (Some(key), Some(store)) => {
+        CaptureBackendKind::Standalone => {
+            if let (Some(key), Some(store)) = (object_key, store) {
                 info!(key = %key, "streaming core to object store (standalone backend)");
                 Box::new(StandaloneBackend::new(
                     store.clone(),
                     key,
                     config.max_core_bytes,
                 ))
-            }
-            _ => {
+            } else {
                 info!("no object store configured or identity unresolved; discarding core");
                 Box::new(DiscardBackend)
             }
-        },
+        }
     }
 }
 
@@ -417,8 +427,7 @@ fn read_cgroup_identity(proc_root: &Path, pid: i32) -> Option<CgroupIdentity> {
 
 fn format_timestamp(epoch_secs: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(epoch_secs, 0)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| epoch_secs.to_string())
+        .map_or_else(|| epoch_secs.to_string(), |dt| dt.to_rfc3339())
 }
 
 fn signal_name(sig: i32) -> Option<&'static str> {
@@ -439,11 +448,12 @@ fn signal_name(sig: i32) -> Option<&'static str> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     fn args(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
+        v.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

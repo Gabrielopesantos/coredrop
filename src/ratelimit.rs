@@ -136,7 +136,8 @@ impl RateLimiter {
             !times.is_empty()
         });
 
-        let recent = state.events.get(container_id).map_or(0, |t| t.len()) as u32;
+        let recent =
+            u32::try_from(state.events.get(container_id).map_or(0, Vec::len)).unwrap_or(u32::MAX);
         let decision = if recent >= self.max_per_hour {
             RateDecision::Suppressed { recent }
         } else {
@@ -160,6 +161,11 @@ impl RateLimiter {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
 

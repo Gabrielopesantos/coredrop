@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live smoke test (Layer 3). Asserts the full kernel-to-bucket path on a real
+# Live smoke test. Asserts the full kernel-to-bucket path on a real
 # node: the DaemonSet repoints core_pattern at the handler, a faulting workload
 # produces a core, and coredrop streams a valid core + redacted proc-snapshot +
 # manifest to MinIO - then uninstall restores core_pattern. coredrop has no

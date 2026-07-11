@@ -1,7 +1,15 @@
+nameOverride: ""
+fullnameOverride: ""
+
 image:
   repository: ghcr.io/coredrop/coredrop
   tag: "" # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
+
+serviceAccount:
+  # For cloud workload identity (IRSA / GKE WI / AKS WI), annotate here and
+  # leave objectStore credentials empty.
+  annotations: {}
 
 securityContext:
   privileged: true
@@ -17,6 +25,14 @@ capture:
   # Core sink: "standalone" (stream to object store) | "systemd-coredump"
   # (chain to the node's systemd-coredump; core.present stays false in manifest).
   backend: "standalone"
+  # Host path of systemd-coredump binary, for backend "systemd-coredump".
+  # Leave empty to use the daemon's built-in default.
+  systemdCoredumpPath: ""
+  # Truncate stored cores at this many bytes (2 GiB default).
+  maxCoreBytes: 2147483648
+  # Per-container core upload rate limit; excess crashes still get a manifest,
+  # core payload is skipped.
+  maxCoresPerHour: 3
   # Pass `environ` through un-redacted. Leave false; cores are secret-bearing.
   noRedact: false
   # Host paths the kernel-exec'd handler resolves directly (host mount ns).
@@ -24,14 +40,26 @@ capture:
   hostRunDir: "/run/coredrop"
   # S3-compatible / GCS / Azure object store for the core + proc-snapshot + manifest.
   # Leave `url` empty to run with no upload (cores discarded, pipe still drains).
-  # Static creds go into the store-secret.yaml Secret; leave empty for workload identity.
   objectStore:
-    url: "" # e.g. "s3://crash-cores"
-    endpoint: "" # e.g. "http://minio:9000" (leave empty for cloud)
-    region: "us-east-1"
-    allowHttp: true # plaintext endpoint (in-cluster MinIO)
-    accessKeyId: ""
-    secretAccessKey: ""
+    # Scheme picks the provider: "s3://bucket" | "gs://bucket" | "az://container".
+    url: ""
+    # Non-secret client options, rendered as plain env vars on the daemon.
+    # The daemon forwards only the keys it recognizes (src/upload.rs
+    # ALLOWED_STORE_OPTS): AWS_REGION, AWS_ENDPOINT, AWS_ALLOW_HTTP,
+    # AWS_VIRTUAL_HOSTED_STYLE_REQUEST, GOOGLE_SERVICE_ACCOUNT,
+    # AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CLIENT_ID, AZURE_STORAGE_TENANT_ID.
+    config: {}
+    #   AWS_REGION: "us-east-1"
+    #   AWS_ENDPOINT: "http://minio:9000"   # S3-compatible, e.g. in-cluster MinIO
+    #   AWS_ALLOW_HTTP: "true"              # plaintext endpoint
+    # Secret-bearing options; rendered into the store Secret and injected via
+    # envFrom. Same allowlist: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+    # AWS_SESSION_TOKEN, GOOGLE_SERVICE_ACCOUNT_KEY, AZURE_STORAGE_ACCESS_KEY,
+    # AZURE_STORAGE_CLIENT_SECRET. Leave empty for workload identity
+    # (annotate serviceAccount instead).
+    credentials: {}
+    #   AWS_ACCESS_KEY_ID: ""
+    #   AWS_SECRET_ACCESS_KEY: ""
 
 # CRI socket for crictl enrichment (post-drain identity: namespace, pod name,
 # container name, image, restart count). Mounted read-only from the host.

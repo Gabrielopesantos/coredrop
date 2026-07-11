@@ -11,11 +11,13 @@ capture:
   backend: "standalone"
   objectStore:
     url: "s3://coredrop-cores"
-    # endpoint: injected via `--set capture.objectStore.endpoint=http://<clusterIP>:9000`
-    region: "us-east-1"
-    allowHttp: true
-    accessKeyId: "minioadmin"
-    secretAccessKey: "minioadmin"
+    config:
+      # AWS_ENDPOINT: injected via `--set capture.objectStore.config.AWS_ENDPOINT=http://<clusterIP>:9000`
+      AWS_REGION: "us-east-1"
+      AWS_ALLOW_HTTP: "true"
+    credentials:
+      AWS_ACCESS_KEY_ID: "minioadmin"
+      AWS_SECRET_ACCESS_KEY: "minioadmin"
 
 # k3s runs its OWN containerd; its CRI socket is under /run/k3s, not the
 # upstream /run/containerd default. crictl enrichment needs this exact path.

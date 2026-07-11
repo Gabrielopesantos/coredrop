@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Multi-stage build for the Layer 3 live smoke test. Build context is the REPO
+# Multi-stage build for the live smoke test. Build context is the REPO
 # ROOT (so Cargo.toml / src are in scope), not deploy/local:
 #
 #   docker build -f deploy/local/Dockerfile --target runtime  -t coredrop:dev          .

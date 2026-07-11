@@ -58,6 +58,14 @@ spec:
             - name: CAPTURE_NO_REDACT
               value: "true"
             {{- end }}
+            {{- if .Values.capture.systemdCoredumpPath }}
+            - name: CAPTURE_SYSTEMD_COREDUMP_PATH
+              value: {{ .Values.capture.systemdCoredumpPath | quote }}
+            {{- end }}
+            - name: CAPTURE_MAX_CORE_BYTES
+              value: {{ .Values.capture.maxCoreBytes | int64 | quote }}
+            - name: CAPTURE_MAX_CORES_PER_HOUR
+              value: {{ .Values.capture.maxCoresPerHour | quote }}
             - name: CRICTL_PATH
               value: {{ .Values.cri.crictlPath | quote }}
             - name: CONTAINER_RUNTIME_ENDPOINT
@@ -65,27 +73,16 @@ spec:
             {{- if .Values.capture.objectStore.url }}
             - name: CAPTURE_STORE_URL
               value: {{ .Values.capture.objectStore.url | quote }}
-            {{- if .Values.capture.objectStore.endpoint }}
-            - name: AWS_ENDPOINT
-              value: {{ .Values.capture.objectStore.endpoint | quote }}
+            {{- range $key, $value := .Values.capture.objectStore.config }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
             {{- end }}
-            - name: AWS_REGION
-              value: {{ .Values.capture.objectStore.region | quote }}
-            - name: AWS_ALLOW_HTTP
-              value: {{ .Values.capture.objectStore.allowHttp | quote }}
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "coredrop.fullname" . }}-store
-                  key: accessKeyId
-                  optional: true
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "coredrop.fullname" . }}-store
-                  key: secretAccessKey
-                  optional: true
             {{- end }}
+          {{- if and .Values.capture.objectStore.url .Values.capture.objectStore.credentials }}
+          envFrom:
+            - secretRef:
+                name: {{ include "coredrop.fullname" . }}-store
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

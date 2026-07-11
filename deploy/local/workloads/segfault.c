@@ -1,4 +1,4 @@
-/* A deliberately faulting workload for the Layer 3 live smoke test.
+/* A deliberately faulting workload for the live smoke test.
  *
  * Dereferences a null pointer, dying by SIGSEGV (signal 11). When run inside a
  * container on the smoke VM, the kernel routes the fault to coredrop's

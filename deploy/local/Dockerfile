@@ -22,9 +22,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/coredrop /out/
 
 # --- crictl: the CRI client coredrop shells out to for enrichment -------------
-# Pinned to a v1.31 client (CRI v1); k3s ships a containerd whose `crictl
-# inspect` emits the containerd shape (status.image.image) that src/crictl.rs
-# parses. TARGETARCH is populated by BuildKit (amd64 / arm64).
+# NOTE: unused by the capture path - the kernel-exec'd handler runs in the host
+# mount ns and calls the NODE's crictl (k3s provides /usr/local/bin/crictl), not
+# this image's. Kept only so the runtime image is self-describing. Pinned to a
+# v1.31 client (CRI v1). TARGETARCH is populated by BuildKit (amd64 / arm64).
 FROM debian:bookworm-slim AS crictl
 ARG CRICTL_VERSION=v1.31.1
 ARG TARGETARCH=amd64
@@ -39,9 +40,11 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+# coredrop at /bin to match the published nix image layout (one chart, both
+# images). crictl is unused by the capture path (see the crictl stage note).
 COPY --from=crictl  /usr/local/bin/crictl   /usr/local/bin/crictl
-COPY --from=builder /out/coredrop           /usr/local/bin/coredrop
-ENTRYPOINT ["/usr/local/bin/coredrop"]
+COPY --from=builder /out/coredrop           /bin/coredrop
+ENTRYPOINT ["/bin/coredrop"]
 
 # --- workload-builder: compile the null-deref crash binary --------------------
 FROM gcc:bookworm AS workload-builder

@@ -1,0 +1,90 @@
+name: Release
+
+# Two independent tag prefixes:
+#   app-v<ver>   -> build + push the multi-arch image ghcr.io/coredrop/coredrop:<ver> (+ latest)
+#   chart-v<ver> -> package + push the chart to oci://ghcr.io/coredrop/charts
+# The chart's appVersion (-> image tag) is bumped by a prior commit, not here.
+on:
+  push:
+    tags:
+      - "app-v*"
+      - "chart-v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/coredrop/coredrop
+  CHART_REPO: oci://ghcr.io/coredrop/charts
+
+jobs:
+  # --- image: native per-arch build, then a merged manifest list --------------
+  build-image:
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build image (native arch)
+        run: nix build .#image
+      - name: Push per-arch image
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION#app-v}"
+          nix run nixpkgs#skopeo -- login ghcr.io \
+            -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          nix run nixpkgs#skopeo -- copy \
+            "docker-archive:$(readlink -f result)" \
+            "docker://${IMAGE}:${VERSION}-${{ matrix.arch }}"
+
+  push-manifest:
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Assemble multi-arch manifest
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION#app-v}"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+
+  # --- chart: package from Chart.yaml as committed, push to OCI ---------------
+  publish-chart:
+    if: startsWith(github.ref, 'refs/tags/chart-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Guard tag matches Chart.yaml version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TAG_VER="${TAG#chart-v}"
+          CHART_VER="$(nix run nixpkgs#yq-go -- '.version' charts/coredrop/Chart.yaml)"
+          if [ "$TAG_VER" != "$CHART_VER" ]; then
+            echo "tag $TAG_VER != Chart.yaml version $CHART_VER" >&2
+            exit 1
+          fi
+      - name: Package and push chart
+        run: |
+          nix run nixpkgs#kubernetes-helm -- registry login ghcr.io \
+            -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          nix run nixpkgs#kubernetes-helm -- package charts/coredrop
+          nix run nixpkgs#kubernetes-helm -- push coredrop-*.tgz "${CHART_REPO}"

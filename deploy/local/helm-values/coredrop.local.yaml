@@ -23,6 +23,5 @@ capture:
 cri:
   runtimeEndpoint: "unix:///run/k3s/containerd/containerd.sock"
   socketHostPath: "/run/k3s/containerd/containerd.sock"
-  crictlPath: "/usr/local/bin/crictl"
 
 logLevel: info

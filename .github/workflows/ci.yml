@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # Run the checks through the flake devShell so CI and local dev share one
+      # toolchain (no dtolnay/rust-cache drift).
+      - name: Format
+        run: nix develop -c cargo fmt --check
+      - name: Clippy
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: nix develop -c cargo test
+
+      # Gate on the flake package + image building reproducibly.
+      - name: Nix build (binary)
+        run: nix build .#default
+      - name: Nix build (image)
+        run: nix build .#image
+
+      # Chart docs must be regenerated from values.yaml before committing.
+      - name: helm-docs verify
+        run: |
+          nix develop -c helm-docs --chart-search-root=charts
+          git diff --exit-code charts/coredrop/README.md
+      - name: helm lint
+        run: nix develop -c helm lint charts/coredrop

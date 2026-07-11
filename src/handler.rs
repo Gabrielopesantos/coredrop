@@ -136,23 +136,21 @@ pub async fn run(
     let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
     let mut rate_recorded = false;
     let rate_suppressed = match (&identity, &store) {
-        (Some(id), Some(_)) => {
-            match limiter.check_and_record(&id.container_id, args.timestamp) {
-                RateDecision::Suppressed { recent } => {
-                    warn!(
-                        container_id = %id.container_id,
-                        recent,
-                        max_per_hour = config.max_cores_per_hour,
-                        "per-container core budget exhausted - discarding core, keeping snapshot + manifest"
-                    );
-                    true
-                }
-                RateDecision::Allowed => {
-                    rate_recorded = true;
-                    false
-                }
+        (Some(id), Some(_)) => match limiter.check_and_record(&id.container_id, args.timestamp) {
+            RateDecision::Suppressed { recent } => {
+                warn!(
+                    container_id = %id.container_id,
+                    recent,
+                    max_per_hour = config.max_cores_per_hour,
+                    "per-container core budget exhausted - discarding core, keeping snapshot + manifest"
+                );
+                true
             }
-        }
+            RateDecision::Allowed => {
+                rate_recorded = true;
+                false
+            }
+        },
         _ => false,
     };
 
@@ -294,7 +292,7 @@ pub async fn run(
         proc_snapshot: proc_ref,
     };
 
-    // Write manifest to store (blob-first ordering: core → snapshot → manifest).
+    // Write manifest to store (blob-first ordering: core -> snapshot -> manifest).
     let manifest_key = if let (Some(id), Some(store)) = (&identity, &store) {
         let key =
             upload::manifest_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp);

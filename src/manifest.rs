@@ -6,7 +6,7 @@
 //! at `…-core.zst`. The manifest is the "record": a manifest pointing at a
 //! missing core is a real bug; an orphan core with no manifest is GC-able.
 //!
-//! Write ordering: core → proc snapshot → manifest.
+//! Write ordering: core -> proc snapshot -> manifest.
 
 use serde::{Deserialize, Serialize};
 

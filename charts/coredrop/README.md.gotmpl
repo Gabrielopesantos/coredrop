@@ -1,0 +1,121 @@
+# {{ template "chart.name" . }} Helm chart
+
+Deploys the coredrop DaemonSet: a privileged, `hostPID` pod per node that
+installs the kernel `core_pattern` handler and streams captured cores,
+`/proc` snapshots, and manifests to an object store.
+
+## Install
+
+```sh
+helm install coredrop oci://ghcr.io/coredrop/charts/coredrop \
+  -n coredrop-system --create-namespace \
+  --set capture.objectStore.url=s3://crash-artifacts \
+  --set capture.objectStore.config.AWS_REGION=us-east-1
+```
+
+Leaving `capture.objectStore.url` empty runs coredrop with no upload: cores
+are drained (so the kernel completes the dump) but nothing is stored.
+
+{{ template "chart.valuesSection" . }}
+
+Only allowlisted object-store keys are forwarded (see `src/upload.rs`,
+`ALLOWED_STORE_OPTS`):
+
+- `capture.objectStore.config` (non-secret):
+  - `AWS_REGION`
+  - `AWS_ENDPOINT`
+  - `AWS_ALLOW_HTTP`
+  - `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`
+  - `GOOGLE_SERVICE_ACCOUNT`
+  - `AZURE_STORAGE_ACCOUNT_NAME`
+  - `AZURE_STORAGE_CLIENT_ID`
+  - `AZURE_STORAGE_TENANT_ID`
+- `capture.objectStore.credentials` (Secret):
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+  - `AWS_SESSION_TOKEN`
+  - `GOOGLE_SERVICE_ACCOUNT_KEY`
+  - `AZURE_STORAGE_ACCESS_KEY`
+  - `AZURE_STORAGE_CLIENT_SECRET`
+
+## Events RBAC
+
+`events.enabled: true` (default) renders a `ClusterRole` +
+`ClusterRoleBinding` granting `create`/`patch` on `events` in the
+`events.k8s.io` API group, bound to the DaemonSet's `ServiceAccount`. It's
+cluster-scoped because a crash can happen in any namespace the node hosts
+pods for - see the main [README](../../README.md#events) for what gets
+posted. Set `events.enabled: false` to skip both the RBAC objects and the
+daemon's socket listener; the handler then skips the report with no error.
+
+## Retention
+
+coredrop only writes artifacts - it never deletes them or sweeps the bucket.
+Expire old crashes with your object store's native lifecycle policy, scoped
+to the `capture.cluster` prefix so it doesn't reach into unrelated bucket
+contents:
+
+**S3** (bucket lifecycle rule, e.g. via Terraform/`aws s3api`):
+
+```json
+{
+  "Rules": [{
+    "ID": "coredrop-expire",
+    "Filter": { "Prefix": "local/" },
+    "Status": "Enabled",
+    "Expiration": { "Days": 30 }
+  }]
+}
+```
+
+**GCS** (bucket lifecycle rule):
+
+```json
+{
+  "rule": [{
+    "action": { "type": "Delete" },
+    "condition": { "age": 30, "matchesPrefix": ["local/"] }
+  }]
+}
+```
+
+**Azure** (Blob Storage lifecycle management policy):
+
+```json
+{
+  "rules": [{
+    "name": "coredrop-expire",
+    "type": "Lifecycle",
+    "definition": {
+      "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["local/"] },
+      "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 30 } } }
+    }
+  }]
+}
+```
+
+Replace `local/` with your `capture.cluster` value.
+
+## Workload identity
+
+For IRSA / GKE Workload Identity / AKS Workload Identity, leave
+`capture.objectStore.credentials` empty and annotate the service account:
+
+```yaml
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/coredrop
+```
+
+## Why privileged + hostPID
+
+The daemon writes node-global sysctls (`core_pattern`, `core_pipe_limit`) and
+installs the handler binary on a hostPath. The kernel exec's the handler in
+the host PID/mount/network namespaces, so the handler's config and the
+rate-limit state also live on a hostPath (`capture.hostRunDir`) - env vars on
+the pod never reach the kernel-exec'd handler. Note the handler runs in the
+host network namespace: the object-store endpoint must be resolvable and
+reachable from the node itself (cluster DNS names won't resolve there).
+
+Uninstalling the release stops the daemon, which restores the node's original
+`core_pattern` on shutdown.

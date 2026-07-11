@@ -33,7 +33,7 @@ spec:
           command:
             - sh
             - -c
-            - install -m 0755 /usr/local/bin/coredrop {{ .Values.capture.hostBinDir }}/coredrop
+            - install -m 0755 /bin/coredrop {{ .Values.capture.hostBinDir }}/coredrop
           volumeMounts:
             - name: host-bin
               mountPath: {{ .Values.capture.hostBinDir }}

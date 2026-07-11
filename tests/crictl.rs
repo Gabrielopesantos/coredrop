@@ -78,7 +78,7 @@ async fn inspect_fake_script_parses_container_info() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2b - non-zero exit: crictl exits 1 → inspect degrades to None.
+/// 2b - non-zero exit: crictl exits 1 -> inspect degrades to None.
 #[tokio::test]
 async fn inspect_nonzero_exit_returns_none() {
     let _guard = SPAWN_LOCK.lock().await;
@@ -95,7 +95,7 @@ async fn inspect_nonzero_exit_returns_none() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2b - nonexistent binary: spawn fails → inspect degrades to None, no panic.
+/// 2b - nonexistent binary: spawn fails -> inspect degrades to None, no panic.
 #[tokio::test]
 async fn inspect_nonexistent_binary_returns_none() {
     let _guard = SPAWN_LOCK.lock().await;

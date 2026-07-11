@@ -353,7 +353,7 @@ pub async fn run(
                 .and_then(|c| c.container_name.clone()),
             signal: args.signal,
             signal_name: signal_name(args.signal).map(str::to_string),
-            outcome: outcome.as_str().to_string(),
+            outcome,
             manifest_key: manifest_key.clone(),
             stored_bytes: uploaded.then_some(stats.stored_bytes),
             timestamp: args.timestamp,

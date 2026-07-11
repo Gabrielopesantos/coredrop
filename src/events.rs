@@ -11,6 +11,7 @@
 //! change.
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -21,8 +22,9 @@ use tracing::{debug, warn};
 
 /// Terminal state of one capture, for the single `capture complete` summary
 /// log line and (when it reaches the manifest) the capture-event payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Outcome {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Outcome {
     Uploaded,
     ForwardedSystemd,
     SuppressedRateLimit,
@@ -32,7 +34,8 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
-    pub(crate) fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Outcome::Uploaded => "uploaded",
             Outcome::ForwardedSystemd => "forwarded-systemd",
@@ -41,6 +44,12 @@ impl Outcome {
             Outcome::NoStoreDiscard => "no-store-discard",
             Outcome::Failed => "failed",
         }
+    }
+}
+
+impl Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -55,8 +64,7 @@ pub struct CaptureEventPayload {
     pub container_name: Option<String>,
     pub signal: i32,
     pub signal_name: Option<String>,
-    /// One of [`Outcome::as_str`]'s values.
-    pub outcome: String,
+    pub outcome: Outcome,
     pub manifest_key: Option<String>,
     pub stored_bytes: Option<u64>,
     /// Crash timestamp, unix epoch seconds (the kernel's `%t` specifier).
@@ -124,12 +132,12 @@ pub fn bind_socket(path: &str) -> std::io::Result<tokio::net::UnixDatagram> {
 /// Map a capture outcome to the k8s Event `reason` it produces. Outcomes that
 /// never reach this point (`skipped-non-k8s`, `failed`) or are otherwise
 /// unrecognized yield `None` - the caller drops the payload.
-fn k8s_reason(outcome: &str) -> Option<&'static str> {
+fn k8s_reason(outcome: Outcome) -> Option<&'static str> {
     match outcome {
-        "uploaded" => Some("CoreDumped"),
-        "suppressed-rate-limit" => Some("CoreDumpSuppressed"),
-        "forwarded-systemd" => Some("CoreForwardedSystemd"),
-        "no-store-discard" => Some("CoreDiscardedNoStore"),
+        Outcome::Uploaded => Some("CoreDumped"),
+        Outcome::SuppressedRateLimit => Some("CoreDumpSuppressed"),
+        Outcome::ForwardedSystemd => Some("CoreForwardedSystemd"),
+        Outcome::NoStoreDiscard => Some("CoreDiscardedNoStore"),
         _ => None,
     }
 }
@@ -331,7 +339,7 @@ async fn handle_payload(
     node: &str,
     payload: &CaptureEventPayload,
 ) {
-    let Some(reason) = k8s_reason(&payload.outcome) else {
+    let Some(reason) = k8s_reason(payload.outcome) else {
         debug!(outcome = %payload.outcome, "capture outcome has no k8s Event mapping; ignoring");
         return;
     };
@@ -446,7 +454,7 @@ mod tests {
             container_name: Some("app".into()),
             signal: 11,
             signal_name: Some("SIGSEGV".into()),
-            outcome: Outcome::Uploaded.as_str().to_string(),
+            outcome: Outcome::Uploaded,
             manifest_key: Some("local/abc-123/def456/1234567890-manifest.json".into()),
             stored_bytes: Some(1024),
             timestamp: 1_749_600_000,
@@ -463,21 +471,21 @@ mod tests {
 
     #[test]
     fn outcome_as_str_matches_k8s_reason_mapping() {
-        assert_eq!(k8s_reason(Outcome::Uploaded.as_str()), Some("CoreDumped"));
+        assert_eq!(k8s_reason(Outcome::Uploaded), Some("CoreDumped"));
         assert_eq!(
-            k8s_reason(Outcome::SuppressedRateLimit.as_str()),
+            k8s_reason(Outcome::SuppressedRateLimit),
             Some("CoreDumpSuppressed")
         );
         assert_eq!(
-            k8s_reason(Outcome::ForwardedSystemd.as_str()),
+            k8s_reason(Outcome::ForwardedSystemd),
             Some("CoreForwardedSystemd")
         );
         assert_eq!(
-            k8s_reason(Outcome::NoStoreDiscard.as_str()),
+            k8s_reason(Outcome::NoStoreDiscard),
             Some("CoreDiscardedNoStore")
         );
-        assert_eq!(k8s_reason(Outcome::SkippedNonK8s.as_str()), None);
-        assert_eq!(k8s_reason(Outcome::Failed.as_str()), None);
+        assert_eq!(k8s_reason(Outcome::SkippedNonK8s), None);
+        assert_eq!(k8s_reason(Outcome::Failed), None);
     }
 
     #[test]

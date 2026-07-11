@@ -70,6 +70,13 @@ cri:
   # Path to the crictl binary inside the container image.
   crictlPath: "/usr/local/bin/crictl"
 
+# k8s Event emission on capture: posts an event on the crashing pod
+# ("core dumped, artifacts at {key}") so kubectl describe pod / kubectl get
+# events surfaces it. Disabling skips the daemon's socket listener and the
+# events RBAC (ClusterRole/ClusterRoleBinding) is not rendered.
+events:
+  enabled: true
+
 logLevel: info
 
 resources:

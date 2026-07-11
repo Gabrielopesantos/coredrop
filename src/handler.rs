@@ -4,7 +4,7 @@
 //! Handler flow (top-to-bottom, ordered by time-criticality):
 //!
 //! 1. Pre-reap snapshot - snapshot `/proc/<hostpid>` before the kernel
-//!    reaps the PID. Time-critical; must complete while the kernel waits.
+//!    reaps the PID; must complete while the kernel waits.
 //! 2. Core drain - stream stdin through zstd to the object store (or
 //!    discard if no store). Releases the kernel's pipe.
 //! 3. Proc snapshot upload - buffered PUT of the small tar.
@@ -12,6 +12,9 @@
 //!    for human-readable identity (namespace, pod name, container name, image,
 //!    restart count). Failure degrades to cgroup-only identity.
 //! 5. Manifest write - assemble and PUT the JSON sidecar next to the core.
+//! 6. Capture event - fire-and-forget datagram to the daemon, which posts a
+//!    k8s Event on the crashing pod. Best-effort; requires crictl-enriched
+//!    identity (namespace + pod name).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,12 +22,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use object_store::ObjectStore;
 use tokio::io::AsyncRead;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::backend::{CaptureBackend, CaptureBackendKind, DiscardBackend};
 use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::crictl;
+use crate::events::{self, CaptureEventPayload, Outcome};
 use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
 use crate::ratelimit::{RateDecision, RateLimiter};
 use crate::redact::Redactor;
@@ -106,7 +110,7 @@ pub async fn run(
         Redactor::default()
     };
 
-    // Step 1: Pre-reap snapshot (time-critical - must complete while kernel waits).
+    // Step 1: Pre-reap snapshot (must complete while kernel waits).
     let snapshot = ProcSnapshot::capture(proc_root, args.host_pid, &redactor);
     info!(
         files = snapshot.files.len(),
@@ -290,19 +294,29 @@ pub async fn run(
     };
 
     // Write manifest to store (blob-first ordering: core → snapshot → manifest).
-    if let (Some(id), Some(store)) = (&identity, &store) {
+    let manifest_key = if let (Some(id), Some(store)) = (&identity, &store) {
         let key =
             upload::manifest_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp);
         match serde_json::to_vec_pretty(&manifest) {
             Ok(json) => match upload::put_object(store, &key, json).await {
-                Ok(()) => info!(key = %key, "manifest written"),
-                Err(e) => warn!(error = %e, key = %key, "manifest write failed"),
+                Ok(()) => {
+                    info!(key = %key, "manifest written");
+                    Some(key)
+                }
+                Err(e) => {
+                    warn!(error = %e, key = %key, "manifest write failed");
+                    None
+                }
             },
-            Err(e) => warn!(error = %e, "manifest serialization failed"),
+            Err(e) => {
+                warn!(error = %e, "manifest serialization failed");
+                None
+            }
         }
     } else {
         warn!("no store or no cgroup identity; manifest skipped");
-    }
+        None
+    };
 
     // One summary line per capture, whatever the path taken - the log
     // interface operators alert on.
@@ -319,6 +333,38 @@ pub async fn run(
     } else {
         Outcome::Failed
     };
+
+    // Step 6: report the capture to the daemon for k8s Event emission.
+    // Requires namespace + pod name, i.e. only when crictl enrichment
+    // succeeded - a cgroup-only identity can't target a pod object.
+    if let (Some(namespace), Some(pod_name)) = (
+        container_info.as_ref().and_then(|c| c.namespace.clone()),
+        container_info.as_ref().and_then(|c| c.pod_name.clone()),
+    ) {
+        let payload = CaptureEventPayload {
+            namespace,
+            pod_name,
+            pod_uid: identity
+                .as_ref()
+                .map(|id| id.pod_uid.clone())
+                .unwrap_or_default(),
+            container_name: container_info
+                .as_ref()
+                .and_then(|c| c.container_name.clone()),
+            signal: args.signal,
+            signal_name: signal_name(args.signal).map(str::to_string),
+            outcome: outcome.as_str().to_string(),
+            manifest_key: manifest_key.clone(),
+            stored_bytes: uploaded.then_some(stats.stored_bytes),
+            timestamp: args.timestamp,
+        };
+        events::send_capture_event(config.event_socket_path.as_deref(), &payload);
+    } else {
+        debug!(
+            "no namespace/pod name resolved (crictl enrichment unavailable); skipping capture event"
+        );
+    }
+
     info!(
         outcome = outcome.as_str(),
         host_pid = args.host_pid,
@@ -332,30 +378,6 @@ pub async fn run(
     );
 
     Ok(())
-}
-
-/// Terminal state of one capture, for the single `capture complete` summary
-/// log line.
-enum Outcome {
-    Uploaded,
-    ForwardedSystemd,
-    SuppressedRateLimit,
-    SkippedNonK8s,
-    NoStoreDiscard,
-    Failed,
-}
-
-impl Outcome {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Outcome::Uploaded => "uploaded",
-            Outcome::ForwardedSystemd => "forwarded-systemd",
-            Outcome::SuppressedRateLimit => "suppressed-rate-limit",
-            Outcome::SkippedNonK8s => "skipped-non-k8s",
-            Outcome::NoStoreDiscard => "no-store-discard",
-            Outcome::Failed => "failed",
-        }
-    }
 }
 
 fn build_backend(

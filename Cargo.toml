@@ -51,6 +51,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # flock for the rate-limit state file (already transitive via tar -> xattr)
 rustix = { version = "1", features = ["fs"] }
 
+# Hand-rolled Kubernetes Event client (daemon side only): already transitive
+# via object_store, so the dep tree barely moves.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
 # Errors
 anyhow = "1"
 

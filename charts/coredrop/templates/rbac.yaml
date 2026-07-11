@@ -1,0 +1,31 @@
+{{- if .Values.events.enabled }}
+# RBAC for k8s Event emission on capture: the daemon posts an
+# events.k8s.io/v1 Event on the crashing pod (create on first occurrence,
+# patch to bump `series.count` on repeats). Cluster-scoped because a crash can
+# happen in any namespace the DaemonSet's node hosts pods for.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "coredrop.fullname" . }}-events
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "coredrop.fullname" . }}-events
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "coredrop.fullname" . }}-events
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "coredrop.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

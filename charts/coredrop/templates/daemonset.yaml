@@ -66,6 +66,10 @@ spec:
               value: {{ .Values.capture.maxCoreBytes | int64 | quote }}
             - name: CAPTURE_MAX_CORES_PER_HOUR
               value: {{ .Values.capture.maxCoresPerHour | quote }}
+            {{- if not .Values.events.enabled }}
+            - name: CAPTURE_NO_EVENTS
+              value: "true"
+            {{- end }}
             - name: CRICTL_PATH
               value: {{ .Values.cri.crictlPath | quote }}
             - name: CONTAINER_RUNTIME_ENDPOINT

@@ -71,6 +71,7 @@ fn base_config(proc_dir: &std::path::Path) -> HandlerConfig {
             .join("recent.json")
             .to_string_lossy()
             .into_owned(),
+        event_socket_path: None,
     }
 }
 

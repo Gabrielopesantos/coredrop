@@ -76,6 +76,11 @@ struct DaemonArgs {
     /// crashes still get a proc snapshot and manifest, just no core.
     #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = coredrop::config::DEFAULT_MAX_CORES_PER_HOUR)]
     max_cores_per_hour: u32,
+
+    /// Disable k8s Event emission on capture (`kubectl describe pod` /
+    /// `kubectl get events` surfacing). Events are on by default.
+    #[arg(long, env = "CAPTURE_NO_EVENTS")]
+    no_events: bool,
 }
 
 impl DaemonArgs {
@@ -96,6 +101,8 @@ impl DaemonArgs {
             max_core_bytes: self.max_core_bytes,
             max_cores_per_hour: self.max_cores_per_hour,
             rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
+            event_socket_path: (!self.no_events)
+                .then(|| coredrop::config::event_socket_path_for(&self.config_path)),
         }
     }
 }
@@ -138,7 +145,33 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         "coredrop starting"
     );
 
-    let config = args.to_handler_config();
+    let mut config = args.to_handler_config();
+
+    // Bind the capture-event socket before writing the config, so the
+    // handler only ever gets a path the daemon is actually listening on -
+    // a bind failure degrades to events-disabled rather than the handler
+    // sending datagrams into the void.
+    let events_socket = if args.no_events {
+        info!("capture events disabled (--no-events)");
+        None
+    } else if let Some(path) = &config.event_socket_path {
+        match coredrop::events::bind_socket(path) {
+            Ok(socket) => {
+                info!(path = %path, "capture event socket bound");
+                Some(socket)
+            }
+            Err(e) => {
+                warn!(error = %e, path = %path, "failed to bind capture event socket; capture events disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if events_socket.is_none() {
+        config.event_socket_path = None;
+    }
+
     let config_path = &args.config_path;
 
     if let Err(e) = config.write(config_path) {
@@ -163,6 +196,11 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
             return Ok(());
         }
     };
+
+    if let Some(socket) = events_socket {
+        let node = coredrop::systemd::node_hostname();
+        tokio::spawn(coredrop::events::run_listener(socket, node));
+    }
 
     shutdown_signal().await?;
     info!("shutdown signal received");

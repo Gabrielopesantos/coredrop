@@ -4,6 +4,7 @@ pub mod cgroup;
 pub mod config;
 pub mod core_pattern;
 pub mod crictl;
+pub mod events;
 pub mod handler;
 pub mod manifest;
 pub mod ratelimit;

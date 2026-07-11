@@ -45,6 +45,21 @@ pub fn rate_state_path_for(config_path: &str) -> String {
         })
 }
 
+fn default_event_socket_path() -> String {
+    "/run/coredrop/events.sock".to_string()
+}
+
+/// Capture-event unix datagram socket, derived from the handler-config path
+/// the same way [`rate_state_path_for`] derives the rate-limit state file: an
+/// `events.sock` sibling on the same hostPath.
+pub fn event_socket_path_for(config_path: &str) -> String {
+    Path::new(config_path)
+        .parent()
+        .map_or_else(default_event_socket_path, |p| {
+            p.join("events.sock").to_string_lossy().into_owned()
+        })
+}
+
 /// Everything the kernel-exec'd handler needs that env can't deliver. The
 /// daemon fills it from its own env and writes it; the handler reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +95,11 @@ pub struct HandlerConfig {
     /// Rate-limit state file, sibling of the handler config on the hostPath.
     #[serde(default = "default_rate_state_path")]
     pub rate_state_path: String,
+    /// Capture-event unix datagram socket the daemon listens on, sibling of
+    /// the handler config on the hostPath. `None` when events are disabled
+    /// (`serde(default)` keeps configs written by older daemons parseable).
+    #[serde(default)]
+    pub event_socket_path: Option<String>,
 }
 
 impl Default for HandlerConfig {
@@ -97,6 +117,7 @@ impl Default for HandlerConfig {
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
             max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
             rate_state_path: default_rate_state_path(),
+            event_socket_path: Some(default_event_socket_path()),
         }
     }
 }
@@ -135,6 +156,12 @@ impl HandlerConfig {
                 &std::env::var("CAPTURE_CONFIG_PATH")
                     .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
             ),
+            event_socket_path: (!env_flag("CAPTURE_NO_EVENTS")).then(|| {
+                event_socket_path_for(
+                    &std::env::var("CAPTURE_CONFIG_PATH")
+                        .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
+                )
+            }),
         }
     }
 
@@ -222,6 +249,7 @@ mod tests {
             max_core_bytes: 1024,
             max_cores_per_hour: 5,
             rate_state_path: "/run/coredrop/recent.json".into(),
+            event_socket_path: Some("/run/coredrop/events.sock".into()),
         };
         let path = tmp("rt");
         cfg.write(&path).unwrap();
@@ -233,6 +261,14 @@ mod tests {
     #[test]
     fn read_absent_file_is_none() {
         assert!(HandlerConfig::read("/no/such/coredrop/handler.json").is_none());
+    }
+
+    #[test]
+    fn event_socket_path_for_derives_sibling_of_config_path() {
+        assert_eq!(
+            event_socket_path_for("/run/coredrop/handler.json"),
+            "/run/coredrop/events.sock"
+        );
     }
 
     #[test]

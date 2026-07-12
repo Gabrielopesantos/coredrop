@@ -30,6 +30,15 @@ fn default_max_cores_per_hour() -> u32 {
     DEFAULT_MAX_CORES_PER_HOUR
 }
 
+/// Default deadline for draining/uploading one core: 5 minutes.
+/// The handler holds one of the node's `core_pipe_limit` slots for its whole
+/// lifetime, so a hung store must not be able to hold it indefinitely.
+pub const DEFAULT_UPLOAD_DEADLINE_SECS: u64 = 300;
+
+fn default_upload_deadline_secs() -> u64 {
+    DEFAULT_UPLOAD_DEADLINE_SECS
+}
+
 fn default_rate_state_path() -> String {
     "/run/coredrop/recent.json".to_string()
 }
@@ -87,6 +96,12 @@ pub struct HandlerConfig {
     /// crashes still get a proc snapshot and manifest, just no core.
     #[serde(default = "default_max_cores_per_hour")]
     pub max_cores_per_hour: u32,
+    /// Deadline in seconds for draining/uploading the core; `0` =
+    /// no deadline. On expiry the handler abandons the upload and exits,
+    /// freeing its `core_pipe_limit` slot instead of letting a slow store
+    /// hold it.
+    #[serde(default = "default_upload_deadline_secs")]
+    pub upload_deadline_secs: u64,
     /// Rate-limit state file, sibling of the handler config on the hostPath.
     #[serde(default = "default_rate_state_path")]
     pub rate_state_path: String,
@@ -109,6 +124,7 @@ impl Default for HandlerConfig {
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
             max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
+            upload_deadline_secs: DEFAULT_UPLOAD_DEADLINE_SECS,
             rate_state_path: default_rate_state_path(),
             event_socket_path: Some(default_event_socket_path()),
         }
@@ -141,6 +157,10 @@ impl HandlerConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_MAX_CORES_PER_HOUR),
+            upload_deadline_secs: std::env::var("CAPTURE_UPLOAD_DEADLINE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_UPLOAD_DEADLINE_SECS),
             rate_state_path: rate_state_path_for(
                 &std::env::var("CAPTURE_CONFIG_PATH")
                     .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
@@ -230,6 +250,7 @@ mod tests {
             cri_runtime_endpoint: Some("unix:///run/containerd/containerd.sock".into()),
             max_core_bytes: 1024,
             max_cores_per_hour: 5,
+            upload_deadline_secs: 60,
             rate_state_path: "/run/coredrop/recent.json".into(),
             event_socket_path: Some("/run/coredrop/events.sock".into()),
         };

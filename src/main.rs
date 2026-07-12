@@ -69,10 +69,22 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = coredrop::config::DEFAULT_MAX_CORES_PER_HOUR)]
     max_cores_per_hour: u32,
 
+    /// Wall-clock deadline (seconds) for draining/uploading one core; 0 = no
+    /// deadline. On expiry the handler abandons the upload and exits, freeing
+    /// its `core_pipe_limit` slot instead of letting a slow store hold it.
+    #[arg(long, env = "CAPTURE_UPLOAD_DEADLINE_SECS", default_value_t = coredrop::config::DEFAULT_UPLOAD_DEADLINE_SECS)]
+    upload_deadline_secs: u64,
+
     /// Disable k8s Event emission on capture (`kubectl describe pod` /
     /// `kubectl get events` surfacing). Events are on by default.
     #[arg(long, env = "CAPTURE_NO_EVENTS")]
     no_events: bool,
+
+    /// Max crashes concurrently held open for the handler via
+    /// `core_pipe_limit` (node-global sysctl); beyond it the kernel skips the
+    /// dump entirely rather than exec'ing the handler.
+    #[arg(long, env = "CAPTURE_PIPE_LIMIT", default_value_t = coredrop::core_pattern::DEFAULT_PIPE_LIMIT)]
+    pipe_limit: u32,
 }
 
 impl DaemonArgs {
@@ -88,6 +100,7 @@ impl DaemonArgs {
             cri_runtime_endpoint: self.cri_runtime_endpoint.clone(),
             max_core_bytes: self.max_core_bytes,
             max_cores_per_hour: self.max_cores_per_hour,
+            upload_deadline_secs: self.upload_deadline_secs,
             rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
             event_socket_path: (!self.no_events)
                 .then(|| coredrop::config::event_socket_path_for(&self.config_path)),
@@ -153,6 +166,9 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
             }
         }
     } else {
+        warn!(
+            "capture events enabled but no capture event socket path configured; capture events disabled"
+        );
         None
     };
     if events_socket.is_none() {
@@ -168,7 +184,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         return Ok(());
     }
 
-    let _guard = match CorePatternGuard::install(&args.handler_path) {
+    let _guard = match CorePatternGuard::install(&args.handler_path, args.pipe_limit) {
         Ok(g) => {
             info!(
                 handler = %args.handler_path,

@@ -5,8 +5,8 @@
 //! the previous value on shutdown. It also raises `core_pipe_limit`: with the
 //! default `0` the kernel does not wait for the pipe handler and may reap
 //! the faulting process before the handler reads `/proc/<pid>` - which would
-//! defeat the pre-reap snapshot. A non-zero limit makes the kernel wait and
-//! bounds how many handlers run at once under a crash storm.
+//! defeat the pre-reap snapshot. A non-zero limit bounds how many crashes may
+//! have `/proc/<pid>` held open for their handler at once.
 //!
 //! The sysctl paths are injectable so the save -> set -> restore logic is
 //! unit-testable against temp files instead of the real `/proc/sys`.
@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use tracing::warn;
 
-const DEFAULT_PIPE_LIMIT: u32 = 16;
+/// Max crashes concurrently held open for a handler.
+pub const DEFAULT_PIPE_LIMIT: u32 = 128;
 
 /// Build the `core_pattern` value routing cores to our handler:
 /// `|<handler> capture %P %s %t %E`.
@@ -41,9 +42,10 @@ impl CorePatternGuard {
     ///
     /// Fails when `core_pattern` cannot be read or written (see
     /// [`Self::install_at`]).
-    pub fn install(handler_path: &str) -> Result<Self> {
+    pub fn install(handler_path: &str, pipe_limit: u32) -> Result<Self> {
         Self::install_at(
             handler_path,
+            pipe_limit,
             PathBuf::from("/proc/sys/kernel/core_pattern"),
             PathBuf::from("/proc/sys/kernel/core_pipe_limit"),
         )
@@ -57,6 +59,7 @@ impl CorePatternGuard {
     /// value) or written. A failed `core_pipe_limit` write only warns.
     pub fn install_at(
         handler_path: &str,
+        pipe_limit: u32,
         pattern_path: PathBuf,
         pipe_limit_path: PathBuf,
     ) -> Result<Self> {
@@ -66,7 +69,7 @@ impl CorePatternGuard {
 
         std::fs::write(&pattern_path, build_pattern(handler_path))
             .with_context(|| format!("writing {}", pattern_path.display()))?;
-        if let Err(e) = std::fs::write(&pipe_limit_path, DEFAULT_PIPE_LIMIT.to_string()) {
+        if let Err(e) = std::fs::write(&pipe_limit_path, pipe_limit.to_string()) {
             warn!(error = %e, "could not raise core_pipe_limit; /proc snapshot may race the reaper");
         }
 
@@ -128,7 +131,8 @@ mod tests {
 
         {
             let _guard =
-                CorePatternGuard::install_at("/h/coredrop", pattern.clone(), pipe.clone()).unwrap();
+                CorePatternGuard::install_at("/h/coredrop", 16, pattern.clone(), pipe.clone())
+                    .unwrap();
             assert_eq!(
                 std::fs::read_to_string(&pattern).unwrap(),
                 "|/h/coredrop capture %P %s %t %E"

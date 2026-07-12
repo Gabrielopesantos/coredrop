@@ -63,7 +63,8 @@ contents:
     "ID": "coredrop-expire",
     "Filter": { "Prefix": "local/" },
     "Status": "Enabled",
-    "Expiration": { "Days": 30 }
+    "Expiration": { "Days": 30 },
+    "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
   }]
 }
 ```
@@ -96,6 +97,13 @@ contents:
 
 Replace `local/` with your `capture.cluster` value.
 
+A capture abandoned mid-upload (the handler's upload deadline firing, or
+the handler dying) can leave an incomplete multipart upload behind -
+invisible to a normal listing but still billed. Pair the expiry rule with
+incomplete-multipart cleanup: S3's `AbortIncompleteMultipartUpload` (shown
+above), GCS's `AbortIncompleteMultipartUpload` lifecycle action; Azure
+garbage-collects uncommitted blocks on its own after about a week.
+
 ## Workload identity
 
 For IRSA / GKE Workload Identity / AKS Workload Identity, leave
@@ -112,7 +120,7 @@ serviceAccount:
 The daemon writes node-global sysctls (`core_pattern`, `core_pipe_limit`) and
 installs the handler binary on a hostPath. The kernel exec's the handler in
 the host PID/mount/network namespaces, so the handler's config and the
-rate-limit state also live on a hostPath (`capture.hostRunDir`) - env vars on
+rate-limit state also live on a hostPath (`corePattern.hostRunDir`) - env vars on
 the pod never reach the kernel-exec'd handler. Note the handler runs in the
 host network namespace: the object-store endpoint must be resolvable and
 reachable from the node itself (cluster DNS names won't resolve there).

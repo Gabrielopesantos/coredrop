@@ -24,9 +24,24 @@ securityContext:
 # -- Share the host PID namespace (the kernel exec's the handler there).
 hostPID: true
 
-# Capture config: the daemon installs core_pattern and writes the handler
-# config to a hostPath. The kernel exec's the handler in host namespaces
-# with a clean environment, so it reads the hostPath file, not these vars.
+# How the daemon wires itself into the kernel and host: installs the handler
+# binary to a hostPath, points core_pattern at it, and raises core_pipe_limit
+# so the kernel holds a crash open long enough for the handler to read it.
+# The kernel exec's the handler in host namespaces with a clean environment,
+# so it reads the hostRunDir config file the daemon wrote, not env vars.
+corePattern:
+  # Node-global sysctl: max crashes concurrently held open for the handler.
+  # Beyond it the kernel skips the dump entirely (handler never exec'd) rather
+  # than queuing - see the chart README's "Why privileged + hostPID" section.
+  # -- `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`.
+  pipeLimit: 128
+  # -- Host path the handler binary is installed to (resolved in the host mount ns).
+  hostBinDir: "/opt/coredrop/bin"
+  # -- Host path for the handler config and rate-limit state.
+  hostRunDir: "/run/coredrop"
+
+# What happens to a crash once the handler captures it: where it's counted
+# against, how much of it is kept, and where it's uploaded.
 capture:
   # -- Cluster name - the first segment of every object key.
   cluster: "local"
@@ -36,12 +51,10 @@ capture:
   # core payload is skipped.
   # -- Per-container core upload budget per hour; excess crashes keep manifest + snapshot only.
   maxCoresPerHour: 3
+  # -- Core upload deadline in seconds; past it the upload is abandoned. 0 disables.
+  uploadDeadlineSeconds: 300
   # -- Pass `environ` through un-redacted. Leave false; cores are secret-bearing.
   noRedact: false
-  # -- Host path the handler binary is installed to (resolved in the host mount ns).
-  hostBinDir: "/opt/coredrop/bin"
-  # -- Host path for the handler config and rate-limit state.
-  hostRunDir: "/run/coredrop"
   # S3-compatible / GCS / Azure object store for the core + proc-snapshot + manifest.
   # Leave `url` empty to run with no upload (cores discarded, pipe still drains).
   objectStore:

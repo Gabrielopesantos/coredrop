@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use object_store::ObjectStore;
 use tokio::io::AsyncRead;
 use tracing::{debug, info, warn};
@@ -168,11 +168,24 @@ pub async fn run(
         info!("no object store configured or identity unresolved; discarding core");
         Box::new(DiscardBackend)
     };
-    let stats = match backend
-        .drain_core(core_in)
-        .await
-        .context("draining core stream")
-    {
+    // The handler holds one of the node's `core_pipe_limit` slots for its
+    // whole lifetime, so the drain gets a deadline: past it the upload is
+    // abandoned. The abandoned drain follows the failure path below, so the
+    // rate-limit budget is refunded.
+    let drain = backend.drain_core(core_in);
+    let drained = if config.upload_deadline_secs == 0 {
+        drain.await
+    } else {
+        let deadline = std::time::Duration::from_secs(config.upload_deadline_secs);
+        match tokio::time::timeout(deadline, drain).await {
+            Ok(res) => res,
+            Err(_) => Err(anyhow!(
+                "core upload exceeded the {}s deadline; abandoning to free the core_pipe_limit slot",
+                config.upload_deadline_secs
+            )),
+        }
+    };
+    let stats = match drained.context("draining core stream") {
         Ok(stats) => stats,
         Err(e) => {
             // Nothing was stored: give the budget slot back, or a transient

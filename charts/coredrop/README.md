@@ -21,14 +21,16 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. |
-| capture.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
-| capture.hostRunDir | string | `"/run/coredrop"` | Host path for the handler config and rate-limit state. |
 | capture.maxCoreBytes | int | `2147483648` | Truncate stored cores at this many bytes (2 GiB default). |
 | capture.maxCoresPerHour | int | `3` | Per-container core upload budget per hour; excess crashes keep manifest + snapshot only. |
 | capture.noRedact | bool | `false` | Pass `environ` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
 | capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload. |
+| capture.uploadDeadlineSeconds | int | `300` | Core upload deadline in seconds; past it the upload is abandoned. 0 disables. |
+| corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
+| corePattern.hostRunDir | string | `"/run/coredrop"` | Host path for the handler config and rate-limit state. |
+| corePattern.pipeLimit | int | `128` | `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`. |
 | cri.crictlPath | string | `"/usr/local/bin/crictl"` | Path to the crictl binary on the node (host mount ns), for the handler's enrichment. |
 | cri.runtimeEndpoint | string | `"unix:///run/containerd/containerd.sock"` | CRI endpoint for crictl enrichment. |
 | cri.socketHostPath | string | `"/run/containerd/containerd.sock"` | Host path of the CRI socket, mounted so the in-pod crictl can reach it. |
@@ -91,7 +93,8 @@ contents:
     "ID": "coredrop-expire",
     "Filter": { "Prefix": "local/" },
     "Status": "Enabled",
-    "Expiration": { "Days": 30 }
+    "Expiration": { "Days": 30 },
+    "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
   }]
 }
 ```
@@ -124,6 +127,13 @@ contents:
 
 Replace `local/` with your `capture.cluster` value.
 
+A capture abandoned mid-upload (the handler's upload deadline firing, or
+the handler dying) can leave an incomplete multipart upload behind -
+invisible to a normal listing but still billed. Pair the expiry rule with
+incomplete-multipart cleanup: S3's `AbortIncompleteMultipartUpload` (shown
+above), GCS's `AbortIncompleteMultipartUpload` lifecycle action; Azure
+garbage-collects uncommitted blocks on its own after about a week.
+
 ## Workload identity
 
 For IRSA / GKE Workload Identity / AKS Workload Identity, leave
@@ -140,7 +150,7 @@ serviceAccount:
 The daemon writes node-global sysctls (`core_pattern`, `core_pipe_limit`) and
 installs the handler binary on a hostPath. The kernel exec's the handler in
 the host PID/mount/network namespaces, so the handler's config and the
-rate-limit state also live on a hostPath (`capture.hostRunDir`) - env vars on
+rate-limit state also live on a hostPath (`corePattern.hostRunDir`) - env vars on
 the pod never reach the kernel-exec'd handler. Note the handler runs in the
 host network namespace: the object-store endpoint must be resolvable and
 reachable from the node itself (cluster DNS names won't resolve there).

@@ -61,8 +61,9 @@ fn base_config(proc_dir: &std::path::Path) -> HandlerConfig {
         store_options: vec![],
         crictl_path: "/bin/false".into(), // degraded -- cgroup-only identity
         cri_runtime_endpoint: None,
-        max_core_bytes: 0,     // unlimited -- cap behavior tested explicitly
-        max_cores_per_hour: 0, // unlimited -- rate limit tested explicitly
+        max_core_bytes: 0,
+        max_cores_per_hour: 0,
+        upload_deadline_secs: 0,
         rate_state_path: proc_dir
             .parent()
             .unwrap()
@@ -332,6 +333,74 @@ async fn handler_run_failed_upload_refunds_rate_budget() {
         serde_json::from_slice(&get_object(&store, &manifest_key).await).unwrap();
     assert!(manifest.core.present, "refunded budget must allow the core");
     assert!(manifest.core.skipped_reason.is_none());
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// Core stream that never yields data nor EOF -- stands in for a hung store
+/// or kernel pipe in the upload-deadline test.
+struct StallReader;
+
+impl tokio::io::AsyncRead for StallReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Pending
+    }
+}
+
+/// Upload deadline: a stalled drain cannot hold the handler (and its
+/// `core_pipe_limit` slot) forever -- `run()` errors once the deadline passes,
+/// and the abandoned crash refunds its rate-limit budget.
+#[tokio::test(start_paused = true)]
+async fn handler_run_upload_deadline_aborts_stalled_drain() {
+    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+    let container_id = "abc123def456abc123def456";
+    let pid = 4246;
+
+    let tmp = unique_tmp("deadline");
+    let proc_dir = tmp.join("proc");
+    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(&proc_dir);
+    config.upload_deadline_secs = 5;
+    config.max_cores_per_hour = 1;
+
+    let args = CaptureArgs {
+        host_pid: pid,
+        signal: 11,
+        timestamp: 1_749_600_000,
+        exe: "!usr!bin!crasher".into(),
+    };
+    let mut stalled = StallReader;
+    assert!(
+        run(args, &config, &mut stalled, Some(store.clone()))
+            .await
+            .is_err(),
+        "a stalled drain must error at the deadline"
+    );
+    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000);
+    assert!(
+        store.get(&ObjectPath::from(core1.as_str())).await.is_err(),
+        "abandoned upload must not store a core"
+    );
+
+    // The abandoned crash refunded the budget of 1: the next crash uploads.
+    let args = CaptureArgs {
+        host_pid: pid,
+        signal: 11,
+        timestamp: 1_749_600_010,
+        exe: "!usr!bin!crasher".into(),
+    };
+    let mut core_in: &[u8] = b"core payload after deadline abort";
+    run(args, &config, &mut core_in, Some(store.clone()))
+        .await
+        .unwrap();
+    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010);
+    get_object(&store, &core2).await;
 
     std::fs::remove_dir_all(&tmp).ok();
 }

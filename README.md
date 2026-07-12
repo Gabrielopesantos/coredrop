@@ -11,9 +11,8 @@ identity via the CRI, and writes a JSON manifest next to the artifacts.
 
 ## Relation to core-dump-handler
 
-coredrop is inspired by
-[IBM/core-dump-handler](https://github.com/IBM/core-dump-handler), which
-pioneered the DaemonSet + `core_pattern` approach for Kubernetes. It differs
+coredrop is inspired by [IBM/core-dump-handler](https://github.com/IBM/core-dump-handler),
+a well-known implementation of the DaemonSet + `core_pattern` approach for Kubernetes. It differs
 in a few deliberate ways:
 
 - **Streaming, no node disk** - core-dump-handler's composer writes a zip
@@ -43,7 +42,7 @@ The single `coredrop` binary runs in two modes:
 
 - **Daemon** (`coredrop`) - the long-running DaemonSet container. At startup
   it points `/proc/sys/kernel/core_pattern` at the handler, raises
-  `core_pipe_limit` so the kernel waits for the handler, and writes the
+  `core_pipe_limit` so more concurrent core dumps can be held open, and writes the
   handler's config to a hostPath file. On shutdown it restores the previous
   sysctl values.
 - **Capture handler** (`coredrop capture %P %s %t %E`) - the short-lived
@@ -88,6 +87,17 @@ Objects land at:
   limiter never loses a core.
 - **Restore on shutdown** - the daemon restores the node's original
   `core_pattern` and `core_pipe_limit` when it stops.
+
+## Limitations
+
+`core_pipe_limit` caps how many crashes the kernel will hold open for the
+handler at once (coredrop sets 128). Per `man 5 core`, crashes beyond the
+cap are skipped silently: the handler is never exec'd, so there is no
+manifest, log line, or k8s Event - the only trace is
+`Pid <N> over core_pipe_limit` in the node's kernel log. The upload
+deadline (`--upload-deadline-secs`, default 300) keeps a slow store from
+pinning slots and widening that window. `desm`/`journalctl -k` can be used to
+check for dropped crashes.
 
 ## Events
 
@@ -183,6 +193,8 @@ The main ones:
 | `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://…` / `gs://…` / `az://…`; unset = drain but store nothing |
 | `--max-core-bytes` | `CAPTURE_MAX_CORE_BYTES` | 2 GiB | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-container upload budget; 0 = unlimited |
+| `--upload-deadline-secs` | `CAPTURE_UPLOAD_DEADLINE_SECS` | 300 | Per-core upload deadline; past it the upload is abandoned to free the `core_pipe_limit` slot; 0 = no deadline |
+| `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` through un-redacted |
 | `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
 | `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture |
@@ -213,6 +225,15 @@ tests/          integration tests (handler flow, crictl enrichment)
 charts/coredrop Helm chart
 deploy/local    local live-test stack (lima + k3s + MinIO + smoke test)
 ```
+
+## TODO
+
+When a crash storm exceeds `core_pipe_limit`, the kernel skips the excess 
+dumps silently (see Limitations); the only trace is the node's kernel log.
+The daemon could tail `/dev/kmsg` for `Pid <N> over core_pipe_limit` and 
+surface each drop - as a metric once coredrop grows a metrics endpoint 
+(it has none today), and possibly as a node-scoped k8s Event. Until then
+the kernel log is the only signal.
 
 ## License
 

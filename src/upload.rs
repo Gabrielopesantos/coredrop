@@ -257,8 +257,9 @@ pub fn store_options_from_env() -> Vec<(String, String)> {
 }
 
 /// Retry policy for cloud uploads. `object_store` defaults to 10 retries over
-/// 3 minutes; the handler may be holding the kernel's core pipe mid-multipart,
-/// so bound the worst case tighter.
+/// 3 minutes; the handler may be holding one of the node's `core_pipe_limit`
+/// concurrency slots mid-multipart, and a slow store keeps that slot occupied
+/// longer, so bound the worst case tighter.
 fn retry_config() -> object_store::RetryConfig {
     object_store::RetryConfig {
         max_retries: 3,

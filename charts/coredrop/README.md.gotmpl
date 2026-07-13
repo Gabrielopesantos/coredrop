@@ -7,7 +7,7 @@ installs the kernel `core_pattern` handler and streams captured cores,
 ## Install
 
 ```sh
-helm install coredrop oci://ghcr.io/coredrop/charts/coredrop \
+helm install coredrop oci://ghcr.io/gabrielopesantos/charts/coredrop \
   -n coredrop-system --create-namespace \
   --set capture.objectStore.url=s3://crash-artifacts \
   --set capture.objectStore.config.AWS_REGION=us-east-1

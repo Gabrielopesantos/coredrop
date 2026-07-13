@@ -1,10 +1,14 @@
 name: CI
 
+# Docs-only changes skip CI. Deliberately a denylist (paths-ignore, not paths)
+# so new code paths are checked by default.
 on:
   push:
     branches: [main]
+    paths-ignore: ["README.md", "LICENSE", "deploy/**"]
   pull_request:
     branches: [main]
+    paths-ignore: ["README.md", "LICENSE", "deploy/**"]
 
 env:
   CARGO_TERM_COLOR: always

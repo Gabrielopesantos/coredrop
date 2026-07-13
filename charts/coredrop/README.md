@@ -7,7 +7,7 @@ installs the kernel `core_pattern` handler and streams captured cores,
 ## Install
 
 ```sh
-helm install coredrop oci://ghcr.io/coredrop/charts/coredrop \
+helm install coredrop oci://ghcr.io/gabrielopesantos/charts/coredrop \
   -n coredrop-system --create-namespace \
   --set capture.objectStore.url=s3://crash-artifacts \
   --set capture.objectStore.config.AWS_REGION=us-east-1
@@ -38,7 +38,7 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | fullnameOverride | string | `""` | Override the full generated name of chart resources. |
 | hostPID | bool | `true` | Share the host PID namespace (the kernel exec's the handler there). |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
-| image.repository | string | `"ghcr.io/coredrop/coredrop"` | Container image repository (published on `app-v*` tags). |
+| image.repository | string | `"ghcr.io/gabrielopesantos/coredrop"` | Container image repository (published on `app-v*` tags). |
 | image.tag | string | `""` | Image tag; empty defaults to `.Chart.AppVersion`. |
 | logLevel | string | `"info"` | `RUST_LOG` filter for the daemon. |
 | nameOverride | string | `""` | Override the chart name segment of resource names. |

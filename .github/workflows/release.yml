@@ -1,8 +1,8 @@
 name: Release
 
 # Two independent tag prefixes:
-#   app-v<ver>   -> build + push the multi-arch image ghcr.io/coredrop/coredrop:<ver> (+ latest)
-#   chart-v<ver> -> package + push the chart to oci://ghcr.io/coredrop/charts
+#   app-v<ver>   -> build + push the multi-arch image ghcr.io/gabrielopesantos/coredrop:<ver> (+ latest)
+#   chart-v<ver> -> package + push the chart to oci://ghcr.io/gabrielopesantos/charts
 # The chart's appVersion (-> image tag) is bumped by a prior commit, not here.
 on:
   push:
@@ -15,8 +15,8 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/coredrop/coredrop
-  CHART_REPO: oci://ghcr.io/coredrop/charts
+  IMAGE: ghcr.io/gabrielopesantos/coredrop
+  CHART_REPO: oci://ghcr.io/gabrielopesantos/charts
 
 jobs:
   # --- image: native per-arch build, then a merged manifest list --------------

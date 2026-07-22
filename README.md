@@ -190,7 +190,7 @@ The main ones:
 | Flag | Env | Default | Purpose |
 | --- | --- | --- | --- |
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
-| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://…` / `gs://…` / `az://…`; unset = drain but store nothing |
+| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...` / `gs://...` / `az://...`; unset = drain but store nothing |
 | `--max-core-bytes` | `CAPTURE_MAX_CORE_BYTES` | 2 GiB | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-container upload budget; 0 = unlimited |
 | `--upload-deadline-secs` | `CAPTURE_UPLOAD_DEADLINE_SECS` | 300 | Per-core upload deadline; past it the upload is abandoned to free the `core_pipe_limit` slot; 0 = no deadline |
@@ -200,9 +200,13 @@ The main ones:
 | `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture |
 
 Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
-`AZURE_STORAGE_ACCESS_KEY`, …) are read from the environment only - never
+`AZURE_STORAGE_ACCESS_KEY`, ...) are read from the environment only - never
 flags - and only an allowlist of keys is forwarded to the handler
 (`src/upload.rs`, `ALLOWED_STORE_OPTS`).
+
+The handler config file (`handler.json`) therefore contains these credentials
+in plaintext; the daemon writes it mode `0600` on a `0700` directory and
+removes it (along with the capture-event socket) on shutdown.
 
 ## Development
 

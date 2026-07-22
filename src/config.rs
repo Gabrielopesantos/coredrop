@@ -5,6 +5,8 @@
 //! capture config to a hostPath file at startup ([`HandlerConfig::write`]);
 //! the handler reads it ([`HandlerConfig::read`]) from the same host path.
 
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,6 +17,17 @@ use serde::{Deserialize, Serialize};
 use crate::upload;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/run/coredrop/handler.json";
+
+/// Create `dir` (and parents) mode `0700` if missing - `create_dir_all`
+/// is a no-op on an existing dir and does not touch its mode.
+///
+/// # Errors
+///
+/// Fails when the directory cannot be created or its mode cannot be set.
+pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
 
 /// Default cap on stored (uncompressed) core bytes per crash: 2 GiB.
 pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -196,17 +209,32 @@ impl HandlerConfig {
     /// Serialize the config to `path` (creating the parent dir), so the
     /// kernel-exec'd handler can read it.
     ///
+    /// The parent dir is created mode `0700` and the file itself mode `0600`:
+    /// `store_options` carries object-store credentials forwarded from the
+    /// daemon's environment, written here in plaintext on a hostPath.
+    ///
     /// # Errors
     ///
-    /// Fails when the parent dir cannot be created or the file cannot be
-    /// written.
+    /// Fails when the parent dir cannot be created/chmod'd, or the file
+    /// cannot be created/written/chmod'd.
     pub fn write(&self, path: &str) -> Result<()> {
         if let Some(parent) = Path::new(path).parent() {
-            std::fs::create_dir_all(parent)
+            ensure_private_dir(parent)
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
         }
         let json = serde_json::to_vec_pretty(self).context("serializing handler config")?;
-        std::fs::write(path, json).with_context(|| format!("writing handler config {path}"))?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("opening handler config {path}"))?;
+
+        let mut writer = std::io::BufWriter::new(file);
+        writer
+            .write_all(&json)
+            .with_context(|| format!("writing handler config {path}"))?;
         Ok(())
     }
 
@@ -220,18 +248,21 @@ impl HandlerConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
 
+    // Nested one level below the system temp dir so `write()`'s
+    // `ensure_private_dir` only ever chmods a dir this test owns - never the
+    // shared system temp dir itself.
     fn tmp(tag: &str) -> String {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "coredrop-cfg-{}-{tag}-{nanos}.json",
-            std::process::id()
-        ));
+        p.push(format!("coredrop-cfg-{}-{tag}-{nanos}", std::process::id()));
+        p.push("handler.json");
         p.to_string_lossy().into_owned()
     }
 
@@ -259,6 +290,25 @@ mod tests {
         let got = HandlerConfig::read(&path).unwrap();
         assert_eq!(got, cfg);
         std::fs::remove_file(&path).ok();
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            std::fs::remove_dir_all(parent).ok();
+        }
+    }
+
+    #[test]
+    fn write_sets_0600_file_and_0700_parent_dir() {
+        let path = tmp("perm");
+        HandlerConfig::default().write(&path).unwrap();
+
+        let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "config file should be mode 0600");
+
+        let parent = std::path::Path::new(&path).parent().unwrap();
+        let dir_mode = std::fs::metadata(parent).unwrap().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "config parent dir should be mode 0700");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(parent).ok();
     }
 
     #[test]

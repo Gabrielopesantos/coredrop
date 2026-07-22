@@ -5,7 +5,7 @@
 //! entry's value (never the key) when either the key matches a curated
 //! secret keyword *or* the value looks secret-shaped (high-entropy token, JWT,
 //! or PEM block). The match is deliberately not a greedy substring over
-//! the whole entry: `API_TIMEOUT=30` must survive while `API_KEY=…` must not.
+//! the whole entry: `API_TIMEOUT=30` must survive while `API_KEY=...` must not.
 //!
 //! Cores are secret-bearing regardless - this only governs the small `environ`
 //! blob that travels in the `/proc` snapshot.
@@ -106,7 +106,7 @@ impl Redactor {
     }
 }
 
-/// Redact the password in a `scheme://user:pass@host…` connection string,
+/// Redact the password in a `scheme://user:pass@host...` connection string,
 /// returning the rewritten value or `None` when there is no userinfo password.
 fn redact_url_userinfo(value: &str) -> Option<String> {
     let scheme_end = value.find("://")?;

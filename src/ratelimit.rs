@@ -12,10 +12,13 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+
+use crate::config::ensure_private_dir;
 
 /// Sliding window the per-container budget applies to.
 pub const RATE_WINDOW_SECS: i64 = 3600;
@@ -113,13 +116,14 @@ impl RateLimiter {
         now: i64,
     ) -> std::io::Result<RateDecision> {
         if let Some(parent) = self.state_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            ensure_private_dir(parent)?;
         }
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
+            .mode(0o600)
             .open(&self.state_path)?;
         // Blocking exclusive lock: contenders are only concurrent handlers on
         // this node, each holding the lock for a few milliseconds.
@@ -167,17 +171,31 @@ impl RateLimiter {
     clippy::cast_possible_truncation
 )]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
 
+    // Nested one level below the system temp dir so `ensure_private_dir`
+    // only ever chmods a dir this test owns - never the shared system temp
+    // dir itself.
     fn tmp_state(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "coredrop-ratelimit-{}-{tag}-{nanos}.json",
-            std::process::id()
-        ))
+        std::env::temp_dir()
+            .join(format!(
+                "coredrop-ratelimit-{}-{tag}-{nanos}",
+                std::process::id()
+            ))
+            .join("recent.json")
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        std::fs::remove_file(path).ok();
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir_all(parent).ok();
+        }
     }
 
     #[test]
@@ -191,7 +209,29 @@ mod tests {
             rl.check_and_record("cid-a", 1001),
             RateDecision::Suppressed { recent: 3 }
         );
-        std::fs::remove_file(&path).ok();
+        cleanup(&path);
+    }
+
+    #[test]
+    fn check_and_record_creates_0700_dir_and_0600_state_file() {
+        let path = tmp_state("permtest");
+        let rl = RateLimiter::new(&path, 3);
+        assert_eq!(rl.check_and_record("cid-perm", 1000), RateDecision::Allowed);
+
+        let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "rate-limit state file should be mode 0600"
+        );
+
+        let parent = path.parent().unwrap();
+        let dir_mode = std::fs::metadata(parent).unwrap().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "rate-limit state parent dir should be mode 0700"
+        );
+
+        cleanup(&path);
     }
 
     #[test]
@@ -208,7 +248,7 @@ mod tests {
             rl.check_and_record("cid-a", 1000 + RATE_WINDOW_SECS + 1),
             RateDecision::Allowed
         );
-        std::fs::remove_file(&path).ok();
+        cleanup(&path);
     }
 
     #[test]
@@ -229,7 +269,7 @@ mod tests {
             rl.check_and_record("cid-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
-        std::fs::remove_file(&path).ok();
+        cleanup(&path);
     }
 
     #[test]
@@ -242,6 +282,7 @@ mod tests {
     #[test]
     fn corrupt_state_self_heals() {
         let path = tmp_state("corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{not json!").unwrap();
         let rl = RateLimiter::new(&path, 1);
         assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
@@ -249,7 +290,7 @@ mod tests {
             rl.check_and_record("cid-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
-        std::fs::remove_file(&path).ok();
+        cleanup(&path);
     }
 
     #[test]
@@ -263,7 +304,7 @@ mod tests {
         );
         rl.refund("cid-a", 1000);
         assert_eq!(rl.check_and_record("cid-a", 1002), RateDecision::Allowed);
-        std::fs::remove_file(&path).ok();
+        cleanup(&path);
     }
 
     #[test]
@@ -277,7 +318,7 @@ mod tests {
             rl.check_and_record("cid-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
-        std::fs::remove_file(&path).ok();
+        cleanup(&path);
     }
 
     #[test]
@@ -298,6 +339,6 @@ mod tests {
             .filter(|d| *d == RateDecision::Allowed)
             .count();
         assert_eq!(allowed as u32, max, "flock must serialize check-and-record");
-        std::fs::remove_file(&path).ok();
+        cleanup(&path);
     }
 }

@@ -5,9 +5,9 @@
 //! makes the object key handler-derivable before any enrichment.
 //!
 //! Two cgroup layouts appear in the wild, by the kubelet's cgroup driver:
-//!   - cgroupfs: `…/kubepods/<qos>/pod<uid>/<containerID>`. `<uid>` keeps
+//!   - cgroupfs: `.../kubepods/<qos>/pod<uid>/<containerID>`. `<uid>` keeps
 //!     its dashes; `<containerID>` is the bare hex id.
-//!   - systemd: `…/kubepods-<qos>-pod<uid>.slice/cri-containerd-<cid>.scope`.
+//!   - systemd: `.../kubepods-<qos>-pod<uid>.slice/cri-containerd-<cid>.scope`.
 //!     `<uid>` has its dashes rewritten to `_`; the container id wears a
 //!     runtime prefix and a `.scope` suffix.
 //!

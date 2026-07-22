@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use crate::config::ensure_private_dir;
 use crate::events::{CaptureEventPayload, Outcome};
 
 const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
@@ -28,12 +29,17 @@ const AGGREGATION_TTL: Duration = Duration::from_hours(1);
 /// an unclean previous shutdown first (binding to an existing path otherwise
 /// fails with `AddrInUse`).
 ///
+/// The parent dir is created mode `0700`, matching the handler-config
+/// dir on the same hostPath. (The socket file's own permissions are
+/// handled separately.)
+///
 /// # Errors
 ///
-/// Fails when the parent dir cannot be created or the bind itself fails.
+/// Fails when the parent dir cannot be created/chmod'd or the bind itself
+/// fails.
 pub fn bind_socket(path: &str) -> std::io::Result<tokio::net::UnixDatagram> {
     if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let _ = std::fs::remove_file(path);
     let std_socket = StdUnixDatagram::bind(path)?;
@@ -483,6 +489,34 @@ mod tests {
         rt.block_on(async {
             let _socket = bind_socket(sock_path.to_str().unwrap()).unwrap();
         });
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bind_socket_creates_parent_dir_mode_0700() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "coredrop-events-permtest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sock_path = dir.join("events.sock");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _socket = bind_socket(sock_path.to_str().unwrap()).unwrap();
+        });
+
+        let mode = std::fs::metadata(&dir).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o700, "events socket parent dir should be mode 0700");
 
         std::fs::remove_dir_all(&dir).ok();
     }

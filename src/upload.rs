@@ -228,14 +228,33 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// The `AWS_*` and GCP/Azure keys `object_store` recognizes. Forwarding only
 /// these (an allowlist) keeps an unknown env key from making `parse_url_opts`
 /// error out and needlessly disabling capture.
+// These are the exact env-var-shaped keys each cloud's workload-identity
+// webhook injects into the pod, and each is confirmed wired to a real credential
+// provider, not just stored and ignored:
+//
+// - IRSA (EKS): the pod-identity webhook injects `AWS_ROLE_ARN` +
+//   `AWS_WEB_IDENTITY_TOKEN_FILE` (+ `AWS_DEFAULT_REGION`).
+//   `AmazonS3Builder` reads both and feeds them to `WebIdentityProvider`
+//   (assume-role-with-web-identity).
+// - AKS workload identity: the webhook injects `AZURE_CLIENT_ID`,
+//   `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_AUTHORITY_HOST`.
+//   `MicrosoftAzureBuilder` feeds client id + tenant id + federated token
+//   file to `WorkloadIdentityOAuthProvider`.
+// - GKE workload identity: `GoogleCloudStorageBuilder` falls back to the GCE
+//   metadata server (`InstanceCredentialProvider`) with no env vars at all
+//   when no service-account key/path is configured - nothing to add
+//   to this allowlist for GCP WI to work.
 pub const ALLOWED_STORE_OPTS: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
     "AWS_REGION",
+    "AWS_DEFAULT_REGION",
     "AWS_ENDPOINT",
     "AWS_ALLOW_HTTP",
     "AWS_VIRTUAL_HOSTED_STYLE_REQUEST",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
     "GOOGLE_SERVICE_ACCOUNT",
     "GOOGLE_SERVICE_ACCOUNT_KEY",
     "AZURE_STORAGE_ACCOUNT_NAME",
@@ -243,6 +262,10 @@ pub const ALLOWED_STORE_OPTS: &[&str] = &[
     "AZURE_STORAGE_CLIENT_ID",
     "AZURE_STORAGE_CLIENT_SECRET",
     "AZURE_STORAGE_TENANT_ID",
+    "AZURE_CLIENT_ID",
+    "AZURE_TENANT_ID",
+    "AZURE_FEDERATED_TOKEN_FILE",
+    "AZURE_AUTHORITY_HOST",
 ];
 
 /// Collect the `object_store` config options ([`ALLOWED_STORE_OPTS`]) present
@@ -531,5 +554,43 @@ mod tests {
     fn invalid_url_yields_none() {
         assert!(object_store_from_url_opts("not a url", vec![]).is_none());
         assert!(object_store_from_url_opts("bogus://x", vec![]).is_none());
+    }
+
+    // `std::env::vars` is process-global; serialize the env-mutating test(s)
+    // in this module so a parallel `cargo test` run can't interleave sets.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn store_options_from_env_forwards_workload_identity_keys() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let wi_keys = [
+            "AWS_ROLE_ARN",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_DEFAULT_REGION",
+            "AZURE_CLIENT_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_FEDERATED_TOKEN_FILE",
+            "AZURE_AUTHORITY_HOST",
+        ];
+        // SAFETY: serialized by ENV_LOCK above; no other test in this binary
+        // mutates these specific keys.
+        unsafe {
+            for key in wi_keys {
+                std::env::set_var(key, "test-value");
+            }
+            std::env::set_var("NOT_AN_ALLOWED_KEY", "leak-me-not");
+        }
+
+        let opts: std::collections::HashMap<_, _> = store_options_from_env().into_iter().collect();
+
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            for key in wi_keys {
+                assert_eq!(opts.get(key).map(String::as_str), Some("test-value"));
+                std::env::remove_var(key);
+            }
+            std::env::remove_var("NOT_AN_ALLOWED_KEY");
+        }
+        assert!(!opts.contains_key("NOT_AN_ALLOWED_KEY"));
     }
 }

@@ -43,6 +43,7 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | logLevel | string | `"info"` | `RUST_LOG` filter for the daemon. |
 | nameOverride | string | `""` | Override the chart name segment of resource names. |
 | nodeSelector | object | `{}` | Pod node selector. |
+| podLabels | object | `{}` | Extra labels merged onto the daemon pod template. |
 | resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | DaemonSet resource requests/limits. |
 | securityContext.privileged | bool | `true` | Run the daemon privileged (required to write node-global sysctls). |
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
@@ -53,13 +54,20 @@ Only allowlisted object-store keys are forwarded (see `src/upload.rs`,
 
 - `capture.objectStore.config` (non-secret):
   - `AWS_REGION`
+  - `AWS_DEFAULT_REGION`
   - `AWS_ENDPOINT`
   - `AWS_ALLOW_HTTP`
   - `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`
+  - `AWS_ROLE_ARN` (IRSA)
+  - `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA)
   - `GOOGLE_SERVICE_ACCOUNT`
   - `AZURE_STORAGE_ACCOUNT_NAME`
   - `AZURE_STORAGE_CLIENT_ID`
   - `AZURE_STORAGE_TENANT_ID`
+  - `AZURE_CLIENT_ID` (AKS workload identity)
+  - `AZURE_TENANT_ID` (AKS workload identity)
+  - `AZURE_FEDERATED_TOKEN_FILE` (AKS workload identity)
+  - `AZURE_AUTHORITY_HOST` (AKS workload identity)
 - `capture.objectStore.credentials` (Secret):
   - `AWS_ACCESS_KEY_ID`
   - `AWS_SECRET_ACCESS_KEY`
@@ -144,6 +152,32 @@ serviceAccount:
   annotations:
     eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/coredrop
 ```
+
+Each provider's admission webhook injects credentials as env vars into the
+daemon pod; only the keys in `ALLOWED_STORE_OPTS` (above) are forwarded on to
+the kernel-exec'd handler:
+
+- **IRSA (EKS):** the pod-identity webhook injects `AWS_ROLE_ARN` +
+  `AWS_WEB_IDENTITY_TOKEN_FILE` (+ `AWS_DEFAULT_REGION`) - forwarded and wired
+  to assume-role-with-web-identity.
+- **AKS workload identity:** the webhook only injects credentials into pods
+  labeled `azure.workload.identity/use: "true"`; set that via `podLabels` and
+  annotate the ServiceAccount with `azure.workload.identity/client-id` per
+  Azure's docs:
+
+  ```yaml
+  podLabels:
+    azure.workload.identity/use: "true"
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: "<client-id>"
+  ```
+
+  The webhook then injects `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+  `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_AUTHORITY_HOST` - all forwarded.
+- **GKE workload identity:** no env vars needed or forwarded - the handler
+  authenticates via the node's metadata server automatically, same as any
+  other GCE-hosted workload.
 
 ## Why privileged + hostPID
 

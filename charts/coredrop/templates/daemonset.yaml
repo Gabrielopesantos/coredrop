@@ -12,6 +12,9 @@ spec:
     metadata:
       labels:
         {{- include "coredrop.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
       hostPID: {{ .Values.hostPID }}

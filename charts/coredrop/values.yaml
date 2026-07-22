@@ -62,9 +62,14 @@ capture:
     url: ""
     # Non-secret client options, rendered as plain env vars on the daemon.
     # The daemon forwards only the keys it recognizes (src/upload.rs
-    # ALLOWED_STORE_OPTS): AWS_REGION, AWS_ENDPOINT, AWS_ALLOW_HTTP,
-    # AWS_VIRTUAL_HOSTED_STYLE_REQUEST, GOOGLE_SERVICE_ACCOUNT,
-    # AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CLIENT_ID, AZURE_STORAGE_TENANT_ID.
+    # ALLOWED_STORE_OPTS): AWS_REGION, AWS_DEFAULT_REGION, AWS_ENDPOINT,
+    # AWS_ALLOW_HTTP, AWS_VIRTUAL_HOSTED_STYLE_REQUEST, AWS_ROLE_ARN,
+    # AWS_WEB_IDENTITY_TOKEN_FILE (IRSA), GOOGLE_SERVICE_ACCOUNT,
+    # AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CLIENT_ID,
+    # AZURE_STORAGE_TENANT_ID, AZURE_CLIENT_ID, AZURE_TENANT_ID,
+    # AZURE_FEDERATED_TOKEN_FILE, AZURE_AUTHORITY_HOST (AKS workload identity).
+    # GKE workload identity needs no config here - it authenticates via the
+    # node's metadata server automatically.
     # -- Non-secret object-store client options, rendered as plain env vars (allowlisted).
     config: {}
     #   AWS_REGION: "us-east-1"
@@ -118,3 +123,10 @@ tolerations:
 
 # -- Pod node selector.
 nodeSelector: {}
+
+# Merged onto the DaemonSet pod template's labels. Needed for AKS workload
+# identity, whose webhook only injects credentials into pods carrying
+# azure.workload.identity/use: "true" - see the chart README's "Workload
+# identity" section.
+# -- Extra labels merged onto the daemon pod template.
+podLabels: {}

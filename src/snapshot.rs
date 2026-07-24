@@ -62,6 +62,7 @@ impl ProcSnapshot {
             }
         }
 
+        // environ is read separately from other files as it might need to be redacted
         if let Some((raw, truncated)) = read_capped(&base.join("environ")) {
             files.push(SnapshotFile {
                 name: "environ".to_string(),

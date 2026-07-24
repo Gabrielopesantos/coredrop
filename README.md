@@ -28,7 +28,7 @@ in a few deliberate ways:
 - **Secret redaction by default** - captured `environ` values are redacted
   via a keyword list plus an entropy/shape heuristic before they leave the
   node.
-- **Built-in guards** - per-container upload rate limit and a stored core size
+- **Built-in guards** - per-pod upload rate limit and a stored core size
   cap, so a crash-looping pod cannot flood the bucket.
 - **Loose artifacts + manifest, not a zip** - core, `/proc` snapshot tar, and
   JSON manifest are separate objects under a predictable key scheme, so
@@ -81,7 +81,7 @@ Objects land at:
   secret-bearing regardless; treat the bucket accordingly.
 - **Size cap** - stored core bytes are capped per crash (default 2 GiB);
   the remainder of the stream is drained but not stored.
-- **Rate limit** - per-container core-upload budget (default 3/hour) so a
+- **Rate limit** - per-pod core-upload budget (default 3/hour) so a
   crash loop can't flood the bucket. Suppressed crashes still get a proc
   snapshot and manifest, just no core. The limiter fails open: a broken
   limiter never loses a core.
@@ -192,7 +192,7 @@ The main ones:
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
 | `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...` / `gs://...` / `az://...`; unset = drain but store nothing |
 | `--max-core-bytes` | `CAPTURE_MAX_CORE_BYTES` | 2 GiB | Stored core cap per crash; 0 = unlimited |
-| `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-container upload budget; 0 = unlimited |
+| `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod upload budget; 0 = unlimited |
 | `--upload-deadline-secs` | `CAPTURE_UPLOAD_DEADLINE_SECS` | 300 | Per-core upload deadline; past it the upload is abandoned to free the `core_pipe_limit` slot; 0 = no deadline |
 | `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` through un-redacted |

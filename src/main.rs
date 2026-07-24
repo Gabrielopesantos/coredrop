@@ -64,7 +64,7 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_MAX_CORE_BYTES", default_value_t = coredrop::config::DEFAULT_MAX_CORE_BYTES)]
     max_core_bytes: u64,
 
-    /// Max core uploads per container per hour; 0 = unlimited. Suppressed
+    /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
     /// crashes still get a proc snapshot and manifest, just no core.
     #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = coredrop::config::DEFAULT_MAX_CORES_PER_HOUR)]
     max_cores_per_hour: u32,

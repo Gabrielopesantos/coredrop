@@ -1,4 +1,4 @@
-//! Per-container core-upload rate limiting.
+//! Per-pod core-upload rate limiting.
 //!
 //! A crash-looping pod would otherwise upload a full core every few seconds,
 //! forever. Handlers are short-lived kernel-exec'd processes, so the limiter
@@ -7,7 +7,7 @@
 //!
 //! Fail-open by design: any IO or parse error yields `Allowed` - a broken
 //! limiter must never lose a core. Only *allowed* uploads are recorded, so a
-//! crash-looping container keeps getting its budget every window instead of
+//! crash-looping pod keeps getting its budget every window instead of
 //! being starved forever.
 
 use std::collections::BTreeMap;
@@ -20,7 +20,7 @@ use tracing::warn;
 
 use crate::config::ensure_private_dir;
 
-/// Sliding window the per-container budget applies to.
+/// Sliding window the per-pod budget applies to.
 pub const RATE_WINDOW_SECS: i64 = 3600;
 
 /// Whether a core upload may proceed for a container.
@@ -33,7 +33,7 @@ pub enum RateDecision {
     },
 }
 
-/// `container_id -> epoch seconds of allowed uploads` (pruned to the window).
+/// `pod_uid -> epoch seconds of allowed uploads` (pruned to the window).
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RateState {
     events: BTreeMap<String, Vec<i64>>,
@@ -55,11 +55,12 @@ impl RateLimiter {
     /// Atomically check the budget and record the upload if allowed.
     /// `now_epoch_secs` is the kernel's `%t` crash timestamp - deterministic
     /// and testable, and all handlers on a node share the same clock.
-    pub fn check_and_record(&self, container_id: &str, now_epoch_secs: i64) -> RateDecision {
+    /// `scope` is the pod UID, which is stable across container restarts.
+    pub fn check_and_record(&self, scope: &str, now_epoch_secs: i64) -> RateDecision {
         if self.max_per_hour == 0 {
             return RateDecision::Allowed;
         }
-        match self.locked_check_and_record(container_id, now_epoch_secs) {
+        match self.locked_check_and_record(scope, now_epoch_secs) {
             Ok(decision) => decision,
             Err(e) => {
                 warn!(error = %e, path = %self.state_path.display(),
@@ -73,17 +74,17 @@ impl RateLimiter {
     /// nothing (e.g. the object store was unreachable). Without the refund, a
     /// transient store outage would eat the whole budget with zero cores
     /// stored. Best-effort: errors are logged and swallowed.
-    pub fn refund(&self, container_id: &str, recorded_at: i64) {
+    pub fn refund(&self, scope: &str, recorded_at: i64) {
         if self.max_per_hour == 0 {
             return;
         }
-        if let Err(e) = self.locked_refund(container_id, recorded_at) {
+        if let Err(e) = self.locked_refund(scope, recorded_at) {
             warn!(error = %e, path = %self.state_path.display(),
                 "rate-limit refund failed; one budget slot stays consumed");
         }
     }
 
-    fn locked_refund(&self, container_id: &str, recorded_at: i64) -> std::io::Result<()> {
+    fn locked_refund(&self, scope: &str, recorded_at: i64) -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -94,12 +95,12 @@ impl RateLimiter {
         file.read_to_end(&mut bytes)?;
         let mut state: RateState = serde_json::from_slice(&bytes).unwrap_or_default();
 
-        if let Some(times) = state.events.get_mut(container_id) {
+        if let Some(times) = state.events.get_mut(scope) {
             if let Some(pos) = times.iter().rposition(|t| *t == recorded_at) {
                 times.remove(pos);
             }
             if times.is_empty() {
-                state.events.remove(container_id);
+                state.events.remove(scope);
             }
         }
 
@@ -110,11 +111,7 @@ impl RateLimiter {
         Ok(())
     }
 
-    fn locked_check_and_record(
-        &self,
-        container_id: &str,
-        now: i64,
-    ) -> std::io::Result<RateDecision> {
+    fn locked_check_and_record(&self, scope: &str, now: i64) -> std::io::Result<RateDecision> {
         if let Some(parent) = self.state_path.parent() {
             ensure_private_dir(parent)?;
         }
@@ -140,16 +137,11 @@ impl RateLimiter {
             !times.is_empty()
         });
 
-        let recent =
-            u32::try_from(state.events.get(container_id).map_or(0, Vec::len)).unwrap_or(u32::MAX);
+        let recent = u32::try_from(state.events.get(scope).map_or(0, Vec::len)).unwrap_or(u32::MAX);
         let decision = if recent >= self.max_per_hour {
             RateDecision::Suppressed { recent }
         } else {
-            state
-                .events
-                .entry(container_id.to_string())
-                .or_default()
-                .push(now);
+            state.events.entry(scope.to_string()).or_default().push(now);
             RateDecision::Allowed
         };
 
@@ -203,10 +195,10 @@ mod tests {
         let path = tmp_state("cap");
         let rl = RateLimiter::new(&path, 3);
         for _ in 0..3 {
-            assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
+            assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
         }
         assert_eq!(
-            rl.check_and_record("cid-a", 1001),
+            rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 3 }
         );
         cleanup(&path);
@@ -216,7 +208,7 @@ mod tests {
     fn check_and_record_creates_0700_dir_and_0600_state_file() {
         let path = tmp_state("permtest");
         let rl = RateLimiter::new(&path, 3);
-        assert_eq!(rl.check_and_record("cid-perm", 1000), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-perm", 1000), RateDecision::Allowed);
 
         let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(
@@ -238,14 +230,14 @@ mod tests {
     fn window_pruning_restores_budget() {
         let path = tmp_state("window");
         let rl = RateLimiter::new(&path, 1);
-        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
         assert_eq!(
-            rl.check_and_record("cid-a", 1001),
+            rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
         // Past the window, the old event is pruned.
         assert_eq!(
-            rl.check_and_record("cid-a", 1000 + RATE_WINDOW_SECS + 1),
+            rl.check_and_record("pod-a", 1000 + RATE_WINDOW_SECS + 1),
             RateDecision::Allowed
         );
         cleanup(&path);
@@ -255,18 +247,18 @@ mod tests {
     fn zero_means_unlimited() {
         let rl = RateLimiter::new("/nonexistent/never-touched.json", 0);
         for i in 0..100 {
-            assert_eq!(rl.check_and_record("cid-a", i), RateDecision::Allowed);
+            assert_eq!(rl.check_and_record("pod-a", i), RateDecision::Allowed);
         }
     }
 
     #[test]
-    fn containers_are_isolated() {
+    fn pods_are_isolated() {
         let path = tmp_state("iso");
         let rl = RateLimiter::new(&path, 1);
-        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
-        assert_eq!(rl.check_and_record("cid-b", 1000), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-b", 1000), RateDecision::Allowed);
         assert_eq!(
-            rl.check_and_record("cid-a", 1001),
+            rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
         cleanup(&path);
@@ -275,8 +267,8 @@ mod tests {
     #[test]
     fn fails_open_when_state_dir_is_unwritable() {
         let rl = RateLimiter::new("/proc/definitely/not/writable/state.json", 1);
-        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
-        assert_eq!(rl.check_and_record("cid-a", 1001), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-a", 1001), RateDecision::Allowed);
     }
 
     #[test]
@@ -285,9 +277,9 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{not json!").unwrap();
         let rl = RateLimiter::new(&path, 1);
-        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
         assert_eq!(
-            rl.check_and_record("cid-a", 1001),
+            rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
         cleanup(&path);
@@ -297,13 +289,13 @@ mod tests {
     fn refund_restores_a_consumed_slot() {
         let path = tmp_state("refund");
         let rl = RateLimiter::new(&path, 1);
-        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
+        assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
         assert_eq!(
-            rl.check_and_record("cid-a", 1001),
+            rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
-        rl.refund("cid-a", 1000);
-        assert_eq!(rl.check_and_record("cid-a", 1002), RateDecision::Allowed);
+        rl.refund("pod-a", 1000);
+        assert_eq!(rl.check_and_record("pod-a", 1002), RateDecision::Allowed);
         cleanup(&path);
     }
 
@@ -311,11 +303,11 @@ mod tests {
     fn refund_without_matching_record_is_harmless() {
         let path = tmp_state("refund-nop");
         let rl = RateLimiter::new(&path, 1);
-        rl.refund("cid-never-seen", 1000); // state file doesn't even exist
-        assert_eq!(rl.check_and_record("cid-a", 1000), RateDecision::Allowed);
-        rl.refund("cid-a", 999); // wrong timestamp - removes nothing
+        rl.refund("pod-never-seen", 1000); // state file doesn't even exist
+        assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
+        rl.refund("pod-a", 999); // wrong timestamp - removes nothing
         assert_eq!(
-            rl.check_and_record("cid-a", 1001),
+            rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
         cleanup(&path);
@@ -330,7 +322,7 @@ mod tests {
             let path = path.clone();
             handles.push(std::thread::spawn(move || {
                 let rl = RateLimiter::new(&path, max);
-                rl.check_and_record("cid-storm", 1000)
+                rl.check_and_record("pod-storm", 1000)
             }));
         }
         let allowed = handles

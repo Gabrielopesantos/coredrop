@@ -22,7 +22,7 @@ are drained (so the kernel completes the dump) but nothing is stored.
 |-----|------|---------|-------------|
 | capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. |
 | capture.maxCoreBytes | int | `2147483648` | Truncate stored cores at this many bytes (2 GiB default). |
-| capture.maxCoresPerHour | int | `3` | Per-container core upload budget per hour; excess crashes keep manifest + snapshot only. |
+| capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only. |
 | capture.noRedact | bool | `false` | Pass `environ` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |

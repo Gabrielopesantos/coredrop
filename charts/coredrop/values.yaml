@@ -47,9 +47,9 @@ capture:
   cluster: "local"
   # -- Truncate stored cores at this many bytes (2 GiB default).
   maxCoreBytes: 2147483648
-  # Per-container core upload rate limit; excess crashes still get a manifest,
+  # Per-pod core upload rate limit; excess crashes still get a manifest,
   # core payload is skipped.
-  # -- Per-container core upload budget per hour; excess crashes keep manifest + snapshot only.
+  # -- Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only.
   maxCoresPerHour: 3
   # -- Core upload deadline in seconds; past it the upload is abandoned. 0 disables.
   uploadDeadlineSeconds: 300

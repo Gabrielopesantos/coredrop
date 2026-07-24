@@ -58,7 +58,7 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
 - k3s runs its own containerd; the CRI socket is under
   `/run/k3s/containerd/`, not the upstream `/run/containerd/` default. The
   overlay sets both `cri.runtimeEndpoint` and `cri.socketHostPath`.
-- The per-container rate-limit state (`/run/coredrop/recent.json` on the
+- The per-pod rate-limit state (`/run/coredrop/recent.json` on the
   node) survives `helm uninstall`, so `up.sh` restarts the demo deployment to
   get a fresh container ID - otherwise a re-up would start already
   suppressed.

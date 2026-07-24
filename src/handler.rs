@@ -136,13 +136,13 @@ pub async fn run(
     let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
     let mut rate_recorded = false;
     let rate_suppressed = match (&identity, &store) {
-        (Some(id), Some(_)) => match limiter.check_and_record(&id.container_id, args.timestamp) {
+        (Some(id), Some(_)) => match limiter.check_and_record(&id.pod_uid, args.timestamp) {
             RateDecision::Suppressed { recent } => {
                 warn!(
-                    container_id = %id.container_id,
+                    pod_uid = %id.pod_uid,
                     recent,
                     max_per_hour = config.max_cores_per_hour,
-                    "per-container core budget exhausted - discarding core, keeping snapshot + manifest"
+                    "per-pod core budget exhausted - discarding core, keeping snapshot + manifest"
                 );
                 true
             }
@@ -191,7 +191,7 @@ pub async fn run(
             // Nothing was stored: give the budget slot back, or a transient
             // store outage would exhaust the budget with zero cores kept.
             if rate_recorded && let Some(id) = &identity {
-                limiter.refund(&id.container_id, args.timestamp);
+                limiter.refund(&id.pod_uid, args.timestamp);
             }
             info!(
                 outcome = Outcome::Failed.as_str(),

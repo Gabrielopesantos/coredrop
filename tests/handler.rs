@@ -280,6 +280,65 @@ async fn handler_run_rate_limit_suppresses_core_keeps_manifest() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
+/// 2a -- rate limit keyed by pod UID, not container ID: a restarted container
+/// gets a new container ID but keeps the same pod UID, so the budget must still
+/// apply.
+#[tokio::test]
+async fn handler_run_rate_limit_keys_by_pod_uid_not_container_id() {
+    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+    let container_id_1 = "abc123def456abc123def456";
+    let container_id_2 = "fedcba654321fedcba654321";
+    let pid_1 = 4250;
+    let pid_2 = 4251;
+
+    let tmp = unique_tmp("ratelimit-poduid");
+    let proc_dir = tmp.join("proc");
+    write_fixture_proc(&proc_dir, pid_1, pod_uid, container_id_1);
+    write_fixture_proc(&proc_dir, pid_2, pod_uid, container_id_2);
+
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(&proc_dir);
+    config.max_cores_per_hour = 1;
+
+    for (i, (pid, ts, _container_id)) in [
+        (pid_1, 1_749_600_000i64, container_id_1),
+        (pid_2, 1_749_600_010i64, container_id_2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let args = CaptureArgs {
+            host_pid: pid,
+            signal: 11,
+            timestamp: ts,
+            exe: "!usr!bin!crasher".into(),
+        };
+        let mut core_in: &[u8] = b"core payload for pod-uid rate limit test";
+        run(args, &config, &mut core_in, Some(store.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("run {i} failed: {e}"));
+    }
+
+    // First crash: full capture.
+    let core1 = upload::core_object_key("test", pod_uid, container_id_1, 1_749_600_000);
+    get_object(&store, &core1).await;
+
+    // Second crash: different container ID but same pod UID -> suppressed.
+    let core2 = upload::core_object_key("test", pod_uid, container_id_2, 1_749_600_010);
+    assert!(
+        store.get(&ObjectPath::from(core2.as_str())).await.is_err(),
+        "restarted container with same pod UID must inherit the rate-limit budget"
+    );
+
+    let manifest2_key = upload::manifest_object_key("test", pod_uid, container_id_2, 1_749_600_010);
+    let manifest2: Manifest =
+        serde_json::from_slice(&get_object(&store, &manifest2_key).await).unwrap();
+    assert!(!manifest2.core.present);
+    assert_eq!(manifest2.core.skipped_reason.as_deref(), Some("rate_limit"));
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 /// 2a -- rate limit refund: a crash whose core upload fails must not consume
 /// budget; the next crash still gets a full capture.
 #[tokio::test]

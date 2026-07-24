@@ -36,7 +36,7 @@ fn default_max_core_bytes() -> u64 {
     DEFAULT_MAX_CORE_BYTES
 }
 
-/// Default per-container core-upload budget per hour.
+/// Default per-pod core-upload budget per hour.
 pub const DEFAULT_MAX_CORES_PER_HOUR: u32 = 3;
 
 fn default_max_cores_per_hour() -> u32 {
@@ -105,7 +105,7 @@ pub struct HandlerConfig {
     /// written by older daemons parseable).
     #[serde(default = "default_max_core_bytes")]
     pub max_core_bytes: u64,
-    /// Max core uploads per container per hour; `0` = unlimited. Suppressed
+    /// Max core uploads per pod per hour; `0` = unlimited. Suppressed
     /// crashes still get a proc snapshot and manifest, just no core.
     #[serde(default = "default_max_cores_per_hour")]
     pub max_cores_per_hour: u32,

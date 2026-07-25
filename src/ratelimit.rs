@@ -16,7 +16,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::config::ensure_private_dir;
 
@@ -156,6 +156,24 @@ impl RateLimiter {
     }
 }
 
+/// Remove any existing rate-limit state file when a fresh daemon starts.
+/// A fresh daemon begins with a fresh per-pod budget window; stale state
+/// older than [`RATE_WINDOW_SECS`] is dead weight anyway. Best-effort: errors
+/// are logged and swallowed - a left-over state file must not prevent the
+/// daemon from starting.
+pub fn reset_at_startup(state_path: impl Into<PathBuf>) {
+    let path = state_path.into();
+    match std::fs::remove_file(&path) {
+        Ok(()) => info!(path = %path.display(), "removed stale rate-limit state"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(
+            error = %e,
+            path = %path.display(),
+            "failed to remove stale rate-limit state; continuing"
+        ),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -188,6 +206,25 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::remove_dir_all(parent).ok();
         }
+    }
+
+    #[test]
+    fn reset_at_startup_removes_existing_state_file() {
+        let path = tmp_state("reset");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(path.exists());
+        reset_at_startup(&path);
+        assert!(!path.exists(), "stale rate-limit state should be removed");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn reset_at_startup_is_noop_when_file_absent() {
+        let path = tmp_state("reset-absent");
+        assert!(!path.exists());
+        reset_at_startup(&path);
+        assert!(!path.exists());
     }
 
     #[test]

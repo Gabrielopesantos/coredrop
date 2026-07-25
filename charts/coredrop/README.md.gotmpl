@@ -111,6 +111,16 @@ incomplete-multipart cleanup: S3's `AbortIncompleteMultipartUpload` (shown
 above), GCS's `AbortIncompleteMultipartUpload` lifecycle action; Azure
 garbage-collects uncommitted blocks on its own after about a week.
 
+## Rate limit
+
+`capture.maxCoresPerHour` (default 3) is a per-pod sliding-window budget. The
+daemon stores the window state in `recent.json` on the same hostPath as the
+handler config (`corePattern.hostRunDir`). Because the state is on the node,
+it survives `helm uninstall`. A fresh daemon clears `recent.json` on startup
+and on shutdown, so a normal reinstall or pod restart begins with a fresh
+budget. Workloads that reuse the same pod UID across a rapid reinstall may
+still inherit the previous window until the new daemon starts and clears it.
+
 ## Workload identity
 
 For IRSA / GKE Workload Identity / AKS Workload Identity, leave

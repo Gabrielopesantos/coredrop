@@ -206,7 +206,9 @@ flags - and only an allowlist of keys is forwarded to the handler
 
 The handler config file (`handler.json`) therefore contains these credentials
 in plaintext; the daemon writes it mode `0600` on a `0700` directory and
-removes it (along with the capture-event socket) on shutdown.
+removes it (along with the capture-event socket and the `recent.json`
+rate-limit state) on shutdown. A fresh daemon also clears stale `recent.json`
+on startup.
 
 ## Development
 

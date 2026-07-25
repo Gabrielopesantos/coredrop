@@ -40,9 +40,10 @@ helm upgrade --install "$RELEASE" "$REPO_ROOT/charts/coredrop" \
 
 log "applying demo crash workload -> namespace $DEMO_NAMESPACE"
 kubectl apply -n "$DEMO_NAMESPACE" -f "$SCRIPT_DIR/workloads/segfault.yaml" >/dev/null
-# Restart the workload so re-ups get a fresh pod UID: the per-pod rate-limit
-# budget (/run/coredrop/recent.json on the node) survives helm uninstall, and a
-# re-used pod UID would start smoke already suppressed.
+# Restart the workload so re-ups get a fresh pod UID. The daemon now clears the
+# per-pod rate-limit state on startup and shutdown, but a rapid reinstall that
+# reuses the same pod UID could still see a stale window until the new daemon
+# starts and removes /run/coredrop/recent.json.
 kubectl -n "$DEMO_NAMESPACE" rollout restart deployment/crash-segfault >/dev/null 2>&1 || true
 
 log "workload applied; it faults on a short loop. Running smoke test (polls the bucket)"

@@ -147,6 +147,11 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
 
     let mut config = args.to_handler_config();
 
+    // A fresh daemon means a fresh per-pod budget window; stale rate-limit
+    // state on the hostPath is dead weight and can suppress a re-deployed
+    // workload that reuses a pod UID. Best-effort removal.
+    coredrop::ratelimit::reset_at_startup(&config.rate_state_path);
+
     // Bind the capture-event socket before writing the config, so the
     // handler only ever gets a path the daemon is actually listening on -
     // a bind failure degrades to events-disabled rather than the handler
@@ -211,8 +216,9 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     info!("shutdown signal received");
 
     // Best-effort cleanup: the hostPath mount otherwise leaves handler.json
-    // (forwarded store credentials) and the events socket behind on the node
-    // after DaemonSet uninstall. Never fail shutdown over this.
+    // (forwarded store credentials), the events socket, and the rate-limit
+    // state behind on the node after DaemonSet uninstall. Never fail shutdown
+    // over this.
     match std::fs::remove_file(config_path) {
         Ok(()) => info!(path = %config_path, "removed handler config"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -226,6 +232,15 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
                 warn!(error = %e, path = %sock_path, "failed to remove capture event socket");
             }
         }
+    }
+    match std::fs::remove_file(&config.rate_state_path) {
+        Ok(()) => info!(path = %config.rate_state_path, "removed rate-limit state"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(
+            error = %e,
+            path = %config.rate_state_path,
+            "failed to remove rate-limit state"
+        ),
     }
 
     // `_guard` drops here -> core_pattern restored.

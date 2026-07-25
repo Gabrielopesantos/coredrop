@@ -191,6 +191,9 @@ impl EventClient {
             host
         };
         let http = reqwest::Client::builder()
+            // The API server must never wedge the capture-event loop on an
+            // in-flight request; all event posts are best-effort.
+            .timeout(Duration::from_secs(30))
             .add_root_certificate(cert)
             .build()
             .ok()?;

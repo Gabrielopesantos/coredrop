@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
 use coredrop::config::HandlerConfig;
 use coredrop::crictl;
@@ -31,6 +32,7 @@ fn write_executable(path: &std::path::Path, script: &str) {
 fn config_with_crictl(crictl_path: &str) -> HandlerConfig {
     HandlerConfig {
         crictl_path: crictl_path.to_string(),
+        crictl_timeout_secs: 1,
         ..HandlerConfig::default()
     }
 }
@@ -95,11 +97,28 @@ async fn inspect_nonzero_exit_returns_none() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2b - nonexistent binary: spawn fails -> inspect degrades to None, no panic.
+/// 2b - timeout: crictl sleeps longer than the configured timeout -> inspect
+/// degrades to None.
 #[tokio::test]
-async fn inspect_nonexistent_binary_returns_none() {
+async fn inspect_times_out_and_returns_none() {
     let _guard = SPAWN_LOCK.lock().await;
-    let config = config_with_crictl("/nonexistent/path/to/crictl");
+    let tmp = unique_tmp("timeout");
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let script = tmp.join("crictl");
+    // Sleep longer than the 1s timeout configured in `config_with_crictl`.
+    write_executable(&script, "#!/bin/sh\nsleep 5\nprintf '%s' '{}'\n");
+
+    let config = config_with_crictl(script.to_str().unwrap());
+    let start = std::time::Instant::now();
     let info = crictl::inspect("any-id", &config).await;
-    assert!(info.is_none(), "missing binary must degrade to None");
+    let elapsed = start.elapsed();
+
+    assert!(info.is_none(), "timed-out crictl must degrade to None");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "timed-out crictl should return quickly, got {elapsed:?}"
+    );
+
+    std::fs::remove_dir_all(&tmp).ok();
 }

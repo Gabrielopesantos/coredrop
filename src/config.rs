@@ -52,6 +52,13 @@ fn default_upload_deadline_secs() -> u64 {
     DEFAULT_UPLOAD_DEADLINE_SECS
 }
 
+/// Default timeout for `crictl inspect` in the handler.
+pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
+
+fn default_crictl_timeout_secs() -> u64 {
+    DEFAULT_CRICTL_TIMEOUT_SECS
+}
+
 fn default_rate_state_path() -> String {
     "/run/coredrop/recent.json".to_string()
 }
@@ -115,6 +122,11 @@ pub struct HandlerConfig {
     /// hold it.
     #[serde(default = "default_upload_deadline_secs")]
     pub upload_deadline_secs: u64,
+    /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
+    /// crictl runs after the core drain, so a wedged CRI socket must not pin the
+    /// handler's `core_pipe_limit` slot forever.
+    #[serde(default = "default_crictl_timeout_secs")]
+    pub crictl_timeout_secs: u64,
     /// Rate-limit state file, sibling of the handler config on the hostPath.
     #[serde(default = "default_rate_state_path")]
     pub rate_state_path: String,
@@ -138,6 +150,7 @@ impl Default for HandlerConfig {
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
             max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
             upload_deadline_secs: DEFAULT_UPLOAD_DEADLINE_SECS,
+            crictl_timeout_secs: DEFAULT_CRICTL_TIMEOUT_SECS,
             rate_state_path: default_rate_state_path(),
             event_socket_path: Some(default_event_socket_path()),
         }
@@ -206,6 +219,10 @@ impl HandlerConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_UPLOAD_DEADLINE_SECS),
+            crictl_timeout_secs: std::env::var("CRICTL_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_CRICTL_TIMEOUT_SECS),
             rate_state_path: rate_state_path_for(
                 &std::env::var("CAPTURE_CONFIG_PATH")
                     .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
@@ -319,6 +336,7 @@ mod tests {
             max_core_bytes: 1024,
             max_cores_per_hour: 5,
             upload_deadline_secs: 60,
+            crictl_timeout_secs: 15,
             rate_state_path: "/run/coredrop/recent.json".into(),
             event_socket_path: Some("/run/coredrop/events.sock".into()),
         };

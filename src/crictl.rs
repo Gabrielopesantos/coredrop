@@ -12,9 +12,35 @@
 //! restart count analog.
 
 use serde_json::Value;
+use std::time::Duration;
+use tokio::time::timeout;
 use tracing::warn;
 
 use crate::config::HandlerConfig;
+
+/// Error from running `crictl inspect` with an optional wall-clock timeout.
+#[derive(Debug)]
+enum RunError {
+    /// The subprocess could not be spawned or exited with an IO error.
+    Io(std::io::Error),
+    /// The configured timeout elapsed before the subprocess completed.
+    Timeout,
+}
+
+/// Run a `tokio::process::Command` with an optional timeout. A `None` timeout
+/// means wait indefinitely (used when `crictl_timeout_secs` is 0).
+async fn run_command(
+    cmd: &mut tokio::process::Command,
+    timeout_dur: Option<Duration>,
+) -> Result<std::process::Output, RunError> {
+    match timeout_dur {
+        None => cmd.output().await.map_err(RunError::Io),
+        Some(d) => timeout(d, cmd.output())
+            .await
+            .map_err(|_| RunError::Timeout)?
+            .map_err(RunError::Io),
+    }
+}
 
 /// Kubernetes identity enriched from `crictl inspect`. All fields best-effort.
 #[derive(Debug, Clone, Default)]
@@ -41,10 +67,24 @@ pub async fn inspect(container_id: &str, config: &HandlerConfig) -> Option<Conta
         cmd.env("CONTAINER_RUNTIME_ENDPOINT", endpoint);
     }
 
-    let output = match cmd.output().await {
+    let timeout_dur = if config.crictl_timeout_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(config.crictl_timeout_secs))
+    };
+    let output = match run_command(&mut cmd, timeout_dur).await {
         Ok(o) => o,
-        Err(e) => {
+        Err(RunError::Io(e)) => {
             warn!(error = %e, container_id, crictl = %config.crictl_path, "crictl inspect failed; identity will be cgroup-only");
+            return None;
+        }
+        Err(RunError::Timeout) => {
+            warn!(
+                container_id,
+                crictl = %config.crictl_path,
+                timeout_secs = config.crictl_timeout_secs,
+                "crictl inspect timed out; identity will be cgroup-only"
+            );
             return None;
         }
     };

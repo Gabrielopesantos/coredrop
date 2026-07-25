@@ -53,6 +53,10 @@ capture:
   maxCoresPerHour: 3
   # -- Core upload deadline in seconds; past it the upload is abandoned. 0 disables.
   uploadDeadlineSeconds: 300
+  # Timeout in seconds for `crictl inspect` in the handler;  crictl runs after the core drain,
+  # so a wedged CRI socket must not pin the handler's `core_pipe_limit` slot forever.
+  # -- Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
+  crictlTimeoutSeconds: 10
   # -- Pass `environ` through un-redacted. Leave false; cores are secret-bearing.
   noRedact: false
   # S3-compatible / GCS / Azure object store for the core + proc-snapshot + manifest.

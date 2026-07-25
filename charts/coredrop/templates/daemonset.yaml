@@ -69,6 +69,8 @@ spec:
               value: {{ .Values.capture.maxCoresPerHour | quote }}
             - name: CAPTURE_UPLOAD_DEADLINE_SECS
               value: {{ .Values.capture.uploadDeadlineSeconds | quote }}
+            - name: CRICTL_TIMEOUT_SECS
+              value: {{ .Values.capture.crictlTimeoutSeconds | quote }}
             {{- if .Values.capture.objectStore.url }}
             - name: CAPTURE_STORE_URL
               value: {{ .Values.capture.objectStore.url | quote }}

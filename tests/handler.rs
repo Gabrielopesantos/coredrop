@@ -64,6 +64,7 @@ fn base_config(proc_dir: &std::path::Path) -> HandlerConfig {
         max_core_bytes: 0,
         max_cores_per_hour: 0,
         upload_deadline_secs: 0,
+        crictl_timeout_secs: 0,
         rate_state_path: proc_dir
             .parent()
             .unwrap()

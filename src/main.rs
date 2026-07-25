@@ -75,6 +75,10 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_UPLOAD_DEADLINE_SECS", default_value_t = coredrop::config::DEFAULT_UPLOAD_DEADLINE_SECS)]
     upload_deadline_secs: u64,
 
+    /// Timeout in seconds for `crictl inspect` in the handler; 0 = no timeout.
+    #[arg(long, env = "CRICTL_TIMEOUT_SECS", default_value_t = coredrop::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
+    crictl_timeout_secs: u64,
+
     /// Disable k8s Event emission on capture (`kubectl describe pod` /
     /// `kubectl get events` surfacing). Events are on by default.
     #[arg(long, env = "CAPTURE_NO_EVENTS")]
@@ -101,6 +105,7 @@ impl DaemonArgs {
             max_core_bytes: self.max_core_bytes,
             max_cores_per_hour: self.max_cores_per_hour,
             upload_deadline_secs: self.upload_deadline_secs,
+            crictl_timeout_secs: self.crictl_timeout_secs,
             rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
             event_socket_path: (!self.no_events)
                 .then(|| coredrop::config::event_socket_path_for(&self.config_path)),

@@ -10,7 +10,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +145,38 @@ impl Default for HandlerConfig {
 }
 
 impl HandlerConfig {
+    /// Validate that paths are absolute and the store URL is a supported scheme.
+    /// Called by [`Self::read`] before trusting a daemon-written config file.
+    fn validate(&self) -> Result<()> {
+        let must_be_absolute = |path: &str, label: &str| -> Result<()> {
+            if Path::new(path).is_absolute() {
+                Ok(())
+            } else {
+                bail!("{label} must be absolute: {path}")
+            }
+        };
+
+        must_be_absolute(&self.crictl_path, "crictl_path")?;
+        must_be_absolute(&self.proc_root, "proc_root")?;
+        must_be_absolute(&self.rate_state_path, "rate_state_path")?;
+        if let Some(event_socket_path) = &self.event_socket_path {
+            must_be_absolute(event_socket_path, "event_socket_path")?;
+        }
+        if let Some(store_url) = &self.store_url {
+            let url = url::Url::parse(store_url)
+                .with_context(|| format!("store_url is not a valid URL: {store_url}"))?;
+            let (scheme, _) = object_store::ObjectStoreScheme::parse(&url)
+                .with_context(|| format!("store_url has unrecognized scheme: {store_url}"))?;
+            match scheme {
+                object_store::ObjectStoreScheme::AmazonS3
+                | object_store::ObjectStoreScheme::GoogleCloudStorage
+                | object_store::ObjectStoreScheme::MicrosoftAzure => {}
+                _ => bail!("store_url scheme must be s3://, gs://, or az://: {store_url}"),
+            }
+        }
+        Ok(())
+    }
+
     /// Build from the daemon's environment.
     #[must_use]
     pub fn from_env() -> Self {
@@ -187,8 +219,8 @@ impl HandlerConfig {
         }
     }
 
-    /// Read the config from `path`. `None` when absent or unparseable - the
-    /// handler then falls back to [`Self::from_env`].
+    /// Read the config from `path`. `None` when absent, unparseable, or invalid -
+    /// the handler then falls back to [`Self::from_env`].
     pub fn read(path: &str) -> Option<Self> {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -197,13 +229,18 @@ impl HandlerConfig {
                 return None;
             }
         };
-        match serde_json::from_slice(&bytes) {
-            Ok(cfg) => Some(cfg),
+        let cfg: Self = match serde_json::from_slice(&bytes) {
+            Ok(cfg) => cfg,
             Err(e) => {
                 tracing::warn!(error = %e, path, "handler config present but unparseable; ignoring");
-                None
+                return None;
             }
+        };
+        if let Err(e) = cfg.validate() {
+            tracing::warn!(error = %e, path, "handler config failed validation; ignoring");
+            return None;
         }
+        Some(cfg)
     }
 
     /// Serialize the config to `path` (creating the parent dir), so the
@@ -328,5 +365,95 @@ mod tests {
     fn no_store_url_yields_no_object_store() {
         let cfg = HandlerConfig::default();
         assert!(cfg.object_store().is_none());
+    }
+
+    #[test]
+    fn validate_accepts_default_config() {
+        assert!(HandlerConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_relative_crictl_path() {
+        let cfg = HandlerConfig {
+            crictl_path: "crictl".into(),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_relative_proc_root() {
+        let cfg = HandlerConfig {
+            proc_root: "proc".into(),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_relative_rate_state_path() {
+        let cfg = HandlerConfig {
+            rate_state_path: "recent.json".into(),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_relative_event_socket_path() {
+        let cfg = HandlerConfig {
+            event_socket_path: Some("events.sock".into()),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_invalid_store_url() {
+        let cfg = HandlerConfig {
+            store_url: Some("not a url".into()),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_store_url_scheme() {
+        let cfg = HandlerConfig {
+            store_url: Some("memory://bucket".into()),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_s3_gs_az_urls() {
+        for url in [
+            "s3://crash-artifacts",
+            "gs://crash-artifacts",
+            "az://crash-artifacts",
+        ] {
+            let cfg = HandlerConfig {
+                store_url: Some(url.into()),
+                ..Default::default()
+            };
+            assert!(cfg.validate().is_ok(), "{url} should be valid");
+        }
+    }
+
+    #[test]
+    fn read_invalid_config_returns_none() {
+        let path = tmp("invalid");
+        let cfg = HandlerConfig {
+            crictl_path: "relative".into(),
+            ..Default::default()
+        };
+        cfg.write(&path).unwrap();
+        assert!(HandlerConfig::read(&path).is_none());
+
+        std::fs::remove_file(&path).ok();
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            std::fs::remove_dir_all(parent).ok();
+        }
     }
 }

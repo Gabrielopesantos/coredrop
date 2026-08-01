@@ -127,9 +127,15 @@ pub async fn run(
     let cluster = config.cluster.as_str();
     let store = store_override.or_else(|| config.object_store());
 
-    let core_key = identity
-        .as_ref()
-        .map(|id| upload::core_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp));
+    let core_key = identity.as_ref().map(|id| {
+        upload::core_object_key(
+            cluster,
+            &id.pod_uid,
+            &id.container_id,
+            args.timestamp,
+            args.host_pid,
+        )
+    });
 
     // Rate limit: consult only when a core would actually upload
     // (identity + store resolved).
@@ -219,6 +225,7 @@ pub async fn run(
                 &id.pod_uid,
                 &id.container_id,
                 args.timestamp,
+                args.host_pid,
             );
             match snapshot.to_tar() {
                 Ok(tar) => {
@@ -307,8 +314,13 @@ pub async fn run(
 
     // Write manifest to store (blob-first ordering: core -> snapshot -> manifest).
     let manifest_key = if let (Some(id), Some(store)) = (&identity, &store) {
-        let key =
-            upload::manifest_object_key(cluster, &id.pod_uid, &id.container_id, args.timestamp);
+        let key = upload::manifest_object_key(
+            cluster,
+            &id.pod_uid,
+            &id.container_id,
+            args.timestamp,
+            args.host_pid,
+        );
         match serde_json::to_vec_pretty(&manifest) {
             Ok(json) => match upload::put_object(store, &key, json).await {
                 Ok(()) => {

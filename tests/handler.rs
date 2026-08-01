@@ -126,16 +126,16 @@ async fn handler_run_uploads_core_snapshot_and_writes_manifest() {
         .unwrap();
 
     // Core object: present and decompresses to the input bytes.
-    let core_key = upload::core_object_key("test", pod_uid, container_id, ts);
+    let core_key = upload::core_object_key("test", pod_uid, container_id, ts, pid);
     let stored_core = get_object(&store, &core_key).await;
     assert_eq!(unzstd(&stored_core).await, core_payload);
 
     // Proc-snapshot tar: present.
-    let snap_key = upload::proc_snapshot_object_key("test", pod_uid, container_id, ts);
+    let snap_key = upload::proc_snapshot_object_key("test", pod_uid, container_id, ts, pid);
     get_object(&store, &snap_key).await;
 
     // Manifest: present, parses, and its core.object_key exists in the store.
-    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts);
+    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts, pid);
     let manifest_bytes = get_object(&store, &manifest_key).await;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes).unwrap();
 
@@ -207,7 +207,7 @@ async fn handler_run_size_cap_truncates_stored_core() {
         .await
         .unwrap();
 
-    let core_key = upload::core_object_key("test", pod_uid, container_id, ts);
+    let core_key = upload::core_object_key("test", pod_uid, container_id, ts, pid);
     let stored_core = get_object(&store, &core_key).await;
     assert_eq!(
         unzstd(&stored_core).await,
@@ -215,7 +215,7 @@ async fn handler_run_size_cap_truncates_stored_core() {
         "stored core holds exactly the first cap bytes"
     );
 
-    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts);
+    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts, pid);
     let manifest: Manifest =
         serde_json::from_slice(&get_object(&store, &manifest_key).await).unwrap();
     assert!(manifest.core.truncated);
@@ -259,19 +259,20 @@ async fn handler_run_rate_limit_suppresses_core_keeps_manifest() {
     }
 
     // First crash: full capture.
-    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000);
+    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000, pid);
     get_object(&store, &core1).await;
 
     // Second crash: no core object...
-    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
     assert!(
         store.get(&ObjectPath::from(core2.as_str())).await.is_err(),
         "suppressed crash must not store a core"
     );
     // ...but proc snapshot and manifest are still written.
-    let snap2 = upload::proc_snapshot_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let snap2 = upload::proc_snapshot_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
     get_object(&store, &snap2).await;
-    let manifest2_key = upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let manifest2_key =
+        upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
     let manifest2: Manifest =
         serde_json::from_slice(&get_object(&store, &manifest2_key).await).unwrap();
     assert!(!manifest2.core.present);
@@ -321,17 +322,18 @@ async fn handler_run_rate_limit_keys_by_pod_uid_not_container_id() {
     }
 
     // First crash: full capture.
-    let core1 = upload::core_object_key("test", pod_uid, container_id_1, 1_749_600_000);
+    let core1 = upload::core_object_key("test", pod_uid, container_id_1, 1_749_600_000, pid_1);
     get_object(&store, &core1).await;
 
     // Second crash: different container ID but same pod UID -> suppressed.
-    let core2 = upload::core_object_key("test", pod_uid, container_id_2, 1_749_600_010);
+    let core2 = upload::core_object_key("test", pod_uid, container_id_2, 1_749_600_010, pid_2);
     assert!(
         store.get(&ObjectPath::from(core2.as_str())).await.is_err(),
         "restarted container with same pod UID must inherit the rate-limit budget"
     );
 
-    let manifest2_key = upload::manifest_object_key("test", pod_uid, container_id_2, 1_749_600_010);
+    let manifest2_key =
+        upload::manifest_object_key("test", pod_uid, container_id_2, 1_749_600_010, pid_2);
     let manifest2: Manifest =
         serde_json::from_slice(&get_object(&store, &manifest2_key).await).unwrap();
     assert!(!manifest2.core.present);
@@ -386,9 +388,10 @@ async fn handler_run_failed_upload_refunds_rate_budget() {
         .await
         .unwrap();
 
-    let core_key = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let core_key = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
     get_object(&store, &core_key).await;
-    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let manifest_key =
+        upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
     let manifest: Manifest =
         serde_json::from_slice(&get_object(&store, &manifest_key).await).unwrap();
     assert!(manifest.core.present, "refunded budget must allow the core");
@@ -442,7 +445,7 @@ async fn handler_run_upload_deadline_aborts_stalled_drain() {
             .is_err(),
         "a stalled drain must error at the deadline"
     );
-    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000);
+    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000, pid);
     assert!(
         store.get(&ObjectPath::from(core1.as_str())).await.is_err(),
         "abandoned upload must not store a core"
@@ -459,7 +462,7 @@ async fn handler_run_upload_deadline_aborts_stalled_drain() {
     run(args, &config, &mut core_in, Some(store.clone()))
         .await
         .unwrap();
-    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010);
+    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
     get_object(&store, &core2).await;
 
     std::fs::remove_dir_all(&tmp).ok();
@@ -735,8 +738,8 @@ async fn handler_run_blob_first_core_survives_manifest_failure() {
     run(args, &config, &mut core_in, Some(store)).await.unwrap();
 
     // Core and proc-snapshot are present (written before the manifest attempt).
-    let core_key = upload::core_object_key("test", pod_uid, container_id, ts);
-    let snap_key = upload::proc_snapshot_object_key("test", pod_uid, container_id, ts);
+    let core_key = upload::core_object_key("test", pod_uid, container_id, ts, pid);
+    let snap_key = upload::proc_snapshot_object_key("test", pod_uid, container_id, ts, pid);
     inner
         .get(&ObjectPath::from(core_key.as_str()))
         .await
@@ -747,7 +750,7 @@ async fn handler_run_blob_first_core_survives_manifest_failure() {
         .expect("proc-snapshot present");
 
     // Manifest was NOT written (the FailManifestStore rejected it).
-    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts);
+    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts, pid);
     assert!(
         inner
             .get(&ObjectPath::from(manifest_key.as_str()))

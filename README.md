@@ -68,9 +68,9 @@ Handler flow, ordered by time-criticality:
 Objects land at:
 
 ```
-{cluster}/{podUID}/{containerID}/{timestamp}-core.zst
-{cluster}/{podUID}/{containerID}/{timestamp}-proc.tar
-{cluster}/{podUID}/{containerID}/{timestamp}-manifest.json
+{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-core.zst
+{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-procsnapshot.tar
+{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-manifest.json
 ```
 
 ## Safety rails
@@ -112,7 +112,7 @@ reports each capture as a Kubernetes Event on the crashing pod, so
 ```sh
 $ kubectl get events --field-selector reason=CoreDumped
 LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
-2m          Warning   CoreDumped   pod/my-app-7f8b9c   core dumped (signal SIGSEGV); artifacts at local/<podUID>/<containerID>/1717000000-manifest.json
+2m          Warning   CoreDumped   pod/my-app-7f8b9c   core dumped (signal SIGSEGV); artifacts at local/<podUID>/<containerID>/1717000000-4242-manifest.json
 ```
 
 | Outcome | Event reason |
@@ -137,7 +137,7 @@ Disable with `--no-events` / `CAPTURE_NO_EVENTS`, or the chart's
 coredrop has no retrieval command - artifacts are plain objects at a
 predictable key, so any object-store CLI works. Given a manifest key (from a
 k8s Event's message, or listing the bucket) or its
-`{cluster}/{podUID}/{containerID}/{timestamp}` prefix:
+`{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}` prefix:
 
 **S3 / S3-compatible (MinIO, etc.)**
 

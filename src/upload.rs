@@ -26,12 +26,21 @@ use crate::backend::{CaptureBackend, CoreStats};
 // Core chunks of 256 KBs
 const CORE_READ_CHUNK: usize = 256 * 1024;
 
-/// Build the core's object key: `{cluster}/{podUID}/{containerID}/{timestamp}-core.zst`.
+/// Build the core's object key:
+/// `{cluster}/{podUID}/{containerID}/{timestamp}-{hostPid}-core.zst`.
 /// Handler-derivable from the cgroup - no UUIDs; the manifest carries the
-/// human-readable identity from crictl.
+/// human-readable identity from crictl. The host PID disambiguates two
+/// crashes in the same container within the same second (possible before the
+/// rate limiter engages), which would otherwise overwrite each other.
 #[must_use]
-pub fn core_object_key(cluster: &str, pod_uid: &str, container_id: &str, timestamp: i64) -> String {
-    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-core.zst")
+pub fn core_object_key(
+    cluster: &str,
+    pod_uid: &str,
+    container_id: &str,
+    timestamp: i64,
+    host_pid: i32,
+) -> String {
+    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}-core.zst")
 }
 
 /// Build the `/proc` snapshot's object key, mirroring `core_object_key`'s
@@ -42,8 +51,9 @@ pub fn proc_snapshot_object_key(
     pod_uid: &str,
     container_id: &str,
     timestamp: i64,
+    host_pid: i32,
 ) -> String {
-    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-procsnapshot.tar")
+    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}-procsnapshot.tar")
 }
 
 /// Build the JSON manifest's object key, sibling to the core.
@@ -53,8 +63,9 @@ pub fn manifest_object_key(
     pod_uid: &str,
     container_id: &str,
     timestamp: i64,
+    host_pid: i32,
 ) -> String {
-    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-manifest.json")
+    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}-manifest.json")
 }
 
 /// Buffered single-shot PUT of a small object (the proc snapshot tar or the
@@ -384,23 +395,30 @@ mod tests {
     #[test]
     fn builds_object_keys() {
         assert_eq!(
-            core_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000),
-            "prod/pod-uid-123/abc123def/1749600000-core.zst"
+            core_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242),
+            "prod/pod-uid-123/abc123def/1749600000-4242-core.zst"
         );
         assert_eq!(
-            proc_snapshot_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000),
-            "prod/pod-uid-123/abc123def/1749600000-procsnapshot.tar"
+            proc_snapshot_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242),
+            "prod/pod-uid-123/abc123def/1749600000-4242-procsnapshot.tar"
         );
         assert_eq!(
-            manifest_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000),
-            "prod/pod-uid-123/abc123def/1749600000-manifest.json"
+            manifest_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242),
+            "prod/pod-uid-123/abc123def/1749600000-4242-manifest.json"
         );
+    }
+
+    #[test]
+    fn distinct_pids_yield_distinct_keys_within_the_same_second() {
+        let a = core_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 111);
+        let b = core_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 222);
+        assert_ne!(a, b);
     }
 
     #[tokio::test]
     async fn put_object_round_trips_a_buffered_blob() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let key = proc_snapshot_object_key("local", "pod-a", "cid-b", 7);
+        let key = proc_snapshot_object_key("local", "pod-a", "cid-b", 7, 4242);
         let tar = b"a-small-tar-bundle".to_vec();
         put_object(&store, &key, tar.clone()).await.unwrap();
 
@@ -429,7 +447,7 @@ mod tests {
     async fn streams_zstd_with_integrity_and_round_trips() {
         let core: Vec<u8> = (0..200_000u32).map(|i| (i % 7) as u8).collect();
         let store = Arc::new(InMemory::new());
-        let key = core_object_key("local", "pod-aaa", "cid-bbb", 42);
+        let key = core_object_key("local", "pod-aaa", "cid-bbb", 42, 4242);
 
         let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader: &[u8] = &core;
@@ -479,7 +497,7 @@ mod tests {
     async fn marks_truncated_on_a_short_read_but_finalizes_the_partial() {
         let chunk = vec![0x5Au8; 50_000];
         let store = Arc::new(InMemory::new());
-        let key = core_object_key("local", "pod-x", "cid-y", 7);
+        let key = core_object_key("local", "pod-x", "cid-y", 7, 4242);
 
         let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader = FlakyReader {
@@ -510,7 +528,7 @@ mod tests {
     async fn caps_stored_core_but_drains_and_counts_everything() {
         let core: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
         let store = Arc::new(InMemory::new());
-        let key = core_object_key("local", "pod-cap", "cid-cap", 9);
+        let key = core_object_key("local", "pod-cap", "cid-cap", 9, 4242);
 
         let backend = StandaloneBackend::new(store.clone(), &key, 10_000);
         let mut reader: &[u8] = &core;

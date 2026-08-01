@@ -2,8 +2,8 @@
 //!
 //! After core drain + `/proc` snapshot upload + crictl enrichment, the handler
 //! assembles a `Manifest` and writes it to the object store at
-//! `{cluster}/{podUID}/{containerID}/{ts}-manifest.json` - sibling to the core
-//! at `...-core.zst`. The manifest is the "record": a manifest pointing at a
+//! `{cluster}/{podUID}/{containerID}/{ts}-{hostPid}-manifest.json` - sibling
+//! to the core at `...-core.zst`. The manifest is the "record": a manifest pointing at a
 //! missing core is a real bug; an orphan core with no manifest is GC-able.
 //!
 //! Write ordering: core -> proc snapshot -> manifest.

@@ -52,8 +52,9 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
 | tolerations | list | `[{"operator":"Exists"}]` | Pod tolerations (defaults to tolerating everything so it runs on all nodes). |
 
-Only allowlisted object-store keys are forwarded (see `src/upload.rs`,
-`ALLOWED_STORE_OPTS`):
+Only allowlisted object-store keys are forwarded to the handler. An
+unrecognized key in either map fails `helm install`/`template` naming it and
+the valid set - a typo can't reach the cluster and silently drop out:
 
 - `capture.objectStore.config` (non-secret):
   - `AWS_REGION`
@@ -61,16 +62,16 @@ Only allowlisted object-store keys are forwarded (see `src/upload.rs`,
   - `AWS_ENDPOINT`
   - `AWS_ALLOW_HTTP`
   - `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`
-  - `AWS_ROLE_ARN` (IRSA)
-  - `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA)
+  - `AWS_ROLE_ARN`
+  - `AWS_WEB_IDENTITY_TOKEN_FILE`
   - `GOOGLE_SERVICE_ACCOUNT`
   - `AZURE_STORAGE_ACCOUNT_NAME`
   - `AZURE_STORAGE_CLIENT_ID`
   - `AZURE_STORAGE_TENANT_ID`
-  - `AZURE_CLIENT_ID` (AKS workload identity)
-  - `AZURE_TENANT_ID` (AKS workload identity)
-  - `AZURE_FEDERATED_TOKEN_FILE` (AKS workload identity)
-  - `AZURE_AUTHORITY_HOST` (AKS workload identity)
+  - `AZURE_CLIENT_ID`
+  - `AZURE_TENANT_ID`
+  - `AZURE_FEDERATED_TOKEN_FILE`
+  - `AZURE_AUTHORITY_HOST`
 - `capture.objectStore.credentials` (Secret):
   - `AWS_ACCESS_KEY_ID`
   - `AWS_SECRET_ACCESS_KEY`
@@ -158,7 +159,7 @@ its existing window rather than getting a new one.
 
 ## Workload identity
 
-For IRSA / GKE Workload Identity / AKS Workload Identity, leave
+For IRSA/GKE Workload Identity/AKS Workload Identity, leave
 `capture.objectStore.credentials` empty and annotate the service account:
 
 ```yaml
@@ -168,8 +169,8 @@ serviceAccount:
 ```
 
 Each provider's admission webhook injects credentials as env vars into the
-daemon pod; only the keys in `ALLOWED_STORE_OPTS` (above) are forwarded on to
-the kernel-exec'd handler:
+daemon pod; only the allowlisted keys (above) are forwarded on to the
+kernel-exec'd handler:
 
 - **IRSA (EKS):** the pod-identity webhook injects `AWS_ROLE_ARN` +
   `AWS_WEB_IDENTITY_TOKEN_FILE` (+ `AWS_DEFAULT_REGION`) - forwarded and wired

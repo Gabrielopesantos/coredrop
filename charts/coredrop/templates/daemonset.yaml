@@ -1,3 +1,4 @@
+{{- include "coredrop.validateStoreOpts" . }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

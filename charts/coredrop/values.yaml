@@ -59,31 +59,22 @@ capture:
   crictlTimeoutSeconds: 10
   # -- Pass `environ` through un-redacted. Leave false; cores are secret-bearing.
   noRedact: false
-  # S3-compatible / GCS / Azure object store for the core + proc-snapshot + manifest.
+  # S3-compatible/GCS/Azure object store for the core + proc-snapshot + manifest.
   # Leave `url` empty to run with no upload (cores discarded, pipe still drains).
+  # Both maps below take allowlisted keys only (listed in the chart README); an
+  # unknown key fails chart rendering with the valid set rather than being
+  # dropped silently at runtime.
   objectStore:
     # -- Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload.
     url: ""
     # Non-secret client options, rendered as plain env vars on the daemon.
-    # The daemon forwards only the keys it recognizes (src/upload.rs
-    # ALLOWED_STORE_OPTS): AWS_REGION, AWS_DEFAULT_REGION, AWS_ENDPOINT,
-    # AWS_ALLOW_HTTP, AWS_VIRTUAL_HOSTED_STYLE_REQUEST, AWS_ROLE_ARN,
-    # AWS_WEB_IDENTITY_TOKEN_FILE (IRSA), GOOGLE_SERVICE_ACCOUNT,
-    # AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CLIENT_ID,
-    # AZURE_STORAGE_TENANT_ID, AZURE_CLIENT_ID, AZURE_TENANT_ID,
-    # AZURE_FEDERATED_TOKEN_FILE, AZURE_AUTHORITY_HOST (AKS workload identity).
-    # GKE workload identity needs no config here - it authenticates via the
-    # node's metadata server automatically.
     # -- Non-secret object-store client options, rendered as plain env vars (allowlisted).
     config: {}
     #   AWS_REGION: "us-east-1"
     #   AWS_ENDPOINT: "http://minio:9000"   # S3-compatible, e.g. in-cluster MinIO
     #   AWS_ALLOW_HTTP: "true"              # plaintext endpoint
     # Secret-bearing options; rendered into the store Secret and injected via
-    # envFrom. Same allowlist: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-    # AWS_SESSION_TOKEN, GOOGLE_SERVICE_ACCOUNT_KEY, AZURE_STORAGE_ACCESS_KEY,
-    # AZURE_STORAGE_CLIENT_SECRET. Leave empty for workload identity
-    # (annotate serviceAccount instead).
+    # envFrom. Leave empty for workload identity (annotate serviceAccount instead).
     # -- Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted).
     credentials: {}
     #   AWS_ACCESS_KEY_ID: ""

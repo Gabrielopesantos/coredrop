@@ -33,6 +33,51 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
+The object-store option keys the daemon forwards to the handler. Source of
+truth is ALLOWED_STORE_OPTS in src/upload.rs; the `helpers_store_opts_match_allowlist`
+test there fails if this copy drifts from it.
+*/}}
+{{- define "coredrop.allowedStoreOpts" -}}
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_SESSION_TOKEN
+AWS_REGION
+AWS_DEFAULT_REGION
+AWS_ENDPOINT
+AWS_ALLOW_HTTP
+AWS_VIRTUAL_HOSTED_STYLE_REQUEST
+AWS_ROLE_ARN
+AWS_WEB_IDENTITY_TOKEN_FILE
+GOOGLE_SERVICE_ACCOUNT
+GOOGLE_SERVICE_ACCOUNT_KEY
+AZURE_STORAGE_ACCOUNT_NAME
+AZURE_STORAGE_ACCESS_KEY
+AZURE_STORAGE_CLIENT_ID
+AZURE_STORAGE_CLIENT_SECRET
+AZURE_STORAGE_TENANT_ID
+AZURE_CLIENT_ID
+AZURE_TENANT_ID
+AZURE_FEDERATED_TOKEN_FILE
+AZURE_AUTHORITY_HOST
+{{- end -}}
+
+{{/*
+Fail rendering on an unrecognized objectStore key. Every key in these two maps
+is declared as a store option, so an unknown one is a typo; the daemon's allowlist
+filter would drop it silently at runtime, leaving no error anywhere.
+*/}}
+{{- define "coredrop.validateStoreOpts" -}}
+{{- $allowed := regexSplit "\\s+" (include "coredrop.allowedStoreOpts" . | trim) -1 -}}
+{{- range $field := (list "config" "credentials") -}}
+{{- range $key, $_ := (get $.Values.capture.objectStore $field) -}}
+{{- if not (has $key $allowed) -}}
+{{- fail (printf "capture.objectStore.%s: unknown key %q. Valid keys: %s" $field $key (join ", " $allowed)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The post-delete cleanup worker: a DaemonSet that removes the handler binary,
 runtime config/state, and hostPath directories from every node.
 Rendered here (rather than inline in cleanup-hook.yaml) so it can be shipped

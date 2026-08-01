@@ -102,6 +102,14 @@ cri:
   # -- Path to the crictl binary on the node (host mount ns), for the handler's enrichment.
   crictlPath: "/usr/local/bin/crictl"
 
+# Post-delete hook that removes the handler binary, runtime config/state, and
+# hostPath directories from every node on `helm uninstall`.
+cleanup:
+  # -- Run the post-delete cleanup DaemonSet on `helm uninstall`.
+  enabled: true
+  # -- Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl.
+  image: "rancher/kubectl:v1.35.6"
+
 # k8s Event emission on capture: posts an event on the crashing pod
 # ("core dumped, artifacts at {key}") so kubectl describe pod / kubectl get
 # events surfaces it. Disabling skips the daemon's socket listener and the

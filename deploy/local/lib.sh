@@ -28,6 +28,17 @@ DEMO_NAMESPACE="${DEMO_NAMESPACE:-coredrop-demo}"
 COREDROP_IMAGE="${COREDROP_IMAGE:-docker.io/library/coredrop:dev}"
 SEGFAULT_IMAGE="${SEGFAULT_IMAGE:-docker.io/library/coredrop-segfault:dev}"
 
+# The chart's post-delete cleanup Job image. Not built here - pulled on the host
+# and imported like the others so `helm uninstall` never waits on a registry
+# (the hook has a 180s deadline). Must match `cleanup.image` in the chart's
+# values.yaml and in helm-values/coredrop.local.yaml.
+CLEANUP_IMAGE="${CLEANUP_IMAGE:-docker.io/rancher/kubectl:v1.35.6}"
+
+# The node paths the chart's post-delete hook is supposed to remove; smoke.sh
+# asserts they are gone. Must match `corePattern.hostBinDir`/`hostRunDir`.
+HOST_BIN_DIR="${HOST_BIN_DIR:-/opt/coredrop/bin}"
+HOST_RUN_DIR="${HOST_RUN_DIR:-/run/coredrop}"
+
 # Helm release name and the object-store bucket the overlay points at.
 RELEASE="${RELEASE:-coredrop}"
 BUCKET="${BUCKET:-coredrop-cores}"

@@ -55,9 +55,16 @@ node_exec() {
 }
 
 load_images() {
+  # The cleanup image is the one image not built locally; pull it once so the
+  # uninstall hook does not race a registry fetch against its own deadline.
+  if ! docker image inspect "$CLEANUP_IMAGE" >/dev/null 2>&1; then
+    log "pulling $CLEANUP_IMAGE (post-delete cleanup Job)"
+    docker pull "$CLEANUP_IMAGE" >/dev/null
+  fi
+
   log "importing images into k3s containerd (namespace k8s.io)"
   local img
-  for img in "$COREDROP_IMAGE" "$SEGFAULT_IMAGE"; do
+  for img in "$COREDROP_IMAGE" "$SEGFAULT_IMAGE" "$CLEANUP_IMAGE"; do
     log "  $img"
     # `save` writes a docker-archive to stdout, piped into the VM and imported
     # into the kubelet's k8s.io containerd namespace.

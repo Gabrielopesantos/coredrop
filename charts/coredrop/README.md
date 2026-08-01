@@ -29,6 +29,8 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
 | capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload. |
 | capture.uploadDeadlineSeconds | int | `300` | Core upload deadline in seconds; past it the upload is abandoned. 0 disables. |
+| cleanup.enabled | bool | `true` | Run the post-delete cleanup DaemonSet on `helm uninstall`. |
+| cleanup.image | string | `"rancher/kubectl:v1.35.6"` | Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl. |
 | corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
 | corePattern.hostRunDir | string | `"/run/coredrop"` | Host path for the handler config and rate-limit state. |
 | corePattern.pipeLimit | int | `128` | `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`. |
@@ -147,11 +149,12 @@ garbage-collects uncommitted blocks on its own after about a week.
 
 `capture.maxCoresPerHour` (default 3) is a per-pod sliding-window budget. The
 daemon stores the window state in `recent.json` on the same hostPath as the
-handler config (`corePattern.hostRunDir`). Because the state is on the node,
-it survives `helm uninstall`. A fresh daemon clears `recent.json` on startup
-and on shutdown, so a normal reinstall or pod restart begins with a fresh
-budget. Workloads that reuse the same pod UID across a rapid reinstall may
-still inherit the previous window until the new daemon starts and clears it.
+handler config (`corePattern.hostRunDir`). The daemon deliberately keeps that
+state across its own restarts, upgrades and node drains: otherwise a
+crash-looping pod could evade its budget by forcing a daemon restart. Only
+`helm uninstall` clears it, via the post-delete cleanup hook below. A workload
+that reuses the same pod UID across a fast daemon restart therefore resumes
+its existing window rather than getting a new one.
 
 ## Workload identity
 
@@ -202,3 +205,34 @@ reachable from the node itself (cluster DNS names won't resolve there).
 
 Uninstalling the release stops the daemon, which restores the node's original
 `core_pattern` on shutdown.
+
+## Uninstall cleanup
+
+The daemon does not remove its node-local files on shutdown - a shutdown is
+usually a restart, upgrade or node drain, not an uninstall. Removing them is
+instead a `post-delete` hook (`cleanup.enabled`, on by default): a Job that
+applies a short-lived privileged DaemonSet, waits for it to roll out on every
+node, then deletes it. On each node that worker removes the handler binary,
+`handler.json`, `events.sock` and `recent.json`, then the
+`corePattern.hostBinDir` and `corePattern.hostRunDir` directories themselves.
+As a safety net for an ungracefully killed daemon, it also resets
+`core_pattern` to the kernel default `core` if it still points at the handler.
+
+Two details worth knowing:
+
+- The worker mounts the **parent** of each configured directory, not the
+  directory itself. A hostPath mounted at its own path is a mount point inside
+  the container, and `rmdir` on a mount point fails with `EBUSY` - the files
+  would be removed but the directories would survive.
+- Nothing owns that worker DaemonSet: `kubectl` creates it after the release is
+  already deleted. If the hook fails partway (its deadline is 180s), the worker
+  can be left running. The next `helm uninstall` reaps it before starting, but
+  if you reinstall in between, delete it first - it is privileged and will wipe
+  the handler you just installed:
+
+  ```console
+  kubectl -n <namespace> delete daemonset -l coredrop.io/cleanup=true
+  ```
+
+Set `cleanup.enabled: false` to skip the hook entirely and leave the node
+files in place.

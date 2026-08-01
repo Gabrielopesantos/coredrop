@@ -25,7 +25,9 @@ trap cleanup EXIT
 
 # 1. DaemonSet ready
 log "waiting for the coredrop DaemonSet to be ready"
-ds="$(kubectl -n "$NAMESPACE" get ds -l app.kubernetes.io/name=coredrop -o name 2>/dev/null | head -n1)"
+# `!coredrop.io/cleanup` excludes a leftover post-delete cleanup worker, which
+# carries the same name/instance labels as the daemon's own DaemonSet.
+ds="$(kubectl -n "$NAMESPACE" get ds -l 'app.kubernetes.io/name=coredrop,!coredrop.io/cleanup' -o name 2>/dev/null | head -n1)"
 [ -n "$ds" ] || die "coredrop DaemonSet not found in namespace $NAMESPACE"
 kubectl -n "$NAMESPACE" rollout status "$ds" --timeout=120s
 
@@ -67,8 +69,12 @@ mc rm --recursive --force "$MC_ALIAS/$BUCKET" >/dev/null 2>&1 || true
 # and the DaemonSet/MinIO rollout waits above take longer than that).
 # `regarding.name` is a selectable field on events.k8s.io/v1 Events, so
 # scoping to the current pod is both correct and non-destructive.
+# Newest RUNNING pod, not `.items[0]`: up.sh restarts the deployment, and during
+# a rollout the old pod is still listed - `.items` is name-ordered, not
+# age-ordered, so `[0]` can be the terminating one, whose Events never arrive.
 crash_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods -l app=crash-segfault \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  --field-selector status.phase=Running --sort-by=.metadata.creationTimestamp \
+  -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
 [ -n "$crash_pod" ] || die "could not resolve the crash-segfault pod in $DEMO_NAMESPACE"
 log "crash workload pod: $crash_pod"
 
@@ -250,8 +256,13 @@ else
 fi
 
 # --- 9. uninstall restores core_pattern (CorePatternGuard drop path) ----------
-log "uninstalling coredrop to exercise core_pattern restore"
-helm uninstall "$RELEASE" -n "$NAMESPACE" >/dev/null 2>&1 || true
+# The uninstall's exit status is an assertion in its own right: helm waits on the
+# post-delete cleanup hook, so a failure here means the hook did not finish - and
+# a half-finished hook leaves an orphaned, privileged cleanup worker behind.
+log "uninstalling coredrop to exercise core_pattern restore + post-delete cleanup"
+if ! helm uninstall "$RELEASE" -n "$NAMESPACE" >/dev/null; then
+  warn "  helm uninstall failed - the post-delete cleanup hook did not complete"; fail=1
+fi
 kubectl -n "$NAMESPACE" wait --for=delete pod -l app.kubernetes.io/name=coredrop --timeout=60s >/dev/null 2>&1 || true
 sleep 2
 restored="$(node_exec cat /proc/sys/kernel/core_pattern)"
@@ -268,6 +279,20 @@ if [ -f "$ORIG_FILE" ]; then
     warn "  core_pattern differs from pre-install value: '$orig'"; fail=1
   fi
 fi
+
+# --- 10. the post-delete hook left nothing on the node ------------------------
+# The cleanup worker removes the handler binary, runtime config/state AND the
+# hostPath directories themselves. The directories are the part that regressed
+# before (they were mounted at their own path, so rmdir hit EBUSY), so assert
+# them directly on the node rather than trusting the hook's exit status.
+log "checking the node for leftover coredrop hostPath directories"
+for d in "$HOST_BIN_DIR" "$HOST_RUN_DIR"; do
+  if node_exec test -e "$d"; then
+    warn "  leftover on the node after uninstall: $d"; fail=1
+  else
+    log "  removed from the node: $d"
+  fi
+done
 
 if [ "$fail" -ne 0 ]; then
   die "smoke test FAILED"

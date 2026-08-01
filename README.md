@@ -86,7 +86,10 @@ Objects land at:
   snapshot and manifest, just no core. The limiter fails open: a broken
   limiter never loses a core.
 - **Restore on shutdown** - the daemon restores the node's original
-  `core_pattern` and `core_pipe_limit` when it stops.
+  `core_pattern` and `core_pipe_limit` when it stops. HostPath files are
+  left in place so restarts/upgrades keep the rate-limit state; `helm uninstall`
+  runs a post-delete hook that removes the binary, the runtime files and the
+  hostPath directories themselves.
 
 ## Limitations
 
@@ -205,33 +208,11 @@ Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
 flags - and only an allowlist of keys is forwarded to the handler
 (`src/upload.rs`, `ALLOWED_STORE_OPTS`).
 
-The handler config file (`handler.json`) therefore contains these credentials
-in plaintext; the daemon writes it mode `0600` on a `0700` directory and
-removes it (along with the capture-event socket and the `recent.json`
-rate-limit state) on shutdown. A fresh daemon also clears stale `recent.json`
-on startup.
-
-## Development
-
-```sh
-cargo build
-cargo test
-```
-
-A Nix flake provides the dev shell (`nix develop`) with all tooling.
-
-For an end-to-end live test - a single-node k3s cluster in a lima VM, an
-in-cluster MinIO, a crashing demo workload, and a smoke test that asserts the
-full kernel-to-bucket path - see [deploy/local](deploy/local/README.md).
-
-## Project layout
-
-```
-src/            the coredrop binary (daemon + kernel-exec'd capture handler)
-tests/          integration tests (handler flow, crictl enrichment)
-charts/coredrop Helm chart
-deploy/local    local live-test stack (lima + k3s + MinIO + smoke test)
-```
+The handler config file contains these credentials in plaintext; 
+the daemon writes it mode `0600` on a `0700` directory. The daemon 
+rewrites the config on startup and the Helm post-delete hook removes 
+it (along with the capture-event socket and the rate-limit state) on 
+`helm uninstall`.
 
 ## TODO
 

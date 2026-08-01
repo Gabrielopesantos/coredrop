@@ -152,16 +152,10 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
 
     let mut config = args.to_handler_config();
 
-    // A fresh daemon means a fresh per-pod budget window; stale rate-limit
-    // state on the hostPath is dead weight and can suppress a re-deployed
-    // workload that reuses a pod UID. Best-effort removal.
-    coredrop::ratelimit::reset_at_startup(&config.rate_state_path);
-
     // Bind the capture-event socket before writing the config, so the
     // handler only ever gets a path the daemon is actually listening on -
     // a bind failure degrades to events-disabled rather than the handler
     // sending datagrams into the void.
-    let mut bound_event_socket_path: Option<String> = None;
     let events_socket = if args.no_events {
         info!("capture events disabled (--no-events)");
         None
@@ -169,7 +163,6 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         match coredrop::k8s_events::bind_socket(path) {
             Ok(socket) => {
                 info!(path = %path, "capture event socket bound");
-                bound_event_socket_path = Some(path.clone());
                 Some(socket)
             }
             Err(e) => {
@@ -220,35 +213,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     shutdown_signal().await?;
     info!("shutdown signal received");
 
-    // Best-effort cleanup: the hostPath mount otherwise leaves handler.json
-    // (forwarded store credentials), the events socket, and the rate-limit
-    // state behind on the node after DaemonSet uninstall. Never fail shutdown
-    // over this.
-    match std::fs::remove_file(config_path) {
-        Ok(()) => info!(path = %config_path, "removed handler config"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => warn!(error = %e, path = %config_path, "failed to remove handler config"),
-    }
-    if let Some(sock_path) = &bound_event_socket_path {
-        match std::fs::remove_file(sock_path) {
-            Ok(()) => info!(path = %sock_path, "removed capture event socket"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                warn!(error = %e, path = %sock_path, "failed to remove capture event socket");
-            }
-        }
-    }
-    match std::fs::remove_file(&config.rate_state_path) {
-        Ok(()) => info!(path = %config.rate_state_path, "removed rate-limit state"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => warn!(
-            error = %e,
-            path = %config.rate_state_path,
-            "failed to remove rate-limit state"
-        ),
-    }
-
-    // `_guard` drops here -> core_pattern restored.
+    // `_guard` drops here -> core_pattern / core_pipe_limit restored.
     Ok(())
 }
 

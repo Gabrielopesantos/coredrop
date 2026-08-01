@@ -51,7 +51,7 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
 
 ## Gotchas baked into the scripts
 
-- The kernel-exec'd handler runs in the **host network namespace**, so it
+- The kernel-exec'd handler runs in the host network namespace, so it
   can't resolve cluster DNS. `up.sh` injects MinIO's numeric ClusterIP as the
   upload endpoint (the node's root netns can reach a ClusterIP via
   kube-proxy's DNAT rules).
@@ -59,9 +59,16 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
   `/run/k3s/containerd/`, not the upstream `/run/containerd/` default. The
   overlay sets both `cri.runtimeEndpoint` and `cri.socketHostPath`.
 - The per-pod rate-limit state (`/run/coredrop/recent.json` on the
-  node) survives `helm uninstall`, so `up.sh` restarts the demo deployment to
-  get a fresh container ID - otherwise a re-up would start already
-  suppressed.
+  node) persists across daemon restarts and is only removed by the
+  `helm uninstall` post-delete hook, so `up.sh` restarts the demo deployment to
+  get a fresh **pod UID** (the rate-limit key) - otherwise a re-up could start
+  already suppressed.
+- That post-delete hook's worker DaemonSet is applied by `kubectl` after the
+  release is gone, so nothing owns it: a hook that fails partway leaves a
+  privileged worker running, which would wipe the handler binary and reset
+  `core_pattern` right after the next install. `up.sh` deletes any leftover
+  (`-l coredrop.io/cleanup=true`) before installing, and `smoke.sh` treats a
+  failed `helm uninstall` as a test failure rather than swallowing it.
 - Images are fully qualified as `docker.io/library/*` and imported straight
   into the VM's containerd; with `pullPolicy: IfNotPresent` the kubelet never
   hits the network.

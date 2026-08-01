@@ -10,8 +10,9 @@ if [ "${DELETE_CLUSTER:-0}" = "1" ]; then
 fi
 
 kube_context
-log "uninstalling Helm release '$RELEASE' (restores the node core_pattern via the daemon's shutdown)"
-helm uninstall "$RELEASE" -n "$NAMESPACE" 2>/dev/null || true
+log "uninstalling Helm release '$RELEASE' (daemon restores core_pattern on shutdown; post-delete hook removes hostPath files)"
+helm uninstall "$RELEASE" -n "$NAMESPACE" --ignore-not-found \
+  || warn "helm uninstall failed (post-delete cleanup hook?); the namespace delete below still removes the workloads, but the node may keep $HOST_BIN_DIR / $HOST_RUN_DIR"
 
 log "deleting demo workload + namespaces"
 kubectl delete namespace "$DEMO_NAMESPACE" --ignore-not-found >/dev/null

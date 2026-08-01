@@ -1,0 +1,145 @@
+{{- if .Values.cleanup.enabled }}
+# post-delete cleanup: removes the handler binary, runtime config/state, and
+# any hostPath directories from every node after `helm uninstall`.
+#
+# The actual work has to run on every node, which needs a DaemonSet - but
+# Helm's hook-wait only understands Job/Pod completion, not DaemonSet
+# rollout, so a DaemonSet can't be the hook itself (it would get torn down by
+# hook-delete-policy before its pods ever ran). Instead a Job (weight "0")
+# drives the DaemonSet via kubectl: applies it, waits for
+# `kubectl rollout status` (which only succeeds once every node's cleanup
+# container is running, i.e. after that node's cleanup already ran), then
+# deletes it. The ServiceAccount/RBAC/ConfigMap the Job needs (weight "-1")
+# are themselves post-delete hooks, since the release's normal ServiceAccount
+# is already gone by the time post-delete hooks run.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "coredrop.fullname" . }}-cleanup
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "coredrop.fullname" . }}-cleanup
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "coredrop.fullname" . }}-cleanup
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "coredrop.fullname" . }}-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "coredrop.fullname" . }}-cleanup
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "coredrop.fullname" . }}-cleanup
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+data:
+  daemonset.yaml: |
+    {{- include "coredrop.cleanupWorkerManifest" . | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "coredrop.fullname" . }}-cleanup
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        {{- include "coredrop.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "coredrop.fullname" . }}-cleanup
+      restartPolicy: Never
+      initContainers:
+        # Nothing owns the worker DaemonSet - it is applied by kubectl after the
+        # release is already gone - so if a previous uninstall's Job died before
+        # its `delete` step, that DaemonSet is still running. Reap it first:
+        # otherwise this run's `rollout status` would observe the stale
+        # generation, and a surviving privileged worker would happily wipe a
+        # freshly reinstalled handler.
+        - name: reap-stale
+          image: "{{ .Values.cleanup.image }}"
+          command:
+            - kubectl
+            - delete
+            - daemonset/{{ include "coredrop.fullname" . }}-cleanup-worker
+            - -n
+            - {{ .Release.Namespace }}
+            - --ignore-not-found
+            - --wait=true
+            - --timeout=60s
+        - name: apply
+          image: "{{ .Values.cleanup.image }}"
+          command: ["kubectl", "apply", "-f", "/manifests/daemonset.yaml"]
+          volumeMounts:
+            - name: manifests
+              mountPath: /manifests
+              readOnly: true
+        - name: wait
+          image: "{{ .Values.cleanup.image }}"
+          command:
+            - kubectl
+            - rollout
+            - status
+            - daemonset/{{ include "coredrop.fullname" . }}-cleanup-worker
+            - -n
+            - {{ .Release.Namespace }}
+            - --timeout=120s
+      containers:
+        - name: delete
+          image: "{{ .Values.cleanup.image }}"
+          command:
+            - kubectl
+            - delete
+            - daemonset/{{ include "coredrop.fullname" . }}-cleanup-worker
+            - -n
+            - {{ .Release.Namespace }}
+            - --ignore-not-found
+            - --wait=true
+            - --timeout=60s
+      volumes:
+        - name: manifests
+          configMap:
+            name: {{ include "coredrop.fullname" . }}-cleanup
+{{- end }}

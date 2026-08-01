@@ -6,6 +6,11 @@ image:
   tag: dev
   pullPolicy: IfNotPresent
 
+# Fully qualified so it matches the name load_images imports into the VM's
+# containerd (see lib.sh CLEANUP_IMAGE) - otherwise the kubelet pulls it again.
+cleanup:
+  image: "docker.io/rancher/kubectl:v1.35.6"
+
 capture:
   cluster: "local"
   objectStore:

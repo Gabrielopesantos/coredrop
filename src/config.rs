@@ -29,6 +29,22 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
+/// Parse a boolean env var. `1`/`true`/`yes`/`on` (case-insensitive) -> `true`;
+/// `0`/`false`/`no`/`off`/unset/empty -> `false`; anything else -> `false`
+fn parse_bool_env(key: &str) -> bool {
+    let Ok(value) = std::env::var(key) else {
+        return false;
+    };
+    match value.to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" | "" => false,
+        _ => {
+            tracing::warn!(var = key, value = %value, "unrecognized boolean env value; treating as false");
+            false
+        }
+    }
+}
+
 /// Default cap on stored (uncompressed) core bytes per crash: 2 GiB.
 pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -193,14 +209,13 @@ impl HandlerConfig {
     /// Build from the daemon's environment.
     #[must_use]
     pub fn from_env() -> Self {
-        let env_flag = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty() && v != "0");
         let store_url = std::env::var("CAPTURE_STORE_URL")
             .ok()
             .filter(|s| !s.is_empty());
         let store_options = upload::store_options_from_env();
         Self {
             cluster: std::env::var("CAPTURE_CLUSTER").unwrap_or_else(|_| "local".to_string()),
-            no_redact: env_flag("CAPTURE_NO_REDACT"),
+            no_redact: parse_bool_env("CAPTURE_NO_REDACT"),
             proc_root: std::env::var("CAPTURE_PROC_ROOT").unwrap_or_else(|_| "/proc".to_string()),
             store_url,
             store_options,
@@ -227,7 +242,7 @@ impl HandlerConfig {
                 &std::env::var("CAPTURE_CONFIG_PATH")
                     .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
             ),
-            event_socket_path: (!env_flag("CAPTURE_NO_EVENTS")).then(|| {
+            event_socket_path: (!parse_bool_env("CAPTURE_NO_EVENTS")).then(|| {
                 event_socket_path_for(
                     &std::env::var("CAPTURE_CONFIG_PATH")
                         .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
@@ -472,6 +487,72 @@ mod tests {
         std::fs::remove_file(&path).ok();
         if let Some(parent) = std::path::Path::new(&path).parent() {
             std::fs::remove_dir_all(parent).ok();
+        }
+    }
+
+    // `std::env::vars` is process-global; serialize the env-mutating test(s)
+    // in this module so a parallel `cargo test` run can't interleave sets.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn parse_bool_env_recognizes_true_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for value in ["1", "true", "TRUE", "TrUe", "yes", "YES", "on", "ON"] {
+            // SAFETY: serialized by ENV_LOCK; this test owns this key.
+            unsafe {
+                std::env::set_var("COREDROP_TEST_BOOL", value);
+            }
+            assert!(
+                parse_bool_env("COREDROP_TEST_BOOL"),
+                "{value:?} should parse as true"
+            );
+        }
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("COREDROP_TEST_BOOL");
+        }
+    }
+
+    #[test]
+    fn parse_bool_env_recognizes_false_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for value in ["0", "false", "FALSE", "FaLsE", "no", "NO", "off", "OFF", ""] {
+            // SAFETY: serialized by ENV_LOCK; this test owns this key.
+            unsafe {
+                std::env::set_var("COREDROP_TEST_BOOL", value);
+            }
+            assert!(
+                !parse_bool_env("COREDROP_TEST_BOOL"),
+                "{value:?} should parse as false"
+            );
+        }
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("COREDROP_TEST_BOOL");
+        }
+    }
+
+    #[test]
+    fn parse_bool_env_unset_is_false() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK; this test owns this key.
+        unsafe {
+            std::env::remove_var("COREDROP_TEST_BOOL_UNSET");
+        }
+        assert!(!parse_bool_env("COREDROP_TEST_BOOL_UNSET"));
+    }
+
+    #[test]
+    fn parse_bool_env_garbage_is_false_no_panic() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK; this test owns this key.
+        unsafe {
+            std::env::set_var("COREDROP_TEST_BOOL", "maybe");
+        }
+        assert!(!parse_bool_env("COREDROP_TEST_BOOL"));
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("COREDROP_TEST_BOOL");
         }
     }
 }

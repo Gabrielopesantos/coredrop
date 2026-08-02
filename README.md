@@ -25,9 +25,9 @@ in a few deliberate ways:
   `environ`, `limits`, `stack`, and the executable's GNU build-id while the
   kernel still holds the faulting process - state that no longer exists once
   the process is reaped.
-- **Secret redaction by default** - captured `environ` values are redacted
-  via a keyword list plus an entropy/shape heuristic before they leave the
-  node.
+- **Secret redaction by default** - captured `environ` and `cmdline` values
+  are redacted via a keyword list plus an entropy/shape heuristic before they
+  leave the node.
 - **Built-in guards** - per-pod upload rate limit and a stored core size
   cap, so a crash-looping pod cannot flood the bucket.
 - **Loose artifacts + manifest, not a zip** - core, `/proc` snapshot tar, and
@@ -77,8 +77,11 @@ Objects land at:
 
 - **Secret redaction** - `environ` values are redacted by default via a
   curated keyword list plus an entropy/shape heuristic (JWTs, PEM blocks,
-  high-entropy tokens). `--no-redact` opts out. Cores themselves are
-  secret-bearing regardless; treat the bucket accordingly.
+  high-entropy tokens), including credentials embedded in URL userinfo and
+  query strings. `cmdline` gets the same treatment for `--key=value` arguments
+  and `--secret value` pairs, biased to over-redact since argv has no schema.
+  `--no-redact` opts out. Cores themselves are secret-bearing regardless;
+  treat the bucket accordingly.
 - **Size cap** - stored core bytes are capped per crash (default 2 GiB);
   the remainder of the stream is drained but not stored.
 - **Rate limit** - per-pod core-upload budget (default 3/hour) so a
@@ -199,7 +202,7 @@ The main ones:
 | `--upload-deadline-secs` | `CAPTURE_UPLOAD_DEADLINE_SECS` | 300 | Per-core upload deadline; past it the upload is abandoned to free the `core_pipe_limit` slot; 0 = no deadline |
 | `--crictl-timeout-secs` | `CRICTL_TIMEOUT_SECS` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
 | `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
-| `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` through un-redacted |
+| `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
 | `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
 | `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture |
 

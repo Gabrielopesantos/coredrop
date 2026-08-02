@@ -110,7 +110,7 @@ pub fn event_socket_path_for(config_path: &str) -> String {
 pub struct HandlerConfig {
     /// Cluster name - the first path segment of the object key.
     pub cluster: String,
-    /// Pass `environ` through un-redacted.
+    /// Pass `environ` and `cmdline` through un-redacted.
     pub no_redact: bool,
     /// `/proc` root (overridable for tests / non-standard layouts).
     pub proc_root: String,

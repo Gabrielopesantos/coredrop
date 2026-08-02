@@ -38,7 +38,7 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_CLUSTER", default_value = "local")]
     cluster: String,
 
-    /// Pass `environ` through un-redacted.
+    /// Pass `environ` and `cmdline` through un-redacted.
     #[arg(long, env = "CAPTURE_NO_REDACT")]
     no_redact: bool,
 

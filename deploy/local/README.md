@@ -33,7 +33,7 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
 4. The core object is a valid zstd stream and the proc-snapshot tar is
    well-formed.
 5. The workload's `SECRET_FOO` canary value was redacted from the captured
-   `environ`.
+   `environ`, and its `--db-password` canary from the captured `cmdline`.
 6. After `helm uninstall`, the node's `core_pattern` is restored to its
    pre-install value (recorded by `up.sh`).
 

@@ -15,6 +15,7 @@ SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
 MC_ALIAS="coredrop-smoke"
 HANDLER_MARK="coredrop capture"               # core_pattern points at our handler
 SECRET_CANARY="s3cr3t-smoke-canary-do-not-store"  # the workload's SECRET_FOO value
+CMDLINE_CANARY="s3cr3t-cmdline-canary-do-not-store"  # the workload's --db-password value
 ORIG_FILE="$SCRIPT_DIR/.tmp/orig_core_pattern"    # pre-install value (written by up.sh)
 WORKDIR="$(mktemp -d)"
 
@@ -132,11 +133,11 @@ else
   warn "  core.zst missing, empty, or not a valid zstd frame"; fail=1
 fi
 
-# 8. proc-snapshot has the forensic files + environ is REDACTED
+# 8. proc-snapshot has the forensic files + environ and cmdline are redacted
 mc cat "$MC_ALIAS/$BUCKET/$snap_key" > "$WORKDIR/snap.tar" 2>/dev/null || true
 if [ -s "$WORKDIR/snap.tar" ]; then
   members="$(tar tf "$WORKDIR/snap.tar" 2>/dev/null || true)"
-  for f in maps status environ; do
+  for f in maps status environ cmdline; do
     echo "$members" | grep -qx "$f" && log "  proc-snapshot has '$f'" || { warn "  proc-snapshot missing '$f'"; fail=1; }
   done
   if tar xf "$WORKDIR/snap.tar" -C "$WORKDIR" environ 2>/dev/null; then
@@ -152,6 +153,20 @@ if [ -s "$WORKDIR/snap.tar" ]; then
     fi
   else
     warn "  could not extract environ from the proc-snapshot"; fail=1
+  fi
+  if tar xf "$WORKDIR/snap.tar" -C "$WORKDIR" cmdline 2>/dev/null; then
+    if grep -aq -- "--db-password=<redacted>" "$WORKDIR/cmdline"; then
+      log "  cmdline: --db-password redacted to <redacted>"
+    else
+      warn "  cmdline: --db-password not redacted as expected"; fail=1
+    fi
+    if grep -aq "$CMDLINE_CANARY" "$WORKDIR/cmdline"; then
+      warn "  cmdline: plaintext secret canary LEAKED into the stored snapshot"; fail=1
+    else
+      log "  cmdline: plaintext secret canary absent (good)"
+    fi
+  else
+    warn "  could not extract cmdline from the proc-snapshot"; fail=1
   fi
 else
   warn "  proc-snapshot tar missing or empty"; fail=1

@@ -24,7 +24,7 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
 | capture.maxCoreBytes | int | `2147483648` | Truncate stored cores at this many bytes (2 GiB default). |
 | capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only. |
-| capture.noRedact | bool | `false` | Pass `environ` through un-redacted. Leave false; cores are secret-bearing. |
+| capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
 | capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload. |

@@ -26,7 +26,7 @@ use crate::redact::Redactor;
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 // Which files to include in the snapshot
-const SIMPLE_FILES: &[&str] = &["maps", "smaps", "status", "limits", "cmdline", "stack"];
+const SIMPLE_FILES: &[&str] = &["maps", "smaps", "status", "limits", "stack"];
 
 /// One captured `/proc` file, named by its basename.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,11 +62,20 @@ impl ProcSnapshot {
             }
         }
 
-        // environ is read separately from other files as it might need to be redacted
+        // environ and cmdline are read separately from other files as they
+        // might need to be redacted
         if let Some((raw, truncated)) = read_capped(&base.join("environ")) {
             files.push(SnapshotFile {
                 name: "environ".to_string(),
                 bytes: redactor.redact_environ(&raw),
+                truncated,
+            });
+        }
+
+        if let Some((raw, truncated)) = read_capped(&base.join("cmdline")) {
+            files.push(SnapshotFile {
+                name: "cmdline".to_string(),
+                bytes: redactor.redact_cmdline(&raw),
                 truncated,
             });
         }
@@ -234,13 +243,13 @@ mod tests {
     }
 
     #[test]
-    fn captures_proc_files_redacts_environ_and_reads_build_id() {
+    fn captures_proc_files_redacts_environ_and_cmdline_and_reads_build_id() {
         let root = fixture(
             4242,
             &[
                 ("maps", b"00400000-0040b000 r-xp 00000000 fd:00 12 /bin/app"),
                 ("status", b"Name:\tapp\nState:\tZ (zombie)\n"),
-                ("cmdline", b"app\0--flag\0"),
+                ("cmdline", b"app\0--flag\0--db-password=hunter2\0"),
                 ("environ", b"DB_PASSWORD=hunter2\0LANG=en_US.UTF-8\0"),
             ],
             &[0xab, 0xcd, 0xef],
@@ -256,6 +265,10 @@ mod tests {
         assert_eq!(
             files.get("environ").unwrap(),
             b"DB_PASSWORD=<redacted>\0LANG=en_US.UTF-8\0"
+        );
+        assert_eq!(
+            files.get("cmdline").unwrap(),
+            b"app\0--flag\0--db-password=<redacted>\0"
         );
         let fd = std::str::from_utf8(files.get("fd").unwrap()).unwrap();
         assert!(fd.starts_with("3 -> "), "fd listing: {fd}");

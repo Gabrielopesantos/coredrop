@@ -57,7 +57,7 @@ capture:
   # so a wedged CRI socket must not pin the handler's `core_pipe_limit` slot forever.
   # -- Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
   crictlTimeoutSeconds: 10
-  # -- Pass `environ` through un-redacted. Leave false; cores are secret-bearing.
+  # -- Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing.
   noRedact: false
   # S3-compatible/GCS/Azure object store for the core + proc-snapshot + manifest.
   # Leave `url` empty to run with no upload (cores discarded, pipe still drains).

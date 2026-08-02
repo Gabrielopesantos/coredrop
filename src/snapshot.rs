@@ -25,6 +25,10 @@ use crate::redact::Redactor;
 // Cap snapshot files at 8 MBs
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
+// Cap the fd listing: a process with millions of open fds must not make the
+// handler allocate unboundedly while it holds a core_pipe_limit slot.
+const MAX_FD_ENTRIES: usize = 10_000;
+
 // Which files to include in the snapshot
 const SIMPLE_FILES: &[&str] = &["maps", "smaps", "status", "limits", "stack"];
 
@@ -80,11 +84,11 @@ impl ProcSnapshot {
             });
         }
 
-        if let Some(listing) = read_fd_listing(&base.join("fd")) {
+        if let Some((listing, truncated)) = read_fd_listing(&base.join("fd")) {
             files.push(SnapshotFile {
                 name: "fd".to_string(),
                 bytes: listing.into_bytes(),
-                truncated: false,
+                truncated,
             });
         }
 
@@ -170,8 +174,12 @@ fn read_capped(path: &Path) -> Option<(Vec<u8>, bool)> {
     Some((buf, truncated))
 }
 
-fn read_fd_listing(fd_dir: &Path) -> Option<String> {
+/// Returns the listing and whether the [`MAX_FD_ENTRIES`] cap bit. Every
+/// dirent is counted so the listing can report the total, but only the first
+/// `MAX_FD_ENTRIES` are resolved and kept.
+fn read_fd_listing(fd_dir: &Path) -> Option<(String, bool)> {
     let mut entries: Vec<(u64, String)> = Vec::new();
+    let mut total = 0usize;
     let dirents = match std::fs::read_dir(fd_dir) {
         Ok(dirents) => dirents,
         Err(e) => {
@@ -181,6 +189,10 @@ fn read_fd_listing(fd_dir: &Path) -> Option<String> {
     };
     for dirent in dirents {
         let Ok(dirent) = dirent else { continue };
+        total += 1;
+        if entries.len() >= MAX_FD_ENTRIES {
+            continue;
+        }
         let name = dirent.file_name().to_string_lossy().into_owned();
         let num: u64 = name.parse().unwrap_or(u64::MAX);
         let target = std::fs::read_link(dirent.path()).map_or_else(
@@ -190,13 +202,18 @@ fn read_fd_listing(fd_dir: &Path) -> Option<String> {
         entries.push((num, format!("{name} -> {target}")));
     }
     entries.sort_by_key(|(n, _)| *n);
-    Some(
-        entries
-            .into_iter()
-            .map(|(_, line)| line)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
+    let mut lines: Vec<String> = entries.into_iter().map(|(_, line)| line).collect();
+    let truncated = total > lines.len();
+    if truncated {
+        tracing::warn!(
+            path = %fd_dir.display(),
+            shown = lines.len(),
+            total,
+            "fd listing capped"
+        );
+        lines.push(format!("... showing {} of {total} fds", lines.len()));
+    }
+    Some((lines.join("\n"), truncated))
 }
 
 #[cfg(test)]
@@ -310,6 +327,46 @@ mod tests {
             }
         }
         assert_eq!(manifest.as_deref(), Some("smaps"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn caps_fd_listing_and_flags_truncation() {
+        let root = fixture(13, &[("maps", b"x")], &[0x04]);
+        let fd_dir = root.join("13/fd");
+        for i in 0..=MAX_FD_ENTRIES {
+            // fixture() already made fd/3
+            std::os::unix::fs::symlink("/dev/null", fd_dir.join(format!("{}", i + 100))).unwrap();
+        }
+
+        let snap = ProcSnapshot::capture(&root, 13, &Redactor::default());
+        let fd = snap.files.iter().find(|f| f.name == "fd").unwrap();
+        assert!(
+            fd.truncated,
+            "over-cap fd listing must be flagged truncated"
+        );
+
+        let listing = std::str::from_utf8(&fd.bytes).unwrap();
+        let lines: Vec<&str> = listing.lines().collect();
+        assert_eq!(lines.len(), MAX_FD_ENTRIES + 1, "capped entries + the note");
+        assert_eq!(
+            lines.last().copied(),
+            Some(format!("... showing {MAX_FD_ENTRIES} of {} fds", MAX_FD_ENTRIES + 2).as_str())
+        );
+
+        let tar_bytes = snap.to_tar().unwrap();
+        let mut archive = tar::Archive::new(tar_bytes.as_slice());
+        let mut manifest = None;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().to_string_lossy() == "TRUNCATED" {
+                let mut s = String::new();
+                entry.read_to_string(&mut s).unwrap();
+                manifest = Some(s);
+            }
+        }
+        assert_eq!(manifest.as_deref(), Some("fd"));
 
         std::fs::remove_dir_all(&root).ok();
     }

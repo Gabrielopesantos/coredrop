@@ -290,6 +290,24 @@ pub fn store_options_from_env() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Whether the forwarded store options point at a plaintext endpoint. Cores
+/// are secret-bearing, so an `http://` endpoint (or a blanket `AWS_ALLOW_HTTP`)
+/// puts them on the network in the clear - acceptable for an in-cluster dev
+/// store, worth a startup warning anywhere else.
+#[must_use]
+pub fn is_plaintext_endpoint(opts: &[(String, String)]) -> bool {
+    let get = |key: &str| {
+        opts.iter()
+            .find(|(k, _)| k == key)
+            .map_or("", |(_, v)| v.as_str())
+    };
+    get("AWS_ENDPOINT").to_lowercase().starts_with("http://")
+        || matches!(
+            get("AWS_ALLOW_HTTP").to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+}
+
 /// Retry policy for cloud uploads. `object_store` defaults to 10 retries over
 /// 3 minutes; the handler may be holding one of the node's `core_pipe_limit`
 /// concurrency slots mid-multipart, and a slow store keeps that slot occupied
@@ -610,5 +628,31 @@ mod tests {
             std::env::remove_var("NOT_AN_ALLOWED_KEY");
         }
         assert!(!opts.contains_key("NOT_AN_ALLOWED_KEY"));
+    }
+
+    #[test]
+    fn plaintext_endpoint_detection() {
+        let opts = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect()
+        };
+
+        assert!(is_plaintext_endpoint(&opts(&[(
+            "AWS_ENDPOINT",
+            "http://minio:9000"
+        )])));
+        assert!(is_plaintext_endpoint(&opts(&[("AWS_ALLOW_HTTP", "true")])));
+        assert!(!is_plaintext_endpoint(&opts(&[(
+            "AWS_ENDPOINT",
+            "https://s3.example.com"
+        )])));
+        // Explicitly disabled is not a plaintext endpoint.
+        assert!(!is_plaintext_endpoint(&opts(&[(
+            "AWS_ALLOW_HTTP",
+            "false"
+        )])));
+        assert!(!is_plaintext_endpoint(&[]));
     }
 }

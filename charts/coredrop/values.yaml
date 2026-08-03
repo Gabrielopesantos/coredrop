@@ -68,11 +68,15 @@ capture:
     # -- Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload.
     url: ""
     # Non-secret client options, rendered as plain env vars on the daemon.
+    # An `http://` endpoint (with `AWS_ALLOW_HTTP`) sends cores - and whatever
+    # secrets their memory holds - across the network unencrypted; use it for
+    # in-cluster/dev stores only. The daemon logs a warning at startup when it
+    # sees one.
     # -- Non-secret object-store client options, rendered as plain env vars (allowlisted).
     config: {}
     #   AWS_REGION: "us-east-1"
     #   AWS_ENDPOINT: "http://minio:9000"   # S3-compatible, e.g. in-cluster MinIO
-    #   AWS_ALLOW_HTTP: "true"              # plaintext endpoint
+    #   AWS_ALLOW_HTTP: "true"              # plaintext endpoint, dev only
     # Secret-bearing options; rendered into the store Secret and injected via
     # envFrom. Leave empty for workload identity (annotate serviceAccount instead).
     # -- Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted).

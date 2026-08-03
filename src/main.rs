@@ -152,6 +152,11 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
 
     let mut config = args.to_handler_config();
 
+    if config.store_url.is_some() && coredrop::upload::is_plaintext_endpoint(&config.store_options)
+    {
+        warn!("object-store endpoint is plaintext HTTP; cores traverse the network unencrypted");
+    }
+
     // Bind the capture-event socket before writing the config, so the
     // handler only ever gets a path the daemon is actually listening on -
     // a bind failure degrades to events-disabled rather than the handler

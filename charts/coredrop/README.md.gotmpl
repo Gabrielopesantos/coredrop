@@ -46,6 +46,15 @@ the valid set - a typo can't reach the cluster and silently drop out:
   - `AZURE_STORAGE_ACCESS_KEY`
   - `AZURE_STORAGE_CLIENT_SECRET`
 
+### Plaintext endpoints
+
+The MinIO/S3-compatible pattern (`AWS_ENDPOINT: http://...` plus
+`AWS_ALLOW_HTTP: "true"`) uploads over unencrypted HTTP. A core is a full
+memory image, so everything the process held - credentials, tokens, customer
+data - crosses the cluster network in the clear. A plaintext endpoint can be
+used for in-cluster or dev stores only; anywhere else, TLS should be used.
+The daemon logs a warning at startup when it is configured with one.
+
 ## Events RBAC
 
 `events.enabled: true` (default) renders a `ClusterRole` +

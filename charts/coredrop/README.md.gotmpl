@@ -169,6 +169,25 @@ kernel-exec'd handler:
   authenticates via the node's metadata server automatically, same as any
   other GCE-hosted workload.
 
+## Health
+
+Pod status is the health surface - the daemon serves no health endpoint,
+having no control plane to serve one from.
+
+Startup failures are fatal. The daemon exits non-zero when it cannot bind
+the capture-event socket, write the handler config, or install `core_pattern`,
+so a node whose capture path never came up shows `CrashLoopBackOff` rather than
+a Ready pod that silently captures nothing.
+
+Drift after startup is caught by the readiness and liveness probes, which
+exec `coredrop check`. It verifies that `core_pattern` still routes to our
+handler, that the handler config is present and valid, and that the capture-event
+socket is still bound - the state another agent on the node (a competing coredump
+handler, a node-config daemon, a wiped `/run`) can take out from under a healthy-looking
+daemon.. The restart is the remediation - the daemon reinstalls `core_pattern` and
+rewrites the config on the way up. In-flight captures are separate kernel-exec'd
+processes and survive the restart.
+
 ## Why privileged + hostPID
 
 The daemon writes node-global sysctls (`core_pattern`, `core_pipe_limit`) and

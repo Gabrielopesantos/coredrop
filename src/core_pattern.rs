@@ -19,6 +19,12 @@ use tracing::warn;
 /// Max crashes concurrently held open for a handler.
 pub const DEFAULT_PIPE_LIMIT: u32 = 128;
 
+/// Kernel sysctl holding the pattern cores are routed through.
+pub const CORE_PATTERN_PATH: &str = "/proc/sys/kernel/core_pattern";
+
+/// Kernel sysctl bounding how many dumps may be held open for a handler.
+pub const CORE_PIPE_LIMIT_PATH: &str = "/proc/sys/kernel/core_pipe_limit";
+
 /// Build the `core_pattern` value routing cores to our handler:
 /// `|<handler> capture %P %s %t %E`.
 #[must_use]
@@ -36,22 +42,8 @@ pub struct CorePatternGuard {
 }
 
 impl CorePatternGuard {
-    /// Install against the real host sysctls.
-    ///
-    /// # Errors
-    ///
-    /// Fails when `core_pattern` cannot be read or written (see
-    /// [`Self::install_at`]).
-    pub fn install(handler_path: &str, pipe_limit: u32) -> Result<Self> {
-        Self::install_at(
-            handler_path,
-            pipe_limit,
-            PathBuf::from("/proc/sys/kernel/core_pattern"),
-            PathBuf::from("/proc/sys/kernel/core_pipe_limit"),
-        )
-    }
-
-    /// Install against caller-supplied sysctl paths (the test seam).
+    /// Install against caller-supplied sysctl paths. The daemon passes the real
+    /// `/proc/sys/kernel/*` paths; tests pass temp files.
     ///
     /// # Errors
     ///

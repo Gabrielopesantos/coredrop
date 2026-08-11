@@ -40,6 +40,21 @@ else
   warn "node core_pattern does NOT point at the handler: $cur_pattern"; fail=1
 fi
 
+# The rollout above already waited on the readiness probe, which runs the same
+# check; run it once explicitly so a probe failure reports its own reason here
+# instead of only as a rollout timeout.
+daemon_pod="$(kubectl -n "$NAMESPACE" get pods \
+  -l 'app.kubernetes.io/name=coredrop,!coredrop.io/cleanup' \
+  --field-selector status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+if [ -z "$daemon_pod" ]; then
+  warn "no running coredrop daemon pod found"; fail=1
+elif check_out="$(kubectl -n "$NAMESPACE" exec "$daemon_pod" -- /bin/coredrop check 2>&1)"; then
+  log "health check (readiness/liveness probe) passes on $daemon_pod"
+else
+  warn "health check FAILED on $daemon_pod: $check_out"; fail=1
+fi
+
 # 3. reach MinIO from the host via a port-forward
 # Wait for MinIO + the bucket Job first: a port-forward to a Service with no
 # ready endpoints fails, and the first image pull in the VM is slow.

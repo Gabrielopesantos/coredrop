@@ -38,7 +38,7 @@ in a few deliberate ways:
 
 ## How it works
 
-The single `coredrop` binary runs in two modes:
+The single `coredrop` binary runs in three modes:
 
 - **Daemon** (`coredrop`) - the long-running DaemonSet container. At startup
   it points `/proc/sys/kernel/core_pattern` at the handler, raises
@@ -49,6 +49,11 @@ The single `coredrop` binary runs in two modes:
   process the kernel exec's per fault, in the host namespaces, with the core
   on stdin. Because the kernel exec's it with a clean environment, it reads
   the daemon-written hostPath config instead of env vars.
+- **Health check** (`coredrop check`) - what the chart's readiness and liveness
+  probes exec. Exits non-zero when `core_pattern` no longer points at the
+  handler, the handler config is missing or invalid, or the capture-event
+  socket is gone. Startup failures already exit the daemon non-zero; this
+  catches drift afterwards, and the liveness restart reinstalls both.
 
 Handler flow, ordered by time-criticality:
 

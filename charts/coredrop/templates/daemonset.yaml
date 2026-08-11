@@ -94,6 +94,20 @@ spec:
             - secretRef:
                 name: {{ include "coredrop.fullname" . }}-store
           {{- end }}
+          # Probes exec `coredrop check`: the kernel still routes cores to
+          # our handler, the handler config is intact, the event socket is
+          # bound.
+          readinessProbe:
+            exec:
+              command: ["/bin/coredrop", "check"]
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["/bin/coredrop", "check"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

@@ -18,6 +18,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.events.enabled }}
       hostPID: {{ .Values.hostPID }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

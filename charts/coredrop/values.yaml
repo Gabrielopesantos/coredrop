@@ -108,7 +108,9 @@ cleanup:
 # k8s Event emission on capture: posts an event on the crashing pod
 # ("core dumped, artifacts at {key}") so kubectl describe pod / kubectl get
 # events surfaces it. Disabling skips the daemon's socket listener and the
-# events RBAC (ClusterRole/ClusterRoleBinding) is not rendered.
+# events RBAC (ClusterRole/ClusterRoleBinding) is not rendered; the daemon
+# pod also stops getting a ServiceAccount token mounted
+# (automountServiceAccountToken: false), since it has no more use for one.
 events:
   # -- Post a k8s Event on the crashing pod per capture; `false` also skips the events RBAC.
   enabled: true

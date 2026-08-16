@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use object_store::ObjectStore;
 use tokio::io::AsyncRead;
 use tracing::{debug, info, warn};
@@ -177,20 +177,14 @@ pub async fn run(
     // The handler holds one of the node's `core_pipe_limit` slots for its
     // whole lifetime, so the drain gets a deadline: past it the upload is
     // abandoned. The abandoned drain follows the failure path below, so the
-    // rate-limit budget is refunded.
-    let drain = backend.drain_core(core_in);
-    let drained = if config.upload_deadline_secs == 0 {
-        drain.await
-    } else {
-        let deadline = std::time::Duration::from_secs(config.upload_deadline_secs);
-        match tokio::time::timeout(deadline, drain).await {
-            Ok(res) => res,
-            Err(_) => Err(anyhow!(
-                "core upload exceeded the {}s deadline; abandoning to free the core_pipe_limit slot",
-                config.upload_deadline_secs
-            )),
-        }
-    };
+    // rate-limit budget is refunded. The deadline is enforced inside
+    // `drain_core` itself (not a `tokio::time::timeout` wrapped around this
+    // call) so a backend streaming to an object store can abort its
+    // in-flight multipart upload before giving up - see the comment above
+    // `race` in upload.rs for why that has to happen inside, not out here.
+    let deadline = (config.upload_deadline_secs != 0)
+        .then(|| std::time::Duration::from_secs(config.upload_deadline_secs));
+    let drained = backend.drain_core(core_in, deadline).await;
     let stats = match drained.context("draining core stream") {
         Ok(stats) => stats,
         Err(e) => {

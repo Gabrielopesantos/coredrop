@@ -10,8 +10,9 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_compression::tokio::write::ZstdEncoder;
 use async_trait::async_trait;
 use object_store::buffered::BufWriter;
@@ -19,6 +20,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
 use crate::backend::{CaptureBackend, CoreStats};
@@ -107,10 +109,14 @@ impl StandaloneBackend {
 
 #[async_trait]
 impl CaptureBackend for StandaloneBackend {
-    async fn drain_core(&self, reader: &mut (dyn AsyncRead + Unpin + Send)) -> Result<CoreStats> {
+    async fn drain_core(
+        &self,
+        reader: &mut (dyn AsyncRead + Unpin + Send),
+        deadline: Option<Duration>,
+    ) -> Result<CoreStats> {
         let sink = BufWriter::new(self.store.clone(), self.key.clone());
         let (bytes, stored_bytes, sha256, truncated_reason) =
-            stream_core_through_zstd(reader, sink, self.max_core_bytes).await?;
+            stream_core_through_zstd(reader, sink, self.max_core_bytes, deadline).await?;
         Ok(CoreStats {
             bytes,
             stored_bytes,
@@ -121,15 +127,58 @@ impl CaptureBackend for StandaloneBackend {
     }
 }
 
-async fn stream_core_through_zstd<R, W>(
+// BufWriter has no Drop impl (object_store 0.13.1).
+// MultipartUpload docs say S3/GCS "cannot perform cleanup on drop" -
+// targets configured. So racing the whole drain against a timeout
+// and letting the loser get dropped (the old approach) always leaked
+// the in-progress multipart on timeout: abort() must be called explicitly,
+// which means whatever cancels the read/write has to still own the BufWriter
+// afterward. `race()` below races individual awaits, not the whole
+// function, so `encoder`/`sink` stay in scope to call `abort_multipart` on
+// timeout instead of being dropped with it.
+//
+// Caveat: `BufWriter::poll_shutdown` consumes the multipart handle into its
+// own finish future on the first poll of `shutdown()`, so `abort()`
+// panics ("Already shut down") if shutdown has been polled even once.
+// `abort_multipart` is therefore only called from the read/write loop,
+// never after `shutdown()` is invoked - a deadline landing during that
+// final call has no safe abort path and relies on the bucket lifecycle
+// rule in the chart README's Retention section instead.
+async fn race<T>(
+    fut: impl std::future::Future<Output = T>,
+    deadline_at: Option<Instant>,
+) -> Result<T, tokio::time::error::Elapsed> {
+    match deadline_at {
+        Some(dl) => timeout_at(dl, fut).await,
+        None => Ok(fut.await),
+    }
+}
+
+/// Abort the in-progress multipart upload. Only safe to call before
+/// `shutdown()`/finalize has ever been polled - see the module comment
+/// above `race`.
+async fn abort_multipart(encoder: ZstdEncoder<HashingWriter<BufWriter>>) {
+    let HashingWriter {
+        inner: mut sink, ..
+    } = encoder.into_inner();
+    if let Err(e) = sink.abort().await {
+        warn!(
+            error = %e,
+            "aborting multipart upload failed; orphaned parts may remain in the object store"
+        );
+    }
+}
+
+async fn stream_core_through_zstd<R>(
     core: &mut R,
-    sink: W,
+    sink: BufWriter,
     max_core_bytes: u64,
+    deadline: Option<Duration>,
 ) -> Result<(u64, u64, String, Option<String>)>
 where
     R: AsyncRead + Unpin + ?Sized,
-    W: AsyncWrite + Unpin,
 {
+    let deadline_at = deadline.map(|d| Instant::now() + d);
     let cap = if max_core_bytes == 0 {
         u64::MAX
     } else {
@@ -147,19 +196,37 @@ where
     let mut written = 0u64;
     let mut truncated_reason: Option<String> = None;
     loop {
-        match core.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
+        match race(core.read(&mut buf), deadline_at).await {
+            Err(_elapsed) => {
+                warn!(
+                    drained,
+                    "core drain exceeded the upload deadline while reading; aborting multipart upload"
+                );
+                abort_multipart(encoder).await;
+                return Err(anyhow!("core drain exceeded the upload deadline"));
+            }
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
                 drained += n as u64;
                 // min() keeps the value <= n, so the conversion back to usize cannot fail.
                 let take =
                     usize::try_from((n as u64).min(cap.saturating_sub(written))).unwrap_or(n);
                 if take > 0 {
-                    encoder
-                        .write_all(&buf[..take])
-                        .await
-                        .context("writing core into zstd encoder")?;
-                    written += take as u64;
+                    match race(encoder.write_all(&buf[..take]), deadline_at).await {
+                        Err(_elapsed) => {
+                            warn!(
+                                drained,
+                                "core upload exceeded the upload deadline while writing; aborting multipart upload"
+                            );
+                            abort_multipart(encoder).await;
+                            return Err(anyhow!("core drain exceeded the upload deadline"));
+                        }
+                        Ok(Err(e)) => {
+                            abort_multipart(encoder).await;
+                            return Err(e).context("writing core into zstd encoder");
+                        }
+                        Ok(Ok(())) => written += take as u64,
+                    }
                 }
                 if take < n && truncated_reason.is_none() {
                     warn!(
@@ -169,7 +236,7 @@ where
                     truncated_reason = Some("size_cap".to_string());
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(error = %e, drained, "core stream read error - finalizing partial object as truncated");
                 truncated_reason = Some("stream_error".to_string());
                 break;
@@ -177,10 +244,20 @@ where
         }
     }
 
-    encoder
-        .shutdown()
-        .await
-        .context("finalizing zstd stream + completing upload")?;
+    // Past this point `shutdown()` has been polled at least once even if it
+    // times out below, so the multipart handle is gone - no more `abort()`
+    // calls are possible (see the module comment above `race`).
+    match race(encoder.shutdown(), deadline_at).await {
+        Err(_elapsed) => {
+            warn!(
+                "core upload exceeded the upload deadline while finalizing; \
+                 multipart upload may be left incomplete in the object store"
+            );
+            return Err(anyhow!("core drain exceeded the upload deadline"));
+        }
+        Ok(Err(e)) => return Err(e).context("finalizing zstd stream + completing upload"),
+        Ok(Ok(())) => {}
+    }
 
     let HashingWriter {
         hasher,
@@ -469,7 +546,7 @@ mod tests {
 
         let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader: &[u8] = &core;
-        let stats = backend.drain_core(&mut reader).await.unwrap();
+        let stats = backend.drain_core(&mut reader, None).await.unwrap();
 
         let stored = store
             .get(&ObjectPath::from(key.as_str()))
@@ -488,6 +565,64 @@ mod tests {
         );
         assert_eq!(stats.sha256.as_deref(), Some(sha256_hex(&stored).as_str()));
         assert_eq!(unzstd(&stored).await, core);
+    }
+
+    /// Yields one chunk, then stalls forever - stands in for a hung kernel
+    /// pipe or wedged store mid-multipart.
+    struct StallAfterOneChunk {
+        chunk: Option<Vec<u8>>,
+    }
+
+    impl AsyncRead for StallAfterOneChunk {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            match self.chunk.as_mut() {
+                Some(chunk) => {
+                    let n = chunk.len().min(buf.remaining());
+                    buf.put_slice(&chunk[..n]);
+                    chunk.drain(..n);
+                    if chunk.is_empty() {
+                        self.chunk = None;
+                    }
+                    Poll::Ready(Ok(()))
+                }
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    /// `InMemory` doesn't model billable orphaned parts the way S3/GCS do,
+    /// so this can only prove the abort path runs without panicking and
+    /// stores nothing - not that a real bucket gets cleaned up server-side.
+    #[tokio::test(start_paused = true)]
+    async fn drain_aborts_multipart_and_errors_on_deadline() {
+        let store = Arc::new(InMemory::new());
+        let key = ObjectPath::from("abort-test/core.zst");
+        // Tiny capacity + a large incompressible first chunk forces the
+        // BufWriter into multipart (Write) state before the second read
+        // stalls and the deadline fires.
+        let sink = BufWriter::with_capacity(store.clone(), key.clone(), 16);
+        let incompressible: Vec<u8> = (0..512_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let mut reader = StallAfterOneChunk {
+            chunk: Some(incompressible),
+        };
+
+        let result =
+            stream_core_through_zstd(&mut reader, sink, 0, Some(Duration::from_secs(1))).await;
+
+        assert!(
+            result.is_err(),
+            "a stalled drain must error at the deadline"
+        );
+        assert!(
+            store.get(&key).await.is_err(),
+            "no completed object may appear after an aborted multipart"
+        );
     }
 
     struct FlakyReader {
@@ -522,7 +657,7 @@ mod tests {
             chunk: chunk.clone(),
             sent: false,
         };
-        let stats = backend.drain_core(&mut reader).await.unwrap();
+        let stats = backend.drain_core(&mut reader, None).await.unwrap();
 
         assert!(stats.truncated);
         assert_eq!(stats.truncated_reason.as_deref(), Some("stream_error"));
@@ -550,7 +685,7 @@ mod tests {
 
         let backend = StandaloneBackend::new(store.clone(), &key, 10_000);
         let mut reader: &[u8] = &core;
-        let stats = backend.drain_core(&mut reader).await.unwrap();
+        let stats = backend.drain_core(&mut reader, None).await.unwrap();
 
         assert_eq!(stats.bytes, 50_000, "full stream drained and counted");
         assert!(stats.truncated);

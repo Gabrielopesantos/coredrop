@@ -148,12 +148,16 @@ contents:
 
 Replace `local/` with your `capture.cluster` value.
 
-A capture abandoned mid-upload (the handler's upload deadline firing, or
-the handler dying) can leave an incomplete multipart upload behind -
-invisible to a normal listing but still billed. Pair the expiry rule with
-incomplete-multipart cleanup: S3's `AbortIncompleteMultipartUpload` (shown
-above), GCS's `AbortIncompleteMultipartUpload` lifecycle action; Azure
-garbage-collects uncommitted blocks on its own after about a week.
+The handler explicitly aborts an in-progress multipart upload when its
+upload deadline fires mid-stream, so most abandoned captures clean up after
+themselves. Two narrower cases can still leave an incomplete multipart
+upload behind - invisible to a normal listing but still billed: the deadline
+landing during the last finalize/complete-multipart-upload call (no longer
+abortable at that point), or the handler process dying outright. Pair the
+expiry rule with incomplete-multipart cleanup as belt-and-braces: S3's
+`AbortIncompleteMultipartUpload` (shown above), GCS's
+`AbortIncompleteMultipartUpload` lifecycle action; Azure garbage-collects
+uncommitted blocks on its own after about a week.
 
 ## Rate limit
 

@@ -48,32 +48,16 @@ fn parse_bool_env(key: &str) -> bool {
 /// Default cap on stored (uncompressed) core bytes per crash: 2 GiB.
 pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-fn default_max_core_bytes() -> u64 {
-    DEFAULT_MAX_CORE_BYTES
-}
-
 /// Default per-pod core-upload budget per hour.
 pub const DEFAULT_MAX_CORES_PER_HOUR: u32 = 3;
-
-fn default_max_cores_per_hour() -> u32 {
-    DEFAULT_MAX_CORES_PER_HOUR
-}
 
 /// Default deadline for draining/uploading one core: 5 minutes.
 /// The handler holds one of the node's `core_pipe_limit` slots for its whole
 /// lifetime, so a hung store must not be able to hold it indefinitely.
 pub const DEFAULT_UPLOAD_DEADLINE_SECS: u64 = 300;
 
-fn default_upload_deadline_secs() -> u64 {
-    DEFAULT_UPLOAD_DEADLINE_SECS
-}
-
 /// Default timeout for `crictl inspect` in the handler.
 pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
-
-fn default_crictl_timeout_secs() -> u64 {
-    DEFAULT_CRICTL_TIMEOUT_SECS
-}
 
 fn default_rate_state_path() -> String {
     "/run/coredrop/recent.json".to_string()
@@ -124,32 +108,24 @@ pub struct HandlerConfig {
     /// `None` lets crictl use its own default / `CONTAINER_RUNTIME_ENDPOINT`.
     pub cri_runtime_endpoint: Option<String>,
     /// Max uncompressed core bytes stored per crash; `0` = unlimited. The
-    /// remainder is drained but not stored (`serde(default)` keeps configs
-    /// written by older daemons parseable).
-    #[serde(default = "default_max_core_bytes")]
+    /// remainder is drained but not stored.
     pub max_core_bytes: u64,
     /// Max core uploads per pod per hour; `0` = unlimited. Suppressed
     /// crashes still get a proc snapshot and manifest, just no core.
-    #[serde(default = "default_max_cores_per_hour")]
     pub max_cores_per_hour: u32,
     /// Deadline in seconds for draining/uploading the core; `0` =
     /// no deadline. On expiry the handler abandons the upload and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a slow store
     /// hold it.
-    #[serde(default = "default_upload_deadline_secs")]
     pub upload_deadline_secs: u64,
     /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
     /// crictl runs after the core drain, so a wedged CRI socket must not pin the
     /// handler's `core_pipe_limit` slot forever.
-    #[serde(default = "default_crictl_timeout_secs")]
     pub crictl_timeout_secs: u64,
     /// Rate-limit state file, sibling of the handler config on the hostPath.
-    #[serde(default = "default_rate_state_path")]
     pub rate_state_path: String,
     /// Capture-event unix datagram socket the daemon listens on, sibling of
-    /// the handler config on the hostPath. `None` when events are disabled
-    /// (`serde(default)` keeps configs written by older daemons parseable).
-    #[serde(default)]
+    /// the handler config on the hostPath. `None` when events are disabled.
     pub event_socket_path: Option<String>,
 }
 

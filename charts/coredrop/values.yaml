@@ -82,11 +82,15 @@ capture:
     #   AWS_SECRET_ACCESS_KEY: ""
 
 # CRI socket for crictl enrichment (post-drain identity: namespace, pod name,
-# container name, image, restart count). The socket is mounted read-only from
-# the host at the path in `runtimeEndpoint` (minus the `unix://` prefix).
+# container name, image, restart count).
+#
+# Empty by default: the handler runs in the host mount namespace, so leaving
+# this unset lets the node's own crictl resolve the endpoint from
+# /etc/crictl.yaml and its built-in fallbacks (containerd, CRI-O, cri-dockerd),
+# which is right on far more runtimes than any single hard-coded path.
 cri:
-  # -- CRI endpoint for crictl enrichment; its `unix://` path is also the socket mounted from the host.
-  runtimeEndpoint: "unix:///run/containerd/containerd.sock"
+  # -- CRI endpoint for crictl enrichment; when set, its `unix://` path is also the socket mounted from the host. Empty lets crictl self-resolve on the node.
+  runtimeEndpoint: ""
   # Path to crictl ON THE NODE: the kernel-exec'd handler runs in the host
   # mount namespace and shells out to the node's own crictl (k3s and most
   # kubeadm nodes install it here), not a binary from this image.

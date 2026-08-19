@@ -92,8 +92,10 @@ spec:
             # cri: post-drain container identity enrichment.
             - name: CRICTL_PATH
               value: {{ .Values.cri.crictlPath | quote }}
+            {{- with .Values.cri.runtimeEndpoint }}
             - name: CONTAINER_RUNTIME_ENDPOINT
-              value: {{ .Values.cri.runtimeEndpoint | quote }}
+              value: {{ . | quote }}
+            {{- end }}
           {{- if and .Values.capture.objectStore.url .Values.capture.objectStore.credentials }}
           envFrom:
             - secretRef:

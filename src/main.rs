@@ -189,14 +189,21 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     // crictl enrichment is best-effort, so a missing socket is not fatal - but
     // it is otherwise invisible until a crash produces a manifest with no
     // namespace/pod/container name.
-    if let Some(endpoint) = &config.cri_runtime_endpoint
-        && let Some(socket) = coredrop::crictl::unix_socket_path(endpoint)
-        && !std::path::Path::new(socket).exists()
-    {
-        warn!(
-            socket,
-            "CRI socket does not exist; crictl enrichment will degrade to cgroup-only identity"
-        );
+    match &config.cri_runtime_endpoint {
+        // Unset is the default: the handler runs in the host mount namespace,
+        // so the node's own crictl resolves the endpoint better than we can.
+        // Say so, or a missing identity looks like a bug rather than a setting.
+        None => info!("no CRI endpoint configured; crictl will resolve one on the node"),
+        Some(endpoint) => {
+            if let Some(socket) = coredrop::crictl::unix_socket_path(endpoint)
+                && !std::path::Path::new(socket).exists()
+            {
+                warn!(
+                    socket,
+                    "CRI socket does not exist; crictl enrichment will degrade to cgroup-only identity"
+                );
+            }
+        }
     }
 
     // Bind the capture-event socket before writing the config, so the handler

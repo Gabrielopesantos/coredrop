@@ -207,17 +207,25 @@ Uninstalling the release stops the daemon, which restores the node's original
 
 ## CRI socket
 
-`cri.runtimeEndpoint` is both what the handler passes to crictl as
-`CONTAINER_RUNTIME_ENDPOINT` and, minus the `unix://` prefix, the node path
-the pod mounts the socket from. The default is
-`unix:///run/containerd/containerd.sock`; k3s runs its own containerd, so use
-`unix:///run/k3s/containerd/containerd.sock` there.
+`cri.runtimeEndpoint` is empty by default, and that is the recommended
+setting. The handler is kernel-exec'd in the host mount namespace, so it shells
+out to the node's own crictl against the node's own socket - it never goes
+through a mount in this pod. Leaving the endpoint unset means crictl resolves
+it the way it already knows how: `/etc/crictl.yaml` and then its built-in
+fallbacks for containerd, CRI-O and cri-dockerd. Pinning a single path here
+can only make that resolution worse.
 
-A wrong `unix://` path shows up at install time: the mount is
-`hostPath: type: Socket`, so the kubelet refuses to start the pod rather than
-running it with crictl pointed at nothing. A non-`unix://` endpoint (e.g.
-`tcp://`) is not mounted and cannot be checked that way, so the daemon logs a
-warning at startup when the socket does not exist.
+Set it when you want the endpoint fixed and checked at install time. A set
+`unix://` value is passed to crictl as `CONTAINER_RUNTIME_ENDPOINT` and,
+minus the prefix, mounted read-only from the node as `hostPath: type: Socket` -
+so a wrong path makes the kubelet refuse to start the pod rather than running
+it with crictl pointed at nothing. That is a deliberate trade: it turns a
+best-effort feature into an install-blocking one, which is useful on a fleet
+with a known runtime and unhelpful on a mixed one.
+
+A non-`unix://` endpoint (e.g. `tcp://`) is never mounted and cannot be checked
+that way; the daemon logs a warning at startup when a configured socket does
+not exist, and an info line when no endpoint is configured at all.
 
 Enrichment never blocks a capture: without it the manifest still carries the
 cgroup-derived `podUID` and `containerID`, but not namespace, pod name,

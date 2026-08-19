@@ -55,10 +55,11 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
   can't resolve cluster DNS. `up.sh` injects MinIO's numeric ClusterIP as the
   upload endpoint (the node's root netns can reach a ClusterIP via
   kube-proxy's DNAT rules).
-- k3s runs its own containerd; the CRI socket is under
-  `/run/k3s/containerd/`, not the upstream `/run/containerd/` default. The
-  overlay sets `cri.runtimeEndpoint`, which is also where the chart mounts the
-  socket from.
+- k3s runs its own containerd, with its CRI socket under `/run/k3s/containerd/`
+  rather than the upstream `/run/containerd/`. The chart leaves
+  `cri.runtimeEndpoint` empty by default and lets crictl self-resolve, but the
+  overlay pins it anyway so the smoke test exercises the pinned path - which is
+  also where the chart then mounts the socket from.
 - The per-pod rate-limit state (`/run/coredrop/recent.json` on the
   node) persists across daemon restarts and is only removed by the
   `helm uninstall` post-delete hook, so `up.sh` restarts the demo deployment to

@@ -332,6 +332,9 @@ fn hex_lower(bytes: &[u8]) -> String {
 //   metadata server (`InstanceCredentialProvider`) with no env vars at all
 //   when no service-account key/path is configured - nothing to add
 //   to this allowlist for GCP WI to work.
+//
+// `AWS_STS_REGIONAL_ENDPOINTS` is deliberately absent: it is an AWS SDK setting,
+// not an `AmazonS3ConfigKey`, so `object_store` never reads it.
 pub const ALLOWED_STORE_OPTS: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",

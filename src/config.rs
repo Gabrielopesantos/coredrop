@@ -304,6 +304,16 @@ impl HandlerConfig {
         writer
             .write_all(&json)
             .with_context(|| format!("writing handler config {path}"))?;
+        writer
+            .flush()
+            .with_context(|| format!("flushing handler config {path}"))?;
+
+        // `OpenOptions::mode` only applies when `O_CREAT` creates a new inode.
+        // The kubelet makes this hostPath 0755 before the daemon first runs, so
+        // anything on the node can plant a world-readable `handler.json` for the
+        // daemon to fill with credentials. Chmod what we opened, unconditionally.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing handler config {path}"))?;
         Ok(())
     }
 
@@ -379,6 +389,31 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir_all(parent).ok();
+    }
+
+    #[test]
+    fn write_tightens_an_existing_loose_file() {
+        // The hostPath starts life 0755 (kubelet, before the daemon runs), so
+        // the config file can already exist and be world-readable when the
+        // daemon first writes it. `OpenOptions::mode` only applies when
+        // `O_CREAT` makes a new inode, so that write must chmod explicitly.
+        let path = tmp("loose");
+        let parent = std::path::Path::new(&path).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        HandlerConfig::default().write(&path).unwrap();
+
+        let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "existing config file should become 0600");
+
+        let dir_mode = std::fs::metadata(&parent).unwrap().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "existing config dir should become 0700");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&parent).ok();
     }
 
     #[test]

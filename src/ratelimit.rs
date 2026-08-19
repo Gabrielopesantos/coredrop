@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -122,6 +122,9 @@ impl RateLimiter {
             .truncate(false)
             .mode(0o600)
             .open(&self.state_path)?;
+        // `OpenOptions::mode` only applies when `O_CREAT` creates a new inode,
+        // so a planted file keeps its own mode - see `HandlerConfig::write`.
+        std::fs::set_permissions(&self.state_path, std::fs::Permissions::from_mode(0o600))?;
         // Blocking exclusive lock: contenders are only concurrent handlers on
         // this node, each holding the lock for a few milliseconds.
         rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
@@ -163,7 +166,7 @@ impl RateLimiter {
     clippy::cast_possible_truncation
 )]
 mod tests {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     use super::*;
 
@@ -222,6 +225,27 @@ mod tests {
             dir_mode, 0o700,
             "rate-limit state parent dir should be mode 0700"
         );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn check_and_record_tightens_an_existing_loose_state_file() {
+        let path = tmp_state("permloose");
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let rl = RateLimiter::new(&path, 3);
+        assert_eq!(rl.check_and_record("pod-perm", 1000), RateDecision::Allowed);
+
+        let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "existing state file should become 0600");
+
+        let dir_mode = std::fs::metadata(parent).unwrap().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "existing state dir should become 0700");
 
         cleanup(&path);
     }

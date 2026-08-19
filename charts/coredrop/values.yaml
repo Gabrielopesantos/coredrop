@@ -21,9 +21,6 @@ securityContext:
   # -- Run the daemon privileged (required to write node-global sysctls).
   privileged: true
 
-# -- Share the host PID namespace (the kernel exec's the handler there).
-hostPID: true
-
 # How the daemon wires itself into the kernel and host: installs the handler
 # binary to a hostPath, points core_pattern at it, and raises core_pipe_limit
 # so the kernel holds a crash open long enough for the handler to read it.
@@ -85,12 +82,11 @@ capture:
     #   AWS_SECRET_ACCESS_KEY: ""
 
 # CRI socket for crictl enrichment (post-drain identity: namespace, pod name,
-# container name, image, restart count). Mounted read-only from the host.
+# container name, image, restart count). The socket is mounted read-only from
+# the host at the path in `runtimeEndpoint` (minus the `unix://` prefix).
 cri:
-  # -- CRI endpoint for crictl enrichment.
+  # -- CRI endpoint for crictl enrichment; its `unix://` path is also the socket mounted from the host.
   runtimeEndpoint: "unix:///run/containerd/containerd.sock"
-  # -- Host path of the CRI socket, mounted so the in-pod crictl can reach it.
-  socketHostPath: "/run/containerd/containerd.sock"
   # Path to crictl ON THE NODE: the kernel-exec'd handler runs in the host
   # mount namespace and shells out to the node's own crictl (k3s and most
   # kubeadm nodes install it here), not a binary from this image.

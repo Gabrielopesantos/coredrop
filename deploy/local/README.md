@@ -57,7 +57,8 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
   kube-proxy's DNAT rules).
 - k3s runs its own containerd; the CRI socket is under
   `/run/k3s/containerd/`, not the upstream `/run/containerd/` default. The
-  overlay sets both `cri.runtimeEndpoint` and `cri.socketHostPath`.
+  overlay sets `cri.runtimeEndpoint`, which is also where the chart mounts the
+  socket from.
 - The per-pod rate-limit state (`/run/coredrop/recent.json` on the
   node) persists across daemon restarts and is only removed by the
   `helm uninstall` post-delete hook, so `up.sh` restarts the demo deployment to

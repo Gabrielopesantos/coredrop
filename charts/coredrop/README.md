@@ -35,11 +35,9 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | corePattern.hostRunDir | string | `"/run/coredrop"` | Host path for the handler config and rate-limit state. |
 | corePattern.pipeLimit | int | `128` | `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`. |
 | cri.crictlPath | string | `"/usr/local/bin/crictl"` | Path to the crictl binary on the node (host mount ns), for the handler's enrichment. |
-| cri.runtimeEndpoint | string | `"unix:///run/containerd/containerd.sock"` | CRI endpoint for crictl enrichment. |
-| cri.socketHostPath | string | `"/run/containerd/containerd.sock"` | Host path of the CRI socket, mounted so the in-pod crictl can reach it. |
+| cri.runtimeEndpoint | string | `"unix:///run/containerd/containerd.sock"` | CRI endpoint for crictl enrichment; its `unix://` path is also the socket mounted from the host. |
 | events.enabled | bool | `true` | Post a k8s Event on the crashing pod per capture; `false` also skips the events RBAC. |
 | fullnameOverride | string | `""` | Override the full generated name of chart resources. |
-| hostPID | bool | `true` | Share the host PID namespace (the kernel exec's the handler there). |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"ghcr.io/gabrielopesantos/coredrop"` | Container image repository (published on `app-v*` tags). |
 | image.tag | string | `""` | Image tag; empty defaults to `.Chart.AppVersion`. |
@@ -238,6 +236,24 @@ reachable from the node itself (cluster DNS names won't resolve there).
 
 Uninstalling the release stops the daemon, which restores the node's original
 `core_pattern` on shutdown.
+
+## CRI socket
+
+`cri.runtimeEndpoint` is both what the handler passes to crictl as
+`CONTAINER_RUNTIME_ENDPOINT` and, minus the `unix://` prefix, the node path
+the pod mounts the socket from. The default is
+`unix:///run/containerd/containerd.sock`; k3s runs its own containerd, so use
+`unix:///run/k3s/containerd/containerd.sock` there.
+
+A wrong `unix://` path shows up at install time: the mount is
+`hostPath: type: Socket`, so the kubelet refuses to start the pod rather than
+running it with crictl pointed at nothing. A non-`unix://` endpoint (e.g.
+`tcp://`) is not mounted and cannot be checked that way, so the daemon logs a
+warning at startup when the socket does not exist.
+
+Enrichment never blocks a capture: without it the manifest still carries the
+cgroup-derived `podUID` and `containerID`, but not namespace, pod name,
+container name, image, or restart count.
 
 ## Uninstall cleanup
 

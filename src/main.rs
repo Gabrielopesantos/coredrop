@@ -11,8 +11,7 @@
 //!     exec's with a clean environment), and holds the restore guard until
 //!     shutdown.
 //!   - health check (`coredrop check`): what the chart's readiness and
-//!     liveness probes exec. Exits non-zero when the capture path has drifted
-//!     (see `coredrop::health`).
+//!     liveness probes exec. Exits non-zero when the capture path has drifted.
 
 use std::path::PathBuf;
 
@@ -172,12 +171,6 @@ fn env_or(key: &str, default: &str) -> String {
 
 /// Run the daemon: wire the kernel to the handler, then hold the restore guard
 /// until shutdown.
-///
-/// Setup failures are fatal by design: a daemon that stayed up with a broken
-/// capture path is a node that silently captures nothing. Exiting non-zero lets
-/// the `DaemonSet`'s `restartPolicy: Always` surface it as `CrashLoopBackOff`
-/// immediately, naming the failing step, rather than leaving it to the probes
-/// (`coredrop::health`) to notice a minute later.
 async fn run_daemon(args: DaemonArgs) -> Result<()> {
     info!(
         handler = %args.handler_path,
@@ -191,6 +184,19 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     if config.store_url.is_some() && coredrop::upload::is_plaintext_endpoint(&config.store_options)
     {
         warn!("object-store endpoint is plaintext HTTP; cores traverse the network unencrypted");
+    }
+
+    // crictl enrichment is best-effort, so a missing socket is not fatal - but
+    // it is otherwise invisible until a crash produces a manifest with no
+    // namespace/pod/container name.
+    if let Some(endpoint) = &config.cri_runtime_endpoint
+        && let Some(socket) = coredrop::crictl::unix_socket_path(endpoint)
+        && !std::path::Path::new(socket).exists()
+    {
+        warn!(
+            socket,
+            "CRI socket does not exist; crictl enrichment will degrade to cgroup-only identity"
+        );
     }
 
     // Bind the capture-event socket before writing the config, so the handler

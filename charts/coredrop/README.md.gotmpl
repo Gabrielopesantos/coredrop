@@ -205,6 +205,24 @@ reachable from the node itself (cluster DNS names won't resolve there).
 Uninstalling the release stops the daemon, which restores the node's original
 `core_pattern` on shutdown.
 
+## CRI socket
+
+`cri.runtimeEndpoint` is both what the handler passes to crictl as
+`CONTAINER_RUNTIME_ENDPOINT` and, minus the `unix://` prefix, the node path
+the pod mounts the socket from. The default is
+`unix:///run/containerd/containerd.sock`; k3s runs its own containerd, so use
+`unix:///run/k3s/containerd/containerd.sock` there.
+
+A wrong `unix://` path shows up at install time: the mount is
+`hostPath: type: Socket`, so the kubelet refuses to start the pod rather than
+running it with crictl pointed at nothing. A non-`unix://` endpoint (e.g.
+`tcp://`) is not mounted and cannot be checked that way, so the daemon logs a
+warning at startup when the socket does not exist.
+
+Enrichment never blocks a capture: without it the manifest still carries the
+cgroup-derived `podUID` and `containerID`, but not namespace, pod name,
+container name, image, or restart count.
+
 ## Uninstall cleanup
 
 The daemon does not remove its node-local files on shutdown - a shutdown is

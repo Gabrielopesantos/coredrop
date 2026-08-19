@@ -1,4 +1,8 @@
 {{- include "coredrop.validateStoreOpts" . }}
+{{- $criUnixSocket := "" }}
+{{- if hasPrefix "unix://" .Values.cri.runtimeEndpoint }}
+{{- $criUnixSocket = clean (trimPrefix "unix://" .Values.cri.runtimeEndpoint) }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -19,7 +23,7 @@ spec:
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
-      hostPID: {{ .Values.hostPID }}
+      hostPID: true
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -116,10 +120,12 @@ spec:
             # install dir (the handler reads the config path from here).
             - name: host-run
               mountPath: {{ .Values.corePattern.hostRunDir }}
+            {{- if $criUnixSocket }}
             # CRI socket for crictl enrichment (post-drain, best-effort).
             - name: cri-socket
-              mountPath: {{ .Values.cri.socketHostPath }}
+              mountPath: {{ $criUnixSocket }}
               readOnly: true
+            {{- end }}
       volumes:
         - name: host-bin
           hostPath:
@@ -129,7 +135,9 @@ spec:
           hostPath:
             path: {{ .Values.corePattern.hostRunDir }}
             type: DirectoryOrCreate
+        {{- if $criUnixSocket }}
         - name: cri-socket
           hostPath:
-            path: {{ .Values.cri.socketHostPath }}
+            path: {{ $criUnixSocket }}
             type: Socket
+        {{- end }}

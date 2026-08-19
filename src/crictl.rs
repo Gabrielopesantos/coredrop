@@ -42,6 +42,13 @@ async fn run_command(
     }
 }
 
+/// The filesystem path of a `unix://` CRI endpoint, or `None` for any other
+/// scheme (crictl also accepts e.g. `tcp://`, which has no path to check).
+#[must_use]
+pub fn unix_socket_path(endpoint: &str) -> Option<&str> {
+    endpoint.strip_prefix("unix://").filter(|p| !p.is_empty())
+}
+
 /// Kubernetes identity enriched from `crictl inspect`. All fields best-effort.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerInfo {
@@ -174,6 +181,18 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn unix_socket_path_extracts_only_unix_endpoints() {
+        assert_eq!(
+            unix_socket_path("unix:///run/containerd/containerd.sock"),
+            Some("/run/containerd/containerd.sock")
+        );
+        assert_eq!(unix_socket_path("tcp://127.0.0.1:1234"), None);
+        assert_eq!(unix_socket_path("/run/containerd/containerd.sock"), None);
+        assert_eq!(unix_socket_path("unix://"), None);
+        assert_eq!(unix_socket_path(""), None);
     }
 
     #[test]

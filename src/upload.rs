@@ -487,6 +487,35 @@ mod tests {
     use object_store::memory::InMemory;
     use std::io;
 
+    /// The Helm chart hard-codes a copy of [`ALLOWED_STORE_OPTS`] so it can
+    /// `fail` on a typo'd key at render time. Nothing links the two lists, so
+    /// this test is what keeps the copy honest: without it, adding a key here
+    /// makes the chart reject a legitimate value.
+    #[test]
+    fn helpers_store_opts_match_allowlist() {
+        const HELPERS: &str = include_str!("../charts/coredrop/templates/_helpers.tpl");
+
+        let block = HELPERS
+            .split_once(r#"{{- define "coredrop.allowedStoreOpts" -}}"#)
+            .expect("_helpers.tpl defines coredrop.allowedStoreOpts")
+            .1
+            .split_once("{{- end -}}")
+            .expect("the allowedStoreOpts define is terminated")
+            .0;
+
+        let chart: std::collections::BTreeSet<&str> = block
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let rust: std::collections::BTreeSet<&str> = ALLOWED_STORE_OPTS.iter().copied().collect();
+
+        assert_eq!(
+            chart, rust,
+            "coredrop.allowedStoreOpts in _helpers.tpl drifted from ALLOWED_STORE_OPTS"
+        );
+    }
+
     #[test]
     fn builds_object_keys() {
         assert_eq!(

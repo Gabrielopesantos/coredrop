@@ -110,6 +110,7 @@ impl CaptureBackend for DiscardBackend {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::testutil::StallReader;
 
     #[tokio::test]
     async fn discard_counts_every_byte() {
@@ -124,25 +125,13 @@ mod tests {
 
     #[tokio::test]
     async fn discard_handles_an_empty_core() {
+        // Immediate EOF: the kernel can hand over a zero-length core, and the
+        // loop must terminate on the first read rather than treat it as an error.
         let mut reader: &[u8] = &[];
         let stats = DiscardBackend.drain_core(&mut reader, None).await.unwrap();
         assert_eq!(stats.bytes, 0);
         assert_eq!(stats.stored_bytes, 0);
         assert!(!stats.truncated);
-    }
-
-    /// A reader that never yields data or EOF - stands in for a hung kernel
-    /// pipe.
-    struct StallReader;
-
-    impl AsyncRead for StallReader {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Pending
-        }
     }
 
     #[tokio::test(start_paused = true)]

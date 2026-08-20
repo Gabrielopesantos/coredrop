@@ -483,9 +483,7 @@ mod tests {
 
     #[test]
     fn format_timestamp_produces_rfc3339() {
-        let s = format_timestamp(0);
-        assert!(s.contains("1970"), "epoch 0 should be 1970, got {s}");
-        let s = format_timestamp(1_749_600_000);
-        assert!(s.starts_with("2025") || s.starts_with("2026"), "got {s}");
+        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00+00:00");
+        assert_eq!(format_timestamp(1_749_600_000), "2025-06-11T00:00:00+00:00");
     }
 }

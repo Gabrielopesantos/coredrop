@@ -444,4 +444,28 @@ mod tests {
             vec!["NOEQUALS", "DB_TOKEN=<redacted>"],
         );
     }
+
+    /// Known limitation, pinned so a change to it is deliberate: `/proc`
+    /// guarantees no encoding, and a non-UTF-8 entry is passed through
+    /// verbatim - keyword matching needs `str`. A secret in such an entry is
+    /// not redacted. The NUL framing around it still survives, so one bad
+    /// entry never corrupts the rest of the blob.
+    #[test]
+    fn non_utf8_entries_pass_through_unredacted() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"DB_PASSWORD=");
+        raw.extend_from_slice(&[0xff, 0xfe]); // invalid UTF-8
+        raw.push(0);
+        raw.extend_from_slice(b"API_TOKEN=plain-secret\0");
+
+        let got = Redactor::default().redact_environ(&raw);
+        let entries: Vec<&[u8]> = got.split(|&b| b == 0).filter(|e| !e.is_empty()).collect();
+
+        assert_eq!(entries.len(), 2, "framing preserved");
+        assert_eq!(entries[0], b"DB_PASSWORD=\xff\xfe");
+        assert_eq!(
+            entries[1], b"API_TOKEN=<redacted>",
+            "a following valid entry is still redacted"
+        );
+    }
 }

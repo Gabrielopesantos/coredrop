@@ -168,34 +168,21 @@ impl RateLimiter {
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    use tempfile::TempDir;
+
     use super::*;
 
-    // Nested one level below the system temp dir so `ensure_private_dir`
-    // only ever chmods a dir this test owns - never the shared system temp
-    // dir itself.
-    fn tmp_state(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir()
-            .join(format!(
-                "coredrop-ratelimit-{}-{tag}-{nanos}",
-                std::process::id()
-            ))
-            .join("recent.json")
-    }
-
-    fn cleanup(path: &std::path::Path) {
-        std::fs::remove_file(path).ok();
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir_all(parent).ok();
-        }
+    /// A state-file path inside a fresh temp dir. The `TempDir` is returned so
+    /// the caller keeps it alive; dropping it removes the tree even on panic.
+    fn tmp_state() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("recent.json");
+        (dir, path)
     }
 
     #[test]
     fn allows_up_to_max_then_suppresses() {
-        let path = tmp_state("cap");
+        let (_dir, path) = tmp_state();
         let rl = RateLimiter::new(&path, 3);
         for _ in 0..3 {
             assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
@@ -204,12 +191,14 @@ mod tests {
             rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 3 }
         );
-        cleanup(&path);
     }
 
     #[test]
     fn check_and_record_creates_0700_dir_and_0600_state_file() {
-        let path = tmp_state("permtest");
+        let dir = TempDir::new().unwrap();
+        // A subdirectory the limiter has to create itself, so this covers
+        // `ensure_private_dir` rather than the mode `TempDir` already sets.
+        let path = dir.path().join("run").join("recent.json");
         let rl = RateLimiter::new(&path, 3);
         assert_eq!(rl.check_and_record("pod-perm", 1000), RateDecision::Allowed);
 
@@ -219,22 +208,23 @@ mod tests {
             "rate-limit state file should be mode 0600"
         );
 
-        let parent = path.parent().unwrap();
-        let dir_mode = std::fs::metadata(parent).unwrap().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777;
         assert_eq!(
             dir_mode, 0o700,
             "rate-limit state parent dir should be mode 0700"
         );
-
-        cleanup(&path);
     }
 
     #[test]
     fn check_and_record_tightens_an_existing_loose_state_file() {
-        let path = tmp_state("permloose");
-        let parent = path.parent().unwrap();
-        std::fs::create_dir_all(parent).unwrap();
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Same hazard as `HandlerConfig::write`: the hostPath can already hold
+        // a world-readable state file, and `OpenOptions::mode` only applies to
+        // a newly created inode.
+        let dir = TempDir::new().unwrap();
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = run_dir.join("recent.json");
         std::fs::write(&path, b"{}").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -244,15 +234,13 @@ mod tests {
         let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(file_mode, 0o600, "existing state file should become 0600");
 
-        let dir_mode = std::fs::metadata(parent).unwrap().mode() & 0o777;
+        let dir_mode = std::fs::metadata(&run_dir).unwrap().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "existing state dir should become 0700");
-
-        cleanup(&path);
     }
 
     #[test]
     fn window_pruning_restores_budget() {
-        let path = tmp_state("window");
+        let (_dir, path) = tmp_state();
         let rl = RateLimiter::new(&path, 1);
         assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
         assert_eq!(
@@ -264,20 +252,21 @@ mod tests {
             rl.check_and_record("pod-a", 1000 + RATE_WINDOW_SECS + 1),
             RateDecision::Allowed
         );
-        cleanup(&path);
     }
 
     #[test]
     fn zero_means_unlimited() {
+        // The path is never touched: a zero budget short-circuits before any IO.
         let rl = RateLimiter::new("/nonexistent/never-touched.json", 0);
         for i in 0..100 {
             assert_eq!(rl.check_and_record("pod-a", i), RateDecision::Allowed);
         }
+        rl.refund("pod-a", 0);
     }
 
     #[test]
     fn pods_are_isolated() {
-        let path = tmp_state("iso");
+        let (_dir, path) = tmp_state();
         let rl = RateLimiter::new(&path, 1);
         assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
         assert_eq!(rl.check_and_record("pod-b", 1000), RateDecision::Allowed);
@@ -285,7 +274,6 @@ mod tests {
             rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
-        cleanup(&path);
     }
 
     #[test]
@@ -297,8 +285,7 @@ mod tests {
 
     #[test]
     fn corrupt_state_self_heals() {
-        let path = tmp_state("corrupt");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let (_dir, path) = tmp_state();
         std::fs::write(&path, b"{not json!").unwrap();
         let rl = RateLimiter::new(&path, 1);
         assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
@@ -306,12 +293,11 @@ mod tests {
             rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
-        cleanup(&path);
     }
 
     #[test]
     fn refund_restores_a_consumed_slot() {
-        let path = tmp_state("refund");
+        let (_dir, path) = tmp_state();
         let rl = RateLimiter::new(&path, 1);
         assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
         assert_eq!(
@@ -320,12 +306,11 @@ mod tests {
         );
         rl.refund("pod-a", 1000);
         assert_eq!(rl.check_and_record("pod-a", 1002), RateDecision::Allowed);
-        cleanup(&path);
     }
 
     #[test]
     fn refund_without_matching_record_is_harmless() {
-        let path = tmp_state("refund-nop");
+        let (_dir, path) = tmp_state();
         let rl = RateLimiter::new(&path, 1);
         rl.refund("pod-never-seen", 1000); // state file doesn't even exist
         assert_eq!(rl.check_and_record("pod-a", 1000), RateDecision::Allowed);
@@ -334,12 +319,11 @@ mod tests {
             rl.check_and_record("pod-a", 1001),
             RateDecision::Suppressed { recent: 1 }
         );
-        cleanup(&path);
     }
 
     #[test]
     fn concurrent_handlers_admit_exactly_max() {
-        let path = tmp_state("flock");
+        let (_dir, path) = tmp_state();
         let max = 3u32;
         let mut handles = Vec::new();
         for _ in 0..16 {
@@ -355,6 +339,5 @@ mod tests {
             .filter(|d| *d == RateDecision::Allowed)
             .count();
         assert_eq!(allowed as u32, max, "flock must serialize check-and-record");
-        cleanup(&path);
     }
 }

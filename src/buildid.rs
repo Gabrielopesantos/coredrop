@@ -40,17 +40,22 @@ pub fn build_id_from_bytes(elf: &[u8]) -> Option<String> {
     if elf.len() < 64 || &elf[0..4] != b"\x7fELF" {
         return None;
     }
+    // is64 = is 64-bit
     let is64 = match elf[4] {
         1 => false,
         2 => true,
         _ => return None,
     };
+    // le = little endian
     let le = match elf[5] {
         1 => true,
         2 => false,
         _ => return None,
     };
 
+    // phoff = program header offset
+    // phentsize = program header entry size
+    // phnum = number of program headers
     let (phoff, phentsize, phnum) = if is64 {
         (
             read_u64(elf, 0x20, le)?,
@@ -65,6 +70,7 @@ pub fn build_id_from_bytes(elf: &[u8]) -> Option<String> {
         )
     };
 
+    // i = program header index
     for i in 0..phnum {
         let off = usize::try_from(phoff.checked_add(i.checked_mul(phentsize)?)?).ok()?;
         if read_u32(elf, off, le)? != PT_NOTE {
@@ -158,7 +164,18 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) fn synthetic_elf_with_build_id(desc: &[u8]) -> Vec<u8> {
+    /// ELF class of a synthetic fixture. The 32-bit and 64-bit headers put
+    /// `e_phoff`/`e_phentsize`/`e_phnum` and the program-header fields at
+    /// different offsets, so each drives a separate branch of the parser.
+    #[derive(Clone, Copy)]
+    pub(crate) enum ElfClass {
+        Elf32,
+        Elf64,
+    }
+
+    /// The `NT_GNU_BUILD_ID` note: `namesz`, `descsz`, `type`, `"GNU\0"`, then
+    /// the description padded to a 4-byte boundary.
+    fn build_id_note(desc: &[u8]) -> Vec<u8> {
         let mut note = Vec::new();
         note.extend_from_slice(&4u32.to_le_bytes());
         note.extend_from_slice(&(desc.len() as u32).to_le_bytes());
@@ -168,39 +185,72 @@ pub(crate) mod tests {
         while note.len() % 4 != 0 {
             note.push(0);
         }
+        note
+    }
 
-        let ehdr_size = 64usize;
-        let phdr_size = 56usize;
+    /// A minimal little-endian ELF carrying exactly one `PT_NOTE` segment with
+    /// a GNU build-id in it.
+    pub(crate) fn synthetic_elf(class: ElfClass, desc: &[u8]) -> Vec<u8> {
+        let note = build_id_note(desc);
+        let (ehdr_size, phdr_size) = match class {
+            ElfClass::Elf32 => (52usize, 32usize),
+            ElfClass::Elf64 => (64usize, 56usize),
+        };
         let note_off = ehdr_size + phdr_size;
 
         let mut elf = vec![0u8; note_off];
         elf[0..4].copy_from_slice(b"\x7fELF");
-        elf[4] = 2;
-        elf[5] = 1;
-        elf[6] = 1;
-        elf[16..18].copy_from_slice(&2u16.to_le_bytes());
-        elf[18..20].copy_from_slice(&62u16.to_le_bytes());
-        elf[20..24].copy_from_slice(&1u32.to_le_bytes());
-        elf[0x20..0x28].copy_from_slice(&(ehdr_size as u64).to_le_bytes());
-        elf[52..54].copy_from_slice(&(ehdr_size as u16).to_le_bytes());
-        elf[0x36..0x38].copy_from_slice(&(phdr_size as u16).to_le_bytes());
-        elf[0x38..0x3A].copy_from_slice(&1u16.to_le_bytes());
+        elf[4] = match class {
+            ElfClass::Elf32 => 1,
+            ElfClass::Elf64 => 2,
+        };
+        elf[5] = 1; // little-endian
+        elf[6] = 1; // EV_CURRENT
+        elf[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+        elf[18..20].copy_from_slice(&62u16.to_le_bytes()); // e_machine
+        elf[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
 
         let p = ehdr_size;
-        elf[p..p + 4].copy_from_slice(&PT_NOTE.to_le_bytes());
-        elf[p + 4..p + 8].copy_from_slice(&4u32.to_le_bytes());
-        elf[p + 8..p + 16].copy_from_slice(&(note_off as u64).to_le_bytes());
-        elf[p + 32..p + 40].copy_from_slice(&(note.len() as u64).to_le_bytes());
+        match class {
+            ElfClass::Elf32 => {
+                elf[0x1C..0x20].copy_from_slice(&(ehdr_size as u32).to_le_bytes()); // e_phoff
+                elf[0x28..0x2A].copy_from_slice(&(ehdr_size as u16).to_le_bytes()); // e_ehsize
+                elf[0x2A..0x2C].copy_from_slice(&(phdr_size as u16).to_le_bytes()); // e_phentsize
+                elf[0x2C..0x2E].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+
+                elf[p..p + 4].copy_from_slice(&PT_NOTE.to_le_bytes());
+                elf[p + 4..p + 8].copy_from_slice(&(note_off as u32).to_le_bytes()); // p_offset
+                elf[p + 16..p + 20].copy_from_slice(&(note.len() as u32).to_le_bytes()); // p_filesz
+            }
+            ElfClass::Elf64 => {
+                elf[0x20..0x28].copy_from_slice(&(ehdr_size as u64).to_le_bytes()); // e_phoff
+                elf[52..54].copy_from_slice(&(ehdr_size as u16).to_le_bytes()); // e_ehsize
+                elf[0x36..0x38].copy_from_slice(&(phdr_size as u16).to_le_bytes()); // e_phentsize
+                elf[0x38..0x3A].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+
+                elf[p..p + 4].copy_from_slice(&PT_NOTE.to_le_bytes());
+                elf[p + 4..p + 8].copy_from_slice(&4u32.to_le_bytes()); // p_flags
+                elf[p + 8..p + 16].copy_from_slice(&(note_off as u64).to_le_bytes()); // p_offset
+                elf[p + 32..p + 40].copy_from_slice(&(note.len() as u64).to_le_bytes()); // p_filesz
+            }
+        }
 
         elf.extend_from_slice(&note);
         elf
     }
 
+    /// 64-bit fixture, used by `crate::snapshot`'s `/proc` fixture tree.
+    pub(crate) fn synthetic_elf_with_build_id(desc: &[u8]) -> Vec<u8> {
+        synthetic_elf(ElfClass::Elf64, desc)
+    }
+
     #[test]
-    fn extracts_build_id_from_a_synthetic_elf() {
+    fn extracts_build_id_from_64_and_32_bit_elfs() {
         let desc = [0xde, 0xad, 0xbe, 0xef, 0x01, 0x23];
-        let elf = synthetic_elf_with_build_id(&desc);
-        assert_eq!(build_id_from_bytes(&elf).as_deref(), Some("deadbeef0123"));
+        for class in [ElfClass::Elf64, ElfClass::Elf32] {
+            let elf = synthetic_elf(class, &desc);
+            assert_eq!(build_id_from_bytes(&elf).as_deref(), Some("deadbeef0123"));
+        }
     }
 
     #[test]
@@ -211,8 +261,21 @@ pub(crate) mod tests {
 
     #[test]
     fn returns_none_when_no_build_id_note_present() {
+        // Header and program header intact, note bytes gone: the PT_NOTE
+        // segment now points past the end and must not panic on the slice.
         let mut elf = synthetic_elf_with_build_id(&[1, 2, 3, 4]);
         elf.truncate(64 + 56);
+        assert_eq!(build_id_from_bytes(&elf), None);
+    }
+
+    #[test]
+    fn returns_none_for_an_unknown_elf_class_or_endianness() {
+        let mut elf = synthetic_elf_with_build_id(&[1, 2, 3, 4]);
+        elf[4] = 3; // neither ELFCLASS32 nor ELFCLASS64
+        assert_eq!(build_id_from_bytes(&elf), None);
+
+        let mut elf = synthetic_elf_with_build_id(&[1, 2, 3, 4]);
+        elf[5] = 9; // neither ELFDATA2LSB nor ELFDATA2MSB
         assert_eq!(build_id_from_bytes(&elf), None);
     }
 }

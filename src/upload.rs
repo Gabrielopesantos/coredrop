@@ -485,6 +485,7 @@ pub fn object_store_from_url_opts(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::testutil::{ENV_LOCK, StallReader};
     use async_compression::tokio::bufread::ZstdDecoder;
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
@@ -599,8 +600,9 @@ mod tests {
         assert_eq!(unzstd(&stored).await, core);
     }
 
-    /// Yields one chunk, then stalls forever - stands in for a hung kernel
-    /// pipe or wedged store mid-multipart.
+    /// Yields one chunk, then stalls forever. Distinct from the shared
+    /// `StallReader`: the first chunk is what drives `BufWriter` into multipart
+    /// state, which is the state whose abort path this exercises.
     struct StallAfterOneChunk {
         chunk: Option<Vec<u8>>,
     }
@@ -654,6 +656,26 @@ mod tests {
         assert!(
             store.get(&key).await.is_err(),
             "no completed object may appear after an aborted multipart"
+        );
+    }
+
+    /// A drain that stalls before any byte arrives still has to honour the
+    /// deadline - the handler is holding a `core_pipe_limit` slot throughout.
+    #[tokio::test(start_paused = true)]
+    async fn drain_errors_on_deadline_before_any_bytes_arrive() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let key = core_object_key("local", "pod-stall", "cid-stall", 1, 4242);
+
+        let backend = StandaloneBackend::new(store.clone(), &key, 0);
+        let mut reader = StallReader;
+        let result = backend
+            .drain_core(&mut reader, Some(Duration::from_secs(1)))
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            store.get(&ObjectPath::from(key.as_str())).await.is_err(),
+            "an abandoned drain must not leave a completed object"
         );
     }
 
@@ -738,30 +760,22 @@ mod tests {
     }
 
     #[test]
-    fn builds_s3_store_with_opts() {
-        let opts = vec![
+    fn object_store_from_url_opts_dispatches_by_scheme() {
+        // Unknown option keys are skipped rather than failing the build, so a
+        // stray env var can never disable capture.
+        let s3_opts = vec![
             ("AWS_ACCESS_KEY_ID".to_string(), "ak".to_string()),
             ("AWS_SECRET_ACCESS_KEY".to_string(), "sk".to_string()),
             ("AWS_REGION".to_string(), "us-east-1".to_string()),
             ("NOT_A_REAL_KEY".to_string(), "ignored".to_string()),
         ];
-        assert!(object_store_from_url_opts("s3://some-bucket", opts).is_some());
-    }
-
-    #[test]
-    fn builds_memory_store() {
+        assert!(object_store_from_url_opts("s3://some-bucket", s3_opts).is_some());
         assert!(object_store_from_url_opts("memory:///", vec![]).is_some());
-    }
 
-    #[test]
-    fn invalid_url_yields_none() {
+        // Not a URL, and a URL whose scheme has no backend.
         assert!(object_store_from_url_opts("not a url", vec![]).is_none());
         assert!(object_store_from_url_opts("bogus://x", vec![]).is_none());
     }
-
-    // `std::env::vars` is process-global; serialize the env-mutating test(s)
-    // in this module so a parallel `cargo test` run can't interleave sets.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn store_options_from_env_forwards_workload_identity_keys() {
@@ -775,8 +789,8 @@ mod tests {
             "AZURE_FEDERATED_TOKEN_FILE",
             "AZURE_AUTHORITY_HOST",
         ];
-        // SAFETY: serialized by ENV_LOCK above; no other test in this binary
-        // mutates these specific keys.
+        // SAFETY: every env-mutating test in this binary holds ENV_LOCK, so no
+        // other thread reads or writes the environment here.
         unsafe {
             for key in wi_keys {
                 std::env::set_var(key, "test-value");
@@ -786,7 +800,7 @@ mod tests {
 
         let opts: std::collections::HashMap<_, _> = store_options_from_env().into_iter().collect();
 
-        // SAFETY: serialized by ENV_LOCK.
+        // SAFETY: as above.
         unsafe {
             for key in wi_keys {
                 assert_eq!(opts.get(key).map(String::as_str), Some("test-value"));

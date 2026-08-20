@@ -45,97 +45,80 @@ pub fn check(handler_path: &str, config_path: &str, core_pattern_path: &str) -> 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
-    fn tmp(tag: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "coredrop-health-{}-{tag}-{nanos}",
-            std::process::id()
-        ));
-        p
-    }
+    /// The `core_pattern` value the daemon installs for the default handler
+    /// path, with the trailing newline the kernel writes back.
+    const INSTALLED: &str = "|/opt/coredrop/bin/coredrop capture %P %s %t %E\n";
+    const HANDLER: &str = "/opt/coredrop/bin/coredrop";
 
-    /// A temp dir holding a `core_pattern` file and a written handler config.
-    fn fixture(tag: &str, pattern: &str, event_socket_path: Option<String>) -> std::path::PathBuf {
-        let dir = tmp(tag);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("core_pattern"), pattern).unwrap();
+    /// A temp dir holding a `core_pattern` file and a written handler config,
+    /// plus the two paths `check` takes.
+    fn fixture(pattern: &str, event_socket_path: Option<String>) -> (TempDir, String, String) {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("core_pattern"), pattern).unwrap();
         let config = HandlerConfig {
             event_socket_path,
             ..Default::default()
         };
-        config
-            .write(&dir.join("handler.json").to_string_lossy())
-            .unwrap();
-        dir
-    }
-
-    fn paths(dir: &Path) -> (String, String) {
-        (
-            dir.join("handler.json").to_string_lossy().into_owned(),
-            dir.join("core_pattern").to_string_lossy().into_owned(),
-        )
+        let config_path = dir
+            .path()
+            .join("handler.json")
+            .to_string_lossy()
+            .into_owned();
+        config.write(&config_path).unwrap();
+        let pattern_path = dir
+            .path()
+            .join("core_pattern")
+            .to_string_lossy()
+            .into_owned();
+        (dir, config_path, pattern_path)
     }
 
     #[test]
     fn passes_when_pattern_and_config_are_intact() {
         // The kernel writes back a trailing newline; the check must tolerate it.
-        let dir = fixture(
-            "ok",
-            "|/opt/coredrop/bin/coredrop capture %P %s %t %E\n",
-            None,
-        );
-        let (config, pattern) = paths(&dir);
+        let (_dir, config, pattern) = fixture(INSTALLED, None);
+        check(HANDLER, &config, &pattern).unwrap();
+    }
 
-        check("/opt/coredrop/bin/coredrop", &config, &pattern).unwrap();
+    #[test]
+    fn passes_when_the_advertised_event_socket_is_bound() {
+        let dir = TempDir::new().unwrap();
+        let sock_path = dir.path().join("events.sock");
+        let _socket = std::os::unix::net::UnixDatagram::bind(&sock_path).unwrap();
 
-        std::fs::remove_dir_all(&dir).ok();
+        let (_dir2, config, pattern) =
+            fixture(INSTALLED, Some(sock_path.to_string_lossy().into_owned()));
+        check(HANDLER, &config, &pattern).unwrap();
     }
 
     #[test]
     fn fails_when_core_pattern_drifted() {
-        let dir = fixture("drift", "core\n", None);
-        let (config, pattern) = paths(&dir);
-
-        let err = check("/opt/coredrop/bin/coredrop", &config, &pattern).unwrap_err();
+        let (_dir, config, pattern) = fixture("core\n", None);
+        let err = check(HANDLER, &config, &pattern).unwrap_err();
         assert!(format!("{err:#}").contains("core_pattern is"), "{err:#}");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn fails_when_handler_config_is_gone() {
-        let dir = fixture(
-            "noconfig",
-            "|/opt/coredrop/bin/coredrop capture %P %s %t %E\n",
-            None,
-        );
-        let (config, pattern) = paths(&dir);
+        let (_dir, config, pattern) = fixture(INSTALLED, None);
         std::fs::remove_file(&config).unwrap();
 
-        let err = check("/opt/coredrop/bin/coredrop", &config, &pattern).unwrap_err();
+        let err = check(HANDLER, &config, &pattern).unwrap_err();
         assert!(format!("{err:#}").contains("missing or invalid"), "{err:#}");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn fails_when_advertised_event_socket_is_gone() {
-        let dir = fixture(
-            "nosock",
-            "|/opt/coredrop/bin/coredrop capture %P %s %t %E\n",
+        let (_dir, config, pattern) = fixture(
+            INSTALLED,
             Some("/run/coredrop/definitely-not-bound.sock".to_string()),
         );
-        let (config, pattern) = paths(&dir);
 
-        let err = check("/opt/coredrop/bin/coredrop", &config, &pattern).unwrap_err();
+        let err = check(HANDLER, &config, &pattern).unwrap_err();
         assert!(format!("{err:#}").contains("is not bound"), "{err:#}");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

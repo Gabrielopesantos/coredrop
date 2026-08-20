@@ -286,21 +286,9 @@ async fn shutdown_signal() -> Result<()> {
 mod tests {
     use std::path::Path;
 
-    use super::*;
+    use tempfile::TempDir;
 
-    /// Unique temp path per test; `tag` keeps concurrent tests apart.
-    fn tmp(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "coredrop-daemon-{}-{tag}-{nanos}",
-            std::process::id()
-        ));
-        p
-    }
+    use super::*;
 
     /// Daemon args that touch nothing real: temp sysctl paths, no store, no
     /// events. Each test overrides the one field whose failure it exercises.
@@ -325,15 +313,23 @@ mod tests {
         }
     }
 
+    /// Temp stand-ins for the two kernel sysctls, seeded with plausible
+    /// pre-install values so a stray write is visible.
+    fn sysctls(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let pattern = dir.join("core_pattern");
+        let pipe = dir.join("core_pipe_limit");
+        std::fs::write(&pattern, "core\n").unwrap();
+        std::fs::write(&pipe, "0\n").unwrap();
+        (pattern, pipe)
+    }
+
     #[tokio::test]
     async fn errors_when_config_write_fails() {
+        let dir = TempDir::new().unwrap();
+        let (pattern, pipe) = sysctls(dir.path());
         // Parent of the config path is a regular file, so the dir cannot be made.
-        let blocker = tmp("blocker");
+        let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "not a directory").unwrap();
-        let pattern = tmp("cw-pattern");
-        std::fs::write(&pattern, "core\n").unwrap();
-        let pipe = tmp("cw-pipe");
-        std::fs::write(&pipe, "0\n").unwrap();
 
         let err = run_daemon(args(&blocker.join("handler.json"), &pattern, &pipe))
             .await
@@ -342,30 +338,25 @@ mod tests {
 
         // The sysctls must not have been touched - install runs after the write.
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
-
-        std::fs::remove_file(&blocker).ok();
-        std::fs::remove_file(&pattern).ok();
-        std::fs::remove_file(&pipe).ok();
     }
 
     #[tokio::test]
     async fn errors_when_core_pattern_install_fails() {
-        let dir = tmp("cp-dir");
-        std::fs::create_dir_all(&dir).unwrap();
-        let pipe = tmp("cp-pipe");
-        std::fs::write(&pipe, "0\n").unwrap();
+        let dir = TempDir::new().unwrap();
+        let (_pattern, pipe) = sysctls(dir.path());
         // Nonexistent sysctl: reading the previous value fails.
-        let pattern = tmp("cp-missing").join("core_pattern");
+        let missing_pattern = dir.path().join("no-such-dir").join("core_pattern");
 
-        let err = run_daemon(args(&dir.join("handler.json"), &pattern, &pipe))
-            .await
-            .unwrap_err();
+        let err = run_daemon(args(
+            &dir.path().join("run").join("handler.json"),
+            &missing_pattern,
+            &pipe,
+        ))
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("core_pattern"), "{err:#}");
         // The config write ran first and succeeded, so the install is what failed.
-        assert!(dir.join("handler.json").exists());
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_file(&pipe).ok();
+        assert!(dir.path().join("run").join("handler.json").exists());
     }
 
     #[tokio::test]
@@ -373,14 +364,11 @@ mod tests {
         // A unix socket path must fit in `sockaddr_un.sun_path` (108 bytes), so
         // an over-long run dir makes the bind fail deterministically - no root,
         // no special filesystem needed.
-        let mut dir = tmp("sock");
-        dir.push("d".repeat(120));
-        let pattern = tmp("sock-pattern");
-        std::fs::write(&pattern, "core\n").unwrap();
-        let pipe = tmp("sock-pipe");
-        std::fs::write(&pipe, "0\n").unwrap();
+        let dir = TempDir::new().unwrap();
+        let (pattern, pipe) = sysctls(dir.path());
+        let run_dir = dir.path().join("d".repeat(120));
 
-        let mut a = args(&dir.join("handler.json"), &pattern, &pipe);
+        let mut a = args(&run_dir.join("handler.json"), &pattern, &pipe);
         a.no_events = false;
 
         let err = run_daemon(a).await.unwrap_err();
@@ -390,11 +378,7 @@ mod tests {
         );
 
         // Bind runs first: neither the config nor the sysctls were touched.
-        assert!(!dir.join("handler.json").exists());
+        assert!(!run_dir.join("handler.json").exists());
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
-
-        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
-        std::fs::remove_file(&pattern).ok();
-        std::fs::remove_file(&pipe).ok();
     }
 }

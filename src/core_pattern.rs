@@ -94,17 +94,9 @@ impl Drop for CorePatternGuard {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
+    use tempfile::TempDir;
 
-    fn tmp(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let mut p = std::env::temp_dir();
-        p.push(format!("coredrop-cp-{}-{tag}-{nanos}", std::process::id()));
-        p
-    }
+    use super::*;
 
     #[test]
     fn pattern_pipes_to_the_handler() {
@@ -116,8 +108,9 @@ mod tests {
 
     #[test]
     fn install_sets_then_restores_both_sysctls() {
-        let pattern = tmp("pattern");
-        let pipe = tmp("pipe");
+        let dir = TempDir::new().unwrap();
+        let pattern = dir.path().join("core_pattern");
+        let pipe = dir.path().join("core_pipe_limit");
         std::fs::write(&pattern, "core\n").unwrap();
         std::fs::write(&pipe, "0\n").unwrap();
 
@@ -134,8 +127,29 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
         assert_eq!(std::fs::read_to_string(&pipe).unwrap(), "0\n");
+    }
 
-        std::fs::remove_file(&pattern).ok();
-        std::fs::remove_file(&pipe).ok();
+    #[test]
+    fn install_fails_when_the_pattern_sysctl_is_unreadable() {
+        // The previous value has to be saved before anything is written, or a
+        // restore on shutdown would install garbage.
+        let dir = TempDir::new().unwrap();
+        let pipe = dir.path().join("core_pipe_limit");
+        std::fs::write(&pipe, "0\n").unwrap();
+
+        // `unwrap_err` would need `CorePatternGuard: Debug`; match instead so
+        // the guard type stays free of a derive it has no other use for.
+        let result = CorePatternGuard::install_at(
+            "/h/coredrop",
+            16,
+            dir.path().join("missing/core_pattern"),
+            pipe.clone(),
+        );
+        let Err(err) = result else {
+            panic!("installing against a missing sysctl must fail");
+        };
+        assert!(format!("{err:#}").contains("core_pattern"), "{err:#}");
+        // Nothing was installed, so core_pipe_limit must be untouched too.
+        assert_eq!(std::fs::read_to_string(&pipe).unwrap(), "0\n");
     }
 }

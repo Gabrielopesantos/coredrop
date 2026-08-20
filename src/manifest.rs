@@ -137,15 +137,31 @@ mod tests {
     }
 
     #[test]
-    fn serializes_to_readable_json() {
-        let json = serde_json::to_string_pretty(&sample()).unwrap();
-        assert!(json.contains("\"schema_version\": 1"));
-        assert!(json.contains("\"signal_name\": \"SIGSEGV\""));
-        assert!(json.contains("\"codec\": \"zstd\""));
+    fn reason_fields_are_omitted_rather_than_null() {
+        // `truncated_reason` and `skipped_reason` are `skip_serializing_if`:
+        // a consumer distinguishes "no reason" by the key's absence, so an
+        // explicit `null` would be a schema change.
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(!json.contains("truncated_reason"), "{json}");
+        assert!(!json.contains("skipped_reason"), "{json}");
+
+        let mut m = sample();
+        m.core.truncated = true;
+        m.core.truncated_reason = Some("size_cap".into());
+        m.core.skipped_reason = Some("rate_limit".into());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""truncated_reason":"size_cap""#), "{json}");
+        assert!(json.contains(r#""skipped_reason":"rate_limit""#), "{json}");
+
+        // Both still round-trip, and an absent key deserializes to None.
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.core.truncated_reason.as_deref(), Some("size_cap"));
     }
 
     #[test]
     fn no_core_manifest_is_valid() {
+        // Rate-limited and no-store captures still write a manifest; it must
+        // deserialize with every core field empty.
         let mut m = sample();
         m.core.present = false;
         m.core.object_key = None;

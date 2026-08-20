@@ -1,33 +1,18 @@
+//! `crictl inspect` subprocess behavior: a real fork/exec against stand-in
+//! scripts, covering what the unit tests in `src/crictl.rs` cannot (they only
+//! exercise JSON extraction from an already-parsed value).
+
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
+
+use tempfile::TempDir;
 
 use coredrop::config::HandlerConfig;
 use coredrop::crictl;
 
-/// Serializes tests that write executable scripts and spawn subprocesses.
-/// Without it, a concurrent test's fork can inherit another test's open
-/// write-fd for a script, making that script's exec fail with ETXTBSY.
-static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn unique_tmp(tag: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::path::PathBuf::from(format!(
-        "/tmp/coredrop-crictl-test-{}-{tag}-{nanos}",
-        std::process::id()
-    ))
-}
-
-fn write_executable(path: &std::path::Path, script: &str) {
-    std::fs::write(path, script).unwrap();
-    let mut perms = std::fs::metadata(path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).unwrap();
-}
+mod common;
+use common::{SPAWN_LOCK, fake_crictl_script, write_fake_crictl};
 
 fn config_with_crictl(crictl_path: &str) -> HandlerConfig {
     HandlerConfig {
@@ -37,77 +22,91 @@ fn config_with_crictl(crictl_path: &str) -> HandlerConfig {
     }
 }
 
-// Canned `crictl inspect` JSON matching the shape the `extract` function expects.
-const FAKE_CRICTL_JSON: &str = r#"{
-  "status": {
-    "id": "abc123def456abc123",
-    "metadata": { "name": "mycontainer", "attempt": 2 },
-    "image": { "image": "docker.io/library/nginx:1.25" },
-    "imageRef": "docker.io/library/nginx@sha256:cafebabe1234",
-    "labels": {
-      "io.kubernetes.pod.namespace": "production",
-      "io.kubernetes.pod.name": "nginx-abc123",
-      "io.kubernetes.container.name": "mycontainer"
-    }
-  }
-}"#;
-
-/// 2b - fake crictl script: subprocess is spawned, output parsed, all fields
-/// extracted correctly.
+/// A well-formed crictl: the subprocess is spawned, its stdout parsed, and
+/// every identity field extracted.
 #[tokio::test]
 async fn inspect_fake_script_parses_container_info() {
     let _guard = SPAWN_LOCK.lock().await;
-    let tmp = unique_tmp("fake");
-    std::fs::create_dir_all(&tmp).unwrap();
-
-    let script = tmp.join("crictl");
-    write_executable(
-        &script,
-        &format!("#!/bin/sh\nprintf '%s' '{FAKE_CRICTL_JSON}'\n"),
+    let tmp = TempDir::new().unwrap();
+    let script = write_fake_crictl(
+        tmp.path(),
+        &fake_crictl_script("production", "nginx-abc123", "mycontainer"),
     );
 
     let config = config_with_crictl(script.to_str().unwrap());
-    let info = crictl::inspect("abc123def456abc123", &config).await;
+    let info = crictl::inspect("abc123def456abc123", &config)
+        .await
+        .expect("inspect must return Some for a well-formed crictl script");
 
-    let info = info.expect("inspect must return Some for a well-formed crictl script");
     assert_eq!(info.namespace.as_deref(), Some("production"));
     assert_eq!(info.pod_name.as_deref(), Some("nginx-abc123"));
     assert_eq!(info.container_name.as_deref(), Some("mycontainer"));
     assert_eq!(info.image.as_deref(), Some("docker.io/library/nginx:1.25"));
     assert_eq!(info.image_digest.as_deref(), Some("sha256:cafebabe1234"));
     assert_eq!(info.restart_count, Some(2));
-
-    std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2b - non-zero exit: crictl exits 1 -> inspect degrades to None.
+/// The configured CRI endpoint has to reach the subprocess as
+/// `CONTAINER_RUNTIME_ENDPOINT`; the kernel exec's the handler with a clean
+/// environment, so nothing else would set it. The script echoes the variable
+/// back so its arrival is observable.
+#[tokio::test]
+async fn inspect_passes_the_cri_endpoint_to_the_subprocess() {
+    let _guard = SPAWN_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let script = write_fake_crictl(
+        tmp.path(),
+        "#!/bin/sh\nprintf '{\"status\":{\"labels\":\
+         {\"io.kubernetes.pod.name\":\"%s\"}}}' \"$CONTAINER_RUNTIME_ENDPOINT\"\n",
+    );
+
+    let mut config = config_with_crictl(script.to_str().unwrap());
+    config.cri_runtime_endpoint = Some("unix:///run/containerd/containerd.sock".into());
+
+    let info = crictl::inspect("any-id", &config).await.unwrap();
+    assert_eq!(
+        info.pod_name.as_deref(),
+        Some("unix:///run/containerd/containerd.sock"),
+        "crictl must be spawned with CONTAINER_RUNTIME_ENDPOINT set"
+    );
+}
+
+/// Non-zero exit: enrichment degrades to `None` rather than failing the capture.
 #[tokio::test]
 async fn inspect_nonzero_exit_returns_none() {
     let _guard = SPAWN_LOCK.lock().await;
-    let tmp = unique_tmp("fail");
-    std::fs::create_dir_all(&tmp).unwrap();
-
-    let script = tmp.join("crictl");
-    write_executable(&script, "#!/bin/sh\nexit 1\n");
+    let tmp = TempDir::new().unwrap();
+    let script = write_fake_crictl(tmp.path(), "#!/bin/sh\nexit 1\n");
 
     let config = config_with_crictl(script.to_str().unwrap());
-    let info = crictl::inspect("any-id", &config).await;
-    assert!(info.is_none(), "non-zero exit must degrade to None");
-
-    std::fs::remove_dir_all(&tmp).ok();
+    assert!(
+        crictl::inspect("any-id", &config).await.is_none(),
+        "non-zero exit must degrade to None"
+    );
 }
 
-/// 2b - timeout: crictl sleeps longer than the configured timeout -> inspect
-/// degrades to None.
+/// Unparseable stdout degrades the same way a failed spawn does.
+#[tokio::test]
+async fn inspect_unparseable_output_returns_none() {
+    let _guard = SPAWN_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let script = write_fake_crictl(tmp.path(), "#!/bin/sh\nprintf 'not json at all'\n");
+
+    let config = config_with_crictl(script.to_str().unwrap());
+    assert!(
+        crictl::inspect("any-id", &config).await.is_none(),
+        "unparseable crictl output must degrade to None"
+    );
+}
+
+/// crictl runs after the core drain, but the handler still holds a
+/// `core_pipe_limit` slot: a wedged CRI socket must not pin it indefinitely.
 #[tokio::test]
 async fn inspect_times_out_and_returns_none() {
     let _guard = SPAWN_LOCK.lock().await;
-    let tmp = unique_tmp("timeout");
-    std::fs::create_dir_all(&tmp).unwrap();
-
-    let script = tmp.join("crictl");
+    let tmp = TempDir::new().unwrap();
     // Sleep longer than the 1s timeout configured in `config_with_crictl`.
-    write_executable(&script, "#!/bin/sh\nsleep 5\nprintf '%s' '{}'\n");
+    let script = write_fake_crictl(tmp.path(), "#!/bin/sh\nsleep 5\nprintf '%s' '{}'\n");
 
     let config = config_with_crictl(script.to_str().unwrap());
     let start = std::time::Instant::now();
@@ -119,6 +118,4 @@ async fn inspect_times_out_and_returns_none() {
         elapsed < Duration::from_secs(3),
         "timed-out crictl should return quickly, got {elapsed:?}"
     );
-
-    std::fs::remove_dir_all(&tmp).ok();
 }

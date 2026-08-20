@@ -439,10 +439,52 @@ fn rfc3339_micro(epoch_secs: i64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
+    fn payload(namespace: &str, pod_uid: &str) -> CaptureEventPayload {
+        CaptureEventPayload {
+            namespace: namespace.into(),
+            pod_name: "my-pod".into(),
+            pod_uid: pod_uid.into(),
+            container_name: Some("app".into()),
+            signal: 11,
+            signal_name: Some("SIGSEGV".into()),
+            outcome: Outcome::Uploaded,
+            manifest_key: Some("local/abc-123/def456/1234567890-manifest.json".into()),
+            stored_bytes: Some(1024),
+            timestamp: 1_749_600_000,
+        }
+    }
+
+    fn agg_key(pod_uid: &str, reason: &'static str) -> AggKey {
+        AggKey {
+            namespace: "default".into(),
+            pod_uid: pod_uid.into(),
+            reason,
+        }
+    }
+
+    /// Bind a socket at `<tempdir>/events.sock` on a current-thread runtime,
+    /// returning the dir so the caller can inspect modes before it is removed.
+    fn bind_in_temp_dir(pre: impl FnOnce(&Path)) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        pre(dir.path());
+        let sock_path = dir.path().join("events.sock");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _socket = bind_socket(sock_path.to_str().unwrap()).unwrap();
+        });
+        dir
+    }
+
     #[test]
-    fn outcome_as_str_matches_k8s_reason_mapping() {
+    fn k8s_reason_maps_only_reportable_outcomes() {
         assert_eq!(k8s_reason(Outcome::Uploaded), Some("CoreDumped"));
         assert_eq!(
             k8s_reason(Outcome::SuppressedRateLimit),
@@ -452,6 +494,8 @@ mod tests {
             k8s_reason(Outcome::NoStoreDiscard),
             Some("CoreDiscardedNoStore")
         );
+        // These two never reach the listener: `skipped-non-k8s` has no pod to
+        // target, and `failed` returns before the event is sent.
         assert_eq!(k8s_reason(Outcome::SkippedNonK8s), None);
         assert_eq!(k8s_reason(Outcome::Failed), None);
     }
@@ -459,11 +503,7 @@ mod tests {
     #[test]
     fn aggregator_bumps_count_for_repeats_within_ttl() {
         let mut agg = Aggregator::default();
-        let key = AggKey {
-            namespace: "default".into(),
-            pod_uid: "abc-123".into(),
-            reason: "CoreDumped",
-        };
+        let key = agg_key("abc-123", "CoreDumped");
         let t0 = Instant::now();
 
         let first = agg.record(key.clone(), t0, || "ev-1".to_string()).unwrap();
@@ -477,7 +517,10 @@ mod tests {
             .unwrap();
         assert!(!second.is_new);
         assert_eq!(second.count, 2);
-        assert_eq!(second.event_name, first.event_name);
+        assert_eq!(
+            second.event_name, first.event_name,
+            "a repeat must patch the original Event, not name a new one"
+        );
 
         let third = agg
             .record(key, t0 + Duration::from_secs(20), || "ev-3".to_string())
@@ -490,43 +533,91 @@ mod tests {
     fn aggregator_separates_distinct_keys() {
         let mut agg = Aggregator::default();
         let t0 = Instant::now();
-        let a = AggKey {
-            namespace: "default".into(),
-            pod_uid: "pod-a".into(),
-            reason: "CoreDumped",
-        };
-        let b = AggKey {
-            namespace: "default".into(),
-            pod_uid: "pod-b".into(),
-            reason: "CoreDumped",
-        };
-        let c = AggKey {
-            namespace: "default".into(),
-            pod_uid: "pod-a".into(),
-            reason: "CoreDumpSuppressed",
-        };
-        assert!(agg.record(a, t0, || "a".into()).unwrap().is_new);
-        assert!(agg.record(b, t0, || "b".into()).unwrap().is_new);
-        assert!(agg.record(c, t0, || "c".into()).unwrap().is_new);
+        // Different pod, and same pod with a different reason: both are their
+        // own Event series.
+        assert!(
+            agg.record(agg_key("pod-a", "CoreDumped"), t0, || "a".into())
+                .unwrap()
+                .is_new
+        );
+        assert!(
+            agg.record(agg_key("pod-b", "CoreDumped"), t0, || "b".into())
+                .unwrap()
+                .is_new
+        );
+        assert!(
+            agg.record(agg_key("pod-a", "CoreDumpSuppressed"), t0, || "c".into())
+                .unwrap()
+                .is_new
+        );
     }
 
     #[test]
     fn aggregator_re_creates_after_ttl_expiry() {
         let mut agg = Aggregator::default();
-        let key = AggKey {
-            namespace: "default".into(),
-            pod_uid: "abc-123".into(),
-            reason: "CoreDumped",
-        };
+        let key = agg_key("abc-123", "CoreDumped");
         let t0 = Instant::now();
-        let first = agg.record(key.clone(), t0, || "ev-1".to_string()).unwrap();
-        assert!(first.is_new);
+        assert!(
+            agg.record(key.clone(), t0, || "ev-1".to_string())
+                .unwrap()
+                .is_new
+        );
 
         let after_ttl = t0 + AGGREGATION_TTL + Duration::from_secs(1);
         let renewed = agg.record(key, after_ttl, || "ev-2".to_string()).unwrap();
         assert!(renewed.is_new, "entry past its TTL should be re-created");
         assert_eq!(renewed.count, 1);
         assert_eq!(renewed.event_name, "ev-2");
+    }
+
+    #[test]
+    fn aggregator_stops_inserting_new_keys_at_cap() {
+        let mut agg = Aggregator::default();
+        let t0 = Instant::now();
+
+        for i in 0..MAX_AGGREGATION_KEYS {
+            let recorded = agg
+                .record(agg_key(&format!("pod-{i}"), "CoreDumped"), t0, || {
+                    format!("ev-{i}")
+                })
+                .unwrap();
+            assert!(recorded.is_new);
+        }
+        assert_eq!(agg.entries.len(), MAX_AGGREGATION_KEYS);
+
+        assert!(
+            agg.record(agg_key("overflow", "CoreDumped"), t0, || "overflow".into())
+                .is_none()
+        );
+        assert_eq!(agg.entries.len(), MAX_AGGREGATION_KEYS);
+
+        // Repeating an existing key still bumps its count.
+        let recorded = agg
+            .record(agg_key("pod-0", "CoreDumped"), t0, || {
+                "should-not-run".into()
+            })
+            .unwrap();
+        assert!(!recorded.is_new);
+        assert_eq!(recorded.count, 2);
+    }
+
+    #[test]
+    fn aggregator_sweep_removes_expired_entries() {
+        // The sweep exists for quiet daemons: without it, entries only expire
+        // when a new capture happens to call `record`.
+        let mut agg = Aggregator::default();
+        let key = agg_key("abc-123", "CoreDumped");
+        let t0 = Instant::now();
+        agg.record(key.clone(), t0, || "ev-1".into()).unwrap();
+        assert_eq!(agg.entries.len(), 1);
+
+        let after_ttl = t0 + AGGREGATION_TTL + Duration::from_secs(1);
+        agg.sweep(after_ttl);
+        assert!(agg.entries.is_empty());
+
+        let recorded = agg.record(key, after_ttl, || "ev-2".into()).unwrap();
+        assert!(recorded.is_new);
+        assert_eq!(recorded.event_name, "ev-2");
     }
 
     /// Regression test: `metav1.MicroTime`'s Go decoder parses against a
@@ -549,214 +640,121 @@ mod tests {
         );
     }
 
+    /// The body is what the API server validates; a wrong field name or a
+    /// mistyped `eventTime` is a 400 that only shows up in production.
+    #[test]
+    fn event_body_targets_the_pod_and_carries_a_decodable_event_time() {
+        let payload = payload("default", "abc-123");
+        let name = event_name(&payload.pod_uid, "CoreDumped", payload.timestamp);
+        let body = event_body("node-a", &name, "CoreDumped", &payload);
+
+        assert_eq!(body["apiVersion"], "events.k8s.io/v1");
+        assert_eq!(body["kind"], "Event");
+        assert_eq!(body["metadata"]["name"], name.as_str());
+        assert_eq!(body["metadata"]["namespace"], "default");
+        assert_eq!(body["reportingController"], "coredrop");
+        assert_eq!(body["reportingInstance"], "node-a");
+        assert_eq!(body["reason"], "CoreDumped");
+        assert_eq!(body["type"], "Warning");
+        assert_eq!(body["eventTime"], "2025-06-11T00:00:00.000000Z");
+
+        // `regarding` is what makes this show up under `kubectl describe pod`.
+        assert_eq!(body["regarding"]["kind"], "Pod");
+        assert_eq!(body["regarding"]["apiVersion"], "v1");
+        assert_eq!(body["regarding"]["namespace"], "default");
+        assert_eq!(body["regarding"]["name"], "my-pod");
+        assert_eq!(body["regarding"]["uid"], "abc-123");
+    }
+
+    #[test]
+    fn note_points_at_the_artifacts_when_a_manifest_was_written() {
+        let mut payload = payload("default", "abc-123");
+        assert_eq!(
+            note(&payload),
+            "core dumped (signal SIGSEGV); artifacts at local/abc-123/def456/1234567890-manifest.json"
+        );
+
+        // Manifest write failed: the note still reports the crash.
+        payload.manifest_key = None;
+        assert_eq!(note(&payload), "core dumped (signal SIGSEGV)");
+
+        // Unmapped signal number: fall back to the raw number, never omit it.
+        payload.signal = 31;
+        payload.signal_name = None;
+        assert_eq!(note(&payload), "core dumped (signal 31)");
+    }
+
+    #[test]
+    fn series_patch_carries_the_running_count() {
+        let body = series_patch(7, "2025-06-11T00:00:00.000000Z");
+        assert_eq!(body["series"]["count"], 7);
+        assert_eq!(
+            body["series"]["lastObservedTime"],
+            "2025-06-11T00:00:00.000000Z"
+        );
+    }
+
     #[test]
     fn bind_socket_replaces_a_stale_socket_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "coredrop-events-bind-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock_path = dir.join("events.sock");
-        // Simulate a stale file left by an unclean shutdown (not a real socket).
-        std::fs::write(&sock_path, b"stale").unwrap();
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let _socket = bind_socket(sock_path.to_str().unwrap()).unwrap();
+        // An unclean shutdown leaves the path behind; binding over it would
+        // otherwise fail with AddrInUse and take the daemon down on restart.
+        bind_in_temp_dir(|dir| {
+            std::fs::write(dir.join("events.sock"), b"stale").unwrap();
         });
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn bind_socket_creates_parent_dir_mode_0700() {
+    fn bind_socket_creates_a_0700_dir_holding_a_0600_socket() {
         use std::os::unix::fs::MetadataExt;
 
-        let dir = std::env::temp_dir().join(format!(
-            "coredrop-events-permtest-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let sock_path = dir.join("events.sock");
+        let dir = bind_in_temp_dir(|_| {});
+        let sock_path = dir.path().join("events.sock");
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let _socket = bind_socket(sock_path.to_str().unwrap()).unwrap();
-        });
-
-        let mode = std::fs::metadata(&dir).unwrap().mode() & 0o777;
-        assert_eq!(mode, 0o700, "events socket parent dir should be mode 0700");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn bind_socket_sets_socket_mode_0600() {
-        use std::os::unix::fs::MetadataExt;
-
-        let dir = std::env::temp_dir().join(format!(
-            "coredrop-events-sockpermtest-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let sock_path = dir.join("events.sock");
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let _socket = bind_socket(sock_path.to_str().unwrap()).unwrap();
-        });
-
-        let mode = std::fs::metadata(&sock_path).unwrap().mode() & 0o777;
-        assert_eq!(mode, 0o600, "events socket should be mode 0600");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn aggregator_stops_inserting_new_keys_at_cap() {
-        let mut agg = Aggregator::default();
-        let t0 = Instant::now();
-
-        for i in 0..MAX_AGGREGATION_KEYS {
-            let key = AggKey {
-                namespace: "default".into(),
-                pod_uid: format!("pod-{i}"),
-                reason: "CoreDumped",
-            };
-            let recorded = agg.record(key, t0, || format!("ev-{i}")).unwrap();
-            assert!(recorded.is_new);
-        }
-        assert_eq!(agg.entries.len(), MAX_AGGREGATION_KEYS);
-
-        let overflow = AggKey {
-            namespace: "default".into(),
-            pod_uid: "overflow".into(),
-            reason: "CoreDumped",
-        };
-        assert!(agg.record(overflow, t0, || "overflow".into()).is_none());
-        assert_eq!(agg.entries.len(), MAX_AGGREGATION_KEYS);
-
-        // Repeating an existing key still bumps its count.
-        let existing = AggKey {
-            namespace: "default".into(),
-            pod_uid: "pod-0".into(),
-            reason: "CoreDumped",
-        };
-        let recorded = agg
-            .record(existing, t0, || "should-not-run".into())
-            .unwrap();
-        assert!(!recorded.is_new);
-        assert_eq!(recorded.count, 2);
-    }
-
-    #[test]
-    fn aggregator_sweep_removes_expired_entries() {
-        let mut agg = Aggregator::default();
-        let key = AggKey {
-            namespace: "default".into(),
-            pod_uid: "abc-123".into(),
-            reason: "CoreDumped",
-        };
-        let t0 = Instant::now();
-        agg.record(key.clone(), t0, || "ev-1".into()).unwrap();
-        assert_eq!(agg.entries.len(), 1);
-
-        let after_ttl = t0 + AGGREGATION_TTL + Duration::from_secs(1);
-        agg.sweep(after_ttl);
-        assert!(agg.entries.is_empty());
-
-        let recorded = agg.record(key, after_ttl, || "ev-2".into()).unwrap();
-        assert!(recorded.is_new);
-        assert_eq!(recorded.event_name, "ev-2");
-    }
-
-    fn test_payload(namespace: &str, pod_uid: &str) -> CaptureEventPayload {
-        CaptureEventPayload {
-            namespace: namespace.into(),
-            pod_name: "my-pod".into(),
-            pod_uid: pod_uid.into(),
-            container_name: Some("app".into()),
-            signal: 11,
-            signal_name: Some("SIGSEGV".into()),
-            outcome: Outcome::Uploaded,
-            manifest_key: Some("local/abc-123/def456/1234567890-manifest.json".into()),
-            stored_bytes: Some(1024),
-            timestamp: 1_749_600_000,
-        }
+        let dir_mode = std::fs::metadata(dir.path()).unwrap().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "events socket parent dir should be mode 0700"
+        );
+        let sock_mode = std::fs::metadata(&sock_path).unwrap().mode() & 0o777;
+        assert_eq!(sock_mode, 0o600, "events socket should be mode 0600");
     }
 
     #[tokio::test]
     async fn handle_payload_rejects_invalid_namespace_or_pod_uid() {
-        let client = reqwest::Client::builder()
+        // A spoofed payload must be rejected before any API server call, so
+        // nothing is recorded in the aggregator either.
+        let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(1))
             .build()
             .unwrap();
-        let client = EventClient::new_for_test(client, "http://127.0.0.1:1".into(), "test".into());
+        let client = EventClient::new_for_test(http, "http://127.0.0.1:1".into(), "test".into());
 
         let mut agg = Aggregator::default();
-        let base = "x".to_string();
+        let long = "x".repeat(MAX_K8S_NAME_LEN + 1);
 
+        for (namespace, pod_uid, label) in [
+            ("", "valid-uid", "empty namespace"),
+            (long.as_str(), "valid-uid", "oversized namespace"),
+            ("default", "", "empty pod uid"),
+            ("default", long.as_str(), "oversized pod uid"),
+        ] {
+            handle_payload(
+                Some(&client),
+                &mut agg,
+                "test-node",
+                &payload(namespace, pod_uid),
+            )
+            .await;
+            assert!(agg.entries.is_empty(), "{label} must be dropped");
+        }
+
+        // A valid payload is recorded even though the API call itself fails -
+        // a broken API server must not lose the aggregation state.
         handle_payload(
             Some(&client),
             &mut agg,
             "test-node",
-            &test_payload("", "valid-uid"),
-        )
-        .await;
-        assert!(agg.entries.is_empty());
-
-        handle_payload(
-            Some(&client),
-            &mut agg,
-            "test-node",
-            &test_payload(&base.repeat(254), "valid-uid"),
-        )
-        .await;
-        assert!(agg.entries.is_empty());
-
-        handle_payload(
-            Some(&client),
-            &mut agg,
-            "test-node",
-            &test_payload("default", ""),
-        )
-        .await;
-        assert!(agg.entries.is_empty());
-
-        handle_payload(
-            Some(&client),
-            &mut agg,
-            "test-node",
-            &test_payload("default", &base.repeat(254)),
-        )
-        .await;
-        assert!(agg.entries.is_empty());
-
-        // A valid payload is recorded even though the API call will fail.
-        handle_payload(
-            Some(&client),
-            &mut agg,
-            "test-node",
-            &test_payload("default", "valid-uid"),
+            &payload("default", "valid-uid"),
         )
         .await;
         assert_eq!(agg.entries.len(), 1);

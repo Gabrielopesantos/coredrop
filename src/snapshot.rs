@@ -226,14 +226,14 @@ mod tests {
     use super::*;
     use crate::buildid::tests::synthetic_elf_with_build_id;
     use std::collections::BTreeMap;
+    use tempfile::TempDir;
 
-    fn fixture(pid: i32, files: &[(&str, &[u8])], build_id: &[u8]) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("coredrop-proc-{}-{nanos}", std::process::id()));
+    /// A fixture `/proc` root holding `<pid>/` with the given files, an `exe`
+    /// symlink to a synthetic ELF, and an `fd` dir with one entry. The
+    /// `TempDir` is returned so the caller keeps the tree alive.
+    fn fixture(pid: i32, files: &[(&str, &[u8])], build_id: &[u8]) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
         let proc_pid = root.join(pid.to_string());
         std::fs::create_dir_all(&proc_pid).unwrap();
 
@@ -249,7 +249,7 @@ mod tests {
         std::fs::create_dir_all(&fd_dir).unwrap();
         std::os::unix::fs::symlink(&elf_path, fd_dir.join("3")).unwrap();
 
-        root
+        dir
     }
 
     fn by_name(snap: &ProcSnapshot) -> BTreeMap<&str, &[u8]> {
@@ -259,9 +259,23 @@ mod tests {
             .collect()
     }
 
+    /// Read the `TRUNCATED` manifest entry out of a rendered tar, if present.
+    fn truncated_manifest(tar_bytes: &[u8]) -> Option<String> {
+        let mut archive = tar::Archive::new(tar_bytes);
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().to_string_lossy() == "TRUNCATED" {
+                let mut s = String::new();
+                entry.read_to_string(&mut s).unwrap();
+                return Some(s);
+            }
+        }
+        None
+    }
+
     #[test]
     fn captures_proc_files_redacts_environ_and_cmdline_and_reads_build_id() {
-        let root = fixture(
+        let dir = fixture(
             4242,
             &[
                 ("maps", b"00400000-0040b000 r-xp 00000000 fd:00 12 /bin/app"),
@@ -272,7 +286,7 @@ mod tests {
             &[0xab, 0xcd, 0xef],
         );
 
-        let snap = ProcSnapshot::capture(&root, 4242, &Redactor::default());
+        let snap = ProcSnapshot::capture(dir.path(), 4242, &Redactor::default());
         let files = by_name(&snap);
 
         assert_eq!(
@@ -291,56 +305,58 @@ mod tests {
         assert!(fd.starts_with("3 -> "), "fd listing: {fd}");
         assert!(files.contains_key("exe"));
         assert_eq!(snap.build_id.as_deref(), Some("abcdef"));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn skips_absent_files_without_failing() {
-        let root = fixture(7, &[("maps", b"x")], &[0x01]);
-        let snap = ProcSnapshot::capture(&root, 7, &Redactor::default());
+        let dir = fixture(7, &[("maps", b"x")], &[0x01]);
+        let snap = ProcSnapshot::capture(dir.path(), 7, &Redactor::default());
         let names: Vec<&str> = snap.files.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"maps"));
         assert!(!names.contains(&"smaps"));
-        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_file_of_exactly_the_cap_is_not_truncated() {
+        // `read_capped` reads one byte past the cap precisely so this case is
+        // distinguishable from a longer file. Without it, an exactly-cap-sized
+        // file would be mislabelled as a partial prefix.
+        let exact = vec![b'x'; MAX_FILE_BYTES as usize];
+        let dir = fixture(17, &[("smaps", &exact)], &[0x05]);
+        let snap = ProcSnapshot::capture(dir.path(), 17, &Redactor::default());
+
+        let smaps = snap.files.iter().find(|f| f.name == "smaps").unwrap();
+        assert_eq!(smaps.bytes.len() as u64, MAX_FILE_BYTES);
+        assert!(!smaps.truncated, "a file of exactly the cap is complete");
+        assert_eq!(truncated_manifest(&snap.to_tar().unwrap()), None);
     }
 
     #[test]
     fn caps_large_file_and_flags_truncation() {
         let big = vec![b'x'; MAX_FILE_BYTES as usize + 100];
-        let root = fixture(11, &[("smaps", &big)], &[0x03]);
-        let snap = ProcSnapshot::capture(&root, 11, &Redactor::default());
+        let dir = fixture(11, &[("smaps", &big)], &[0x03]);
+        let snap = ProcSnapshot::capture(dir.path(), 11, &Redactor::default());
 
         let smaps = snap.files.iter().find(|f| f.name == "smaps").unwrap();
         assert_eq!(smaps.bytes.len() as u64, MAX_FILE_BYTES);
         assert!(smaps.truncated, "over-cap file must be flagged truncated");
 
-        let tar_bytes = snap.to_tar().unwrap();
-        let mut archive = tar::Archive::new(tar_bytes.as_slice());
-        let mut manifest = None;
-        for entry in archive.entries().unwrap() {
-            let mut entry = entry.unwrap();
-            if entry.path().unwrap().to_string_lossy() == "TRUNCATED" {
-                let mut s = String::new();
-                entry.read_to_string(&mut s).unwrap();
-                manifest = Some(s);
-            }
-        }
-        assert_eq!(manifest.as_deref(), Some("smaps"));
-
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            truncated_manifest(&snap.to_tar().unwrap()).as_deref(),
+            Some("smaps")
+        );
     }
 
     #[test]
     fn caps_fd_listing_and_flags_truncation() {
-        let root = fixture(13, &[("maps", b"x")], &[0x04]);
-        let fd_dir = root.join("13/fd");
+        let dir = fixture(13, &[("maps", b"x")], &[0x04]);
+        let fd_dir = dir.path().join("13/fd");
         for i in 0..=MAX_FD_ENTRIES {
             // fixture() already made fd/3
             std::os::unix::fs::symlink("/dev/null", fd_dir.join(format!("{}", i + 100))).unwrap();
         }
 
-        let snap = ProcSnapshot::capture(&root, 13, &Redactor::default());
+        let snap = ProcSnapshot::capture(dir.path(), 13, &Redactor::default());
         let fd = snap.files.iter().find(|f| f.name == "fd").unwrap();
         assert!(
             fd.truncated,
@@ -355,26 +371,16 @@ mod tests {
             Some(format!("... showing {MAX_FD_ENTRIES} of {} fds", MAX_FD_ENTRIES + 2).as_str())
         );
 
-        let tar_bytes = snap.to_tar().unwrap();
-        let mut archive = tar::Archive::new(tar_bytes.as_slice());
-        let mut manifest = None;
-        for entry in archive.entries().unwrap() {
-            let mut entry = entry.unwrap();
-            if entry.path().unwrap().to_string_lossy() == "TRUNCATED" {
-                let mut s = String::new();
-                entry.read_to_string(&mut s).unwrap();
-                manifest = Some(s);
-            }
-        }
-        assert_eq!(manifest.as_deref(), Some("fd"));
-
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            truncated_manifest(&snap.to_tar().unwrap()).as_deref(),
+            Some("fd")
+        );
     }
 
     #[test]
     fn renders_a_readable_tar_bundle() {
-        let root = fixture(9, &[("maps", b"map-bytes"), ("environ", b"A=1\0")], &[0x02]);
-        let snap = ProcSnapshot::capture(&root, 9, &Redactor::default());
+        let dir = fixture(9, &[("maps", b"map-bytes"), ("environ", b"A=1\0")], &[0x02]);
+        let snap = ProcSnapshot::capture(dir.path(), 9, &Redactor::default());
         let tar_bytes = snap.to_tar().unwrap();
 
         let mut archive = tar::Archive::new(tar_bytes.as_slice());
@@ -391,7 +397,5 @@ mod tests {
             Some(&b"map-bytes"[..])
         );
         assert_eq!(seen.len(), snap.files.len());
-
-        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -1,150 +1,94 @@
+//! End-to-end capture-handler tests: `run()` against a fixture `/proc` tree and
+//! an in-memory object store.
+
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::fmt;
-use std::io;
 use std::sync::Arc;
 
-use async_compression::tokio::bufread::ZstdDecoder;
-use async_trait::async_trait;
-use futures_util::stream::BoxStream;
+use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
-use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-};
-use tokio::io::AsyncReadExt;
+use tempfile::TempDir;
 
-use coredrop::config::HandlerConfig;
+use coredrop::events::{CaptureEventPayload, Outcome};
 use coredrop::handler::{CaptureArgs, run};
 use coredrop::manifest::Manifest;
 use coredrop::upload;
 
-// ── Fixtures ─────────────────────────────────────────────────────────────────
+mod common;
+use common::{
+    FailingStore, StallReader, base_config, fake_crictl_script, get_object, is_absent, proc_root,
+    unzstd, write_fake_crictl, write_fixture_proc,
+};
 
-fn unique_tmp(tag: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::path::PathBuf::from(format!(
-        "/tmp/coredrop-handler-test-{}-{tag}-{nanos}",
-        std::process::id()
-    ))
-}
+const POD_UID: &str = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+const CONTAINER_ID: &str = "abc123def456abc123def456"; // 24 hex chars -- valid
+const TS: i64 = 1_749_600_000;
 
-/// Build a minimal fixture `/proc/<pid>` tree with a k8s cgroup and an env
-/// var planted for redaction checks (`SECRET_KEY`).
-fn write_fixture_proc(proc_dir: &std::path::Path, pid: i32, pod_uid: &str, container_id: &str) {
-    let pid_dir = proc_dir.join(pid.to_string());
-    std::fs::create_dir_all(&pid_dir).unwrap();
-    // cgroupfs v2: `0::/kubepods/<qos>/pod<uid>/<cid>`
-    std::fs::write(
-        pid_dir.join("cgroup"),
-        format!("0::/kubepods/besteffort/pod{pod_uid}/{container_id}\n"),
-    )
-    .unwrap();
-    std::fs::write(pid_dir.join("status"), b"Name:\tcrash-test\n").unwrap();
-    std::fs::write(
-        pid_dir.join("environ"),
-        b"SECRET_KEY=hunter2\0LANG=en_US.UTF-8\0",
-    )
-    .unwrap();
-}
-
-fn base_config(proc_dir: &std::path::Path) -> HandlerConfig {
-    HandlerConfig {
-        cluster: "test".into(),
-        no_redact: false,
-        proc_root: proc_dir.to_str().unwrap().to_string(),
-        store_url: None,
-        store_options: vec![],
-        crictl_path: "/bin/false".into(), // degraded -- cgroup-only identity
-        cri_runtime_endpoint: None,
-        max_core_bytes: 0,
-        max_cores_per_hour: 0,
-        upload_deadline_secs: 0,
-        crictl_timeout_secs: 0,
-        rate_state_path: proc_dir
-            .parent()
-            .unwrap()
-            .join("recent.json")
-            .to_string_lossy()
-            .into_owned(),
-        event_socket_path: None,
+fn capture_args(pid: i32, signal: i32, timestamp: i64) -> CaptureArgs {
+    CaptureArgs {
+        host_pid: pid,
+        signal,
+        timestamp,
+        exe: "!usr!bin!crasher".into(),
     }
 }
 
-async fn unzstd(bytes: &[u8]) -> Vec<u8> {
-    let mut dec = ZstdDecoder::new(io::Cursor::new(bytes.to_vec()));
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out).await.unwrap();
-    out
+/// The three object keys one capture produces, for the standard fixture identity.
+fn keys(container_id: &str, ts: i64, pid: i32) -> (String, String, String) {
+    (
+        upload::core_object_key("test", POD_UID, container_id, ts, pid),
+        upload::proc_snapshot_object_key("test", POD_UID, container_id, ts, pid),
+        upload::manifest_object_key("test", POD_UID, container_id, ts, pid),
+    )
 }
 
-async fn get_object(store: &Arc<dyn object_store::ObjectStore>, key: &str) -> Vec<u8> {
-    store
-        .get(&ObjectPath::from(key))
-        .await
-        .unwrap_or_else(|_| panic!("object missing: {key}"))
-        .bytes()
-        .await
-        .unwrap()
-        .to_vec()
+async fn read_manifest(store: &Arc<dyn ObjectStore>, key: &str) -> Manifest {
+    serde_json::from_slice(&get_object(store, key).await).unwrap()
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-/// 2a -- happy path: core, proc-snapshot, and manifest all land in the store.
+/// Happy path: core, proc-snapshot, and manifest all land in the store.
 /// Verifies the load-bearing blob-first invariant: the manifest's
 /// `core.object_key` points at an object that actually exists (no dangling
 /// manifests).
 #[tokio::test]
-async fn handler_run_uploads_core_snapshot_and_writes_manifest() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id = "abc123def456abc123def456"; // 24 hex chars -- valid
-    let ts: i64 = 1_749_600_000;
+async fn run_uploads_core_snapshot_and_writes_manifest() {
     let pid = 4242;
     let core_payload: &[u8] = b"fake core payload for testing - not a real ELF";
 
-    let tmp = unique_tmp("e2e");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
 
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    let config = base_config(&proc_dir);
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 11,
-        timestamp: ts,
-        exe: "!usr!bin!crasher".into(),
-    };
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let config = base_config(tmp.path());
 
     let mut core_in: &[u8] = core_payload;
-    run(args, &config, &mut core_in, Some(store.clone()))
-        .await
-        .unwrap();
+    run(
+        capture_args(pid, 11, TS),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+
+    let (core_key, snap_key, manifest_key) = keys(CONTAINER_ID, TS, pid);
 
     // Core object: present and decompresses to the input bytes.
-    let core_key = upload::core_object_key("test", pod_uid, container_id, ts, pid);
     let stored_core = get_object(&store, &core_key).await;
     assert_eq!(unzstd(&stored_core).await, core_payload);
 
     // Proc-snapshot tar: present.
-    let snap_key = upload::proc_snapshot_object_key("test", pod_uid, container_id, ts, pid);
     get_object(&store, &snap_key).await;
 
-    // Manifest: present, parses, and its core.object_key exists in the store.
-    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts, pid);
-    let manifest_bytes = get_object(&store, &manifest_key).await;
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).unwrap();
-
+    let manifest = read_manifest(&store, &manifest_key).await;
     assert!(manifest.core.present, "core.present must be true");
     assert_eq!(manifest.signal, 11);
     assert_eq!(manifest.signal_name.as_deref(), Some("SIGSEGV"));
     assert_eq!(manifest.cluster, "test");
-    assert_eq!(manifest.identity.pod_uid, pod_uid);
-    assert_eq!(manifest.identity.container_id, container_id);
+    assert_eq!(manifest.identity.pod_uid, POD_UID);
+    assert_eq!(manifest.identity.container_id, CONTAINER_ID);
     assert!(manifest.core.sha256.is_some(), "sha256 populated");
     assert!(manifest.core.size_bytes.unwrap_or(0) > 0, "size_bytes > 0");
     assert!(
@@ -174,40 +118,115 @@ async fn handler_run_uploads_core_snapshot_and_writes_manifest() {
         .expect("proc_snapshot in manifest");
     assert_eq!(snap_ref.object_key, snap_key);
     assert!(snap_ref.file_count > 0);
-
-    std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2a -- size cap: only the first `max_core_bytes` land in the store; the
-/// manifest records the full drained size and truncation reason.
+/// crictl enrichment succeeding is the only path that fills the manifest's
+/// human-readable identity and the only one that reaches the capture-event
+/// send at the end of the pipeline - every other test here runs with crictl
+/// pointed at `/bin/false`.
 #[tokio::test]
-async fn handler_run_size_cap_truncates_stored_core() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id = "abc123def456abc123def456";
-    let ts: i64 = 1_749_600_000;
+async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
+    let _guard = common::SPAWN_LOCK.lock().await;
+    let pid = 4247;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let crictl = write_fake_crictl(
+        tmp.path(),
+        &fake_crictl_script("production", "nginx-abc123", "mycontainer"),
+    );
+
+    // Bind the events socket before the run: the handler's send is
+    // fire-and-forget, so an unbound path would silently drop the datagram.
+    let sock_path = tmp.path().join("events.sock");
+    let listener = std::os::unix::net::UnixDatagram::bind(&sock_path).unwrap();
+    listener
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(tmp.path());
+    config.crictl_path = crictl.to_string_lossy().into_owned();
+    config.crictl_timeout_secs = 10;
+    config.event_socket_path = Some(sock_path.to_string_lossy().into_owned());
+
+    let mut core_in: &[u8] = b"core payload for the enriched path";
+    run(
+        capture_args(pid, 11, TS),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+
+    let (_core_key, _snap_key, manifest_key) = keys(CONTAINER_ID, TS, pid);
+    let manifest = read_manifest(&store, &manifest_key).await;
+
+    // Cgroup-derived identity is still there, now joined by the crictl fields.
+    assert_eq!(manifest.identity.pod_uid, POD_UID);
+    assert_eq!(manifest.identity.namespace.as_deref(), Some("production"));
+    assert_eq!(manifest.identity.pod_name.as_deref(), Some("nginx-abc123"));
+    assert_eq!(
+        manifest.identity.container_name.as_deref(),
+        Some("mycontainer")
+    );
+    assert_eq!(
+        manifest.identity.image.as_deref(),
+        Some("docker.io/library/nginx:1.25")
+    );
+    assert_eq!(
+        manifest.identity.image_digest.as_deref(),
+        Some("sha256:cafebabe1234")
+    );
+    assert_eq!(manifest.identity.restart_count, Some(2));
+
+    // The capture event the daemon turns into a k8s Event.
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = listener
+        .recv(&mut buf)
+        .expect("handler must report the capture on the events socket");
+    let event: CaptureEventPayload = serde_json::from_slice(&buf[..n]).unwrap();
+    assert_eq!(event.namespace, "production");
+    assert_eq!(event.pod_name, "nginx-abc123");
+    assert_eq!(event.pod_uid, POD_UID);
+    assert_eq!(event.container_name.as_deref(), Some("mycontainer"));
+    assert_eq!(event.outcome, Outcome::Uploaded);
+    assert_eq!(event.signal_name.as_deref(), Some("SIGSEGV"));
+    assert_eq!(event.timestamp, TS);
+    assert_eq!(
+        event.manifest_key.as_deref(),
+        Some(manifest_key.as_str()),
+        "the event must point at the manifest that was actually written"
+    );
+    assert_eq!(event.stored_bytes, manifest.core.stored_bytes);
+}
+
+/// Size cap: only the first `max_core_bytes` land in the store; the manifest
+/// records the full drained size and the truncation reason.
+#[tokio::test]
+async fn run_size_cap_truncates_stored_core() {
     let pid = 4243;
     let core_payload: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
 
-    let tmp = unique_tmp("sizecap");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
 
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    let mut config = base_config(&proc_dir);
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(tmp.path());
     config.max_core_bytes = 1_000;
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 11,
-        timestamp: ts,
-        exe: "!usr!bin!crasher".into(),
-    };
 
     let mut core_in: &[u8] = &core_payload;
-    run(args, &config, &mut core_in, Some(store.clone()))
-        .await
-        .unwrap();
+    run(
+        capture_args(pid, 11, TS),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
 
-    let core_key = upload::core_object_key("test", pod_uid, container_id, ts, pid);
+    let (core_key, _snap_key, manifest_key) = keys(CONTAINER_ID, TS, pid);
     let stored_core = get_object(&store, &core_key).await;
     assert_eq!(
         unzstd(&stored_core).await,
@@ -215,9 +234,7 @@ async fn handler_run_size_cap_truncates_stored_core() {
         "stored core holds exactly the first cap bytes"
     );
 
-    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts, pid);
-    let manifest: Manifest =
-        serde_json::from_slice(&get_object(&store, &manifest_key).await).unwrap();
+    let manifest = read_manifest(&store, &manifest_key).await;
     assert!(manifest.core.truncated);
     assert_eq!(manifest.core.truncated_reason.as_deref(), Some("size_cap"));
     assert_eq!(
@@ -225,539 +242,276 @@ async fn handler_run_size_cap_truncates_stored_core() {
         Some(core_payload.len() as u64),
         "size_bytes records the full drained size"
     );
-
-    std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2a -- rate limit: with a budget of 1, the second crash gets no core object
-/// but still gets a proc snapshot and a manifest marked `rate_limit`.
+/// Rate limit: with a budget of 1, the second crash gets no core object but
+/// still gets a proc snapshot and a manifest marked `rate_limit`.
 #[tokio::test]
-async fn handler_run_rate_limit_suppresses_core_keeps_manifest() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id = "abc123def456abc123def456";
+async fn run_rate_limit_suppresses_core_keeps_manifest() {
     let pid = 4244;
 
-    let tmp = unique_tmp("ratelimit");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
 
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    let mut config = base_config(&proc_dir);
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(tmp.path());
     config.max_cores_per_hour = 1;
 
-    for (i, ts) in [1_749_600_000i64, 1_749_600_010].into_iter().enumerate() {
-        let args = CaptureArgs {
-            host_pid: pid,
-            signal: 11,
-            timestamp: ts,
-            exe: "!usr!bin!crasher".into(),
-        };
+    for ts in [TS, TS + 10] {
         let mut core_in: &[u8] = b"core payload for rate limit test";
-        run(args, &config, &mut core_in, Some(store.clone()))
-            .await
-            .unwrap_or_else(|e| panic!("run {i} failed: {e}"));
+        run(
+            capture_args(pid, 11, ts),
+            &config,
+            &mut core_in,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("run at {ts} failed: {e}"));
     }
 
     // First crash: full capture.
-    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000, pid);
+    let (core1, _, _) = keys(CONTAINER_ID, TS, pid);
     get_object(&store, &core1).await;
 
     // Second crash: no core object...
-    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
+    let (core2, snap2, manifest2_key) = keys(CONTAINER_ID, TS + 10, pid);
     assert!(
-        store.get(&ObjectPath::from(core2.as_str())).await.is_err(),
+        is_absent(&store, &core2).await,
         "suppressed crash must not store a core"
     );
     // ...but proc snapshot and manifest are still written.
-    let snap2 = upload::proc_snapshot_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
     get_object(&store, &snap2).await;
-    let manifest2_key =
-        upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
-    let manifest2: Manifest =
-        serde_json::from_slice(&get_object(&store, &manifest2_key).await).unwrap();
+    let manifest2 = read_manifest(&store, &manifest2_key).await;
     assert!(!manifest2.core.present);
     assert!(manifest2.core.object_key.is_none());
     assert_eq!(manifest2.core.skipped_reason.as_deref(), Some("rate_limit"));
-
-    std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2a -- rate limit keyed by pod UID, not container ID: a restarted container
-/// gets a new container ID but keeps the same pod UID, so the budget must still
-/// apply.
+/// The budget is keyed by pod UID, not container ID: a restarted container gets
+/// a new container ID but keeps the same pod UID, so the budget must follow it.
 #[tokio::test]
-async fn handler_run_rate_limit_keys_by_pod_uid_not_container_id() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id_1 = "abc123def456abc123def456";
+async fn run_rate_limit_keys_by_pod_uid_not_container_id() {
     let container_id_2 = "fedcba654321fedcba654321";
-    let pid_1 = 4250;
-    let pid_2 = 4251;
+    let (pid_1, pid_2) = (4250, 4251);
 
-    let tmp = unique_tmp("ratelimit-poduid");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid_1, pod_uid, container_id_1);
-    write_fixture_proc(&proc_dir, pid_2, pod_uid, container_id_2);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid_1, POD_UID, CONTAINER_ID);
+    write_fixture_proc(tmp.path(), pid_2, POD_UID, container_id_2);
 
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    let mut config = base_config(&proc_dir);
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(tmp.path());
     config.max_cores_per_hour = 1;
 
-    for (i, (pid, ts, _container_id)) in [
-        (pid_1, 1_749_600_000i64, container_id_1),
-        (pid_2, 1_749_600_010i64, container_id_2),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let args = CaptureArgs {
-            host_pid: pid,
-            signal: 11,
-            timestamp: ts,
-            exe: "!usr!bin!crasher".into(),
-        };
+    for (pid, ts) in [(pid_1, TS), (pid_2, TS + 10)] {
         let mut core_in: &[u8] = b"core payload for pod-uid rate limit test";
-        run(args, &config, &mut core_in, Some(store.clone()))
-            .await
-            .unwrap_or_else(|e| panic!("run {i} failed: {e}"));
+        run(
+            capture_args(pid, 11, ts),
+            &config,
+            &mut core_in,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("run for pid {pid} failed: {e}"));
     }
 
     // First crash: full capture.
-    let core1 = upload::core_object_key("test", pod_uid, container_id_1, 1_749_600_000, pid_1);
+    let (core1, _, _) = keys(CONTAINER_ID, TS, pid_1);
     get_object(&store, &core1).await;
 
     // Second crash: different container ID but same pod UID -> suppressed.
-    let core2 = upload::core_object_key("test", pod_uid, container_id_2, 1_749_600_010, pid_2);
+    let (core2, _, manifest2_key) = keys(container_id_2, TS + 10, pid_2);
     assert!(
-        store.get(&ObjectPath::from(core2.as_str())).await.is_err(),
+        is_absent(&store, &core2).await,
         "restarted container with same pod UID must inherit the rate-limit budget"
     );
 
-    let manifest2_key =
-        upload::manifest_object_key("test", pod_uid, container_id_2, 1_749_600_010, pid_2);
-    let manifest2: Manifest =
-        serde_json::from_slice(&get_object(&store, &manifest2_key).await).unwrap();
+    let manifest2 = read_manifest(&store, &manifest2_key).await;
     assert!(!manifest2.core.present);
     assert_eq!(manifest2.core.skipped_reason.as_deref(), Some("rate_limit"));
-
-    std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2a -- rate limit refund: a crash whose core upload fails must not consume
-/// budget; the next crash still gets a full capture.
+/// Rate-limit refund: a crash whose core upload fails must not consume budget,
+/// or a transient store outage would exhaust it with zero cores kept.
 #[tokio::test]
-async fn handler_run_failed_upload_refunds_rate_budget() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id = "abc123def456abc123def456";
+async fn run_failed_upload_refunds_rate_budget() {
     let pid = 4245;
 
-    let tmp = unique_tmp("refund");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
 
-    let mut config = base_config(&proc_dir);
+    let mut config = base_config(tmp.path());
     config.max_cores_per_hour = 1;
 
     // First crash: the store rejects the core upload -> run() errors, slot refunded.
-    let failing: Arc<dyn ObjectStore> = Arc::new(FailCoreStore {
-        inner: Arc::new(InMemory::new()),
-    });
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 11,
-        timestamp: 1_749_600_000,
-        exe: "!usr!bin!crasher".into(),
-    };
+    let failing: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
     let mut core_in: &[u8] = b"core payload";
     assert!(
-        run(args, &config, &mut core_in, Some(failing))
-            .await
-            .is_err(),
+        run(
+            capture_args(pid, 11, TS),
+            &config,
+            &mut core_in,
+            Some(failing)
+        )
+        .await
+        .is_err(),
         "core upload failure must surface as an error"
     );
 
     // Second crash: budget of 1 must still be available.
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 11,
-        timestamp: 1_749_600_010,
-        exe: "!usr!bin!crasher".into(),
-    };
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut core_in: &[u8] = b"core payload";
-    run(args, &config, &mut core_in, Some(store.clone()))
-        .await
-        .unwrap();
+    run(
+        capture_args(pid, 11, TS + 10),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
 
-    let core_key = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
+    let (core_key, _, manifest_key) = keys(CONTAINER_ID, TS + 10, pid);
     get_object(&store, &core_key).await;
-    let manifest_key =
-        upload::manifest_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
-    let manifest: Manifest =
-        serde_json::from_slice(&get_object(&store, &manifest_key).await).unwrap();
+    let manifest = read_manifest(&store, &manifest_key).await;
     assert!(manifest.core.present, "refunded budget must allow the core");
     assert!(manifest.core.skipped_reason.is_none());
-
-    std::fs::remove_dir_all(&tmp).ok();
-}
-
-/// Core stream that never yields data nor EOF -- stands in for a hung store
-/// or kernel pipe in the upload-deadline test.
-struct StallReader;
-
-impl tokio::io::AsyncRead for StallReader {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        _buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        std::task::Poll::Pending
-    }
 }
 
 /// Upload deadline: a stalled drain cannot hold the handler (and its
-/// `core_pipe_limit` slot) forever -- `run()` errors once the deadline passes,
+/// `core_pipe_limit` slot) forever - `run()` errors once the deadline passes,
 /// and the abandoned crash refunds its rate-limit budget.
 #[tokio::test(start_paused = true)]
-async fn handler_run_upload_deadline_aborts_stalled_drain() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id = "abc123def456abc123def456";
+async fn run_upload_deadline_aborts_stalled_drain() {
     let pid = 4246;
 
-    let tmp = unique_tmp("deadline");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
 
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    let mut config = base_config(&proc_dir);
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(tmp.path());
     config.upload_deadline_secs = 5;
     config.max_cores_per_hour = 1;
 
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 11,
-        timestamp: 1_749_600_000,
-        exe: "!usr!bin!crasher".into(),
-    };
     let mut stalled = StallReader;
     assert!(
-        run(args, &config, &mut stalled, Some(store.clone()))
-            .await
-            .is_err(),
+        run(
+            capture_args(pid, 11, TS),
+            &config,
+            &mut stalled,
+            Some(store.clone())
+        )
+        .await
+        .is_err(),
         "a stalled drain must error at the deadline"
     );
-    let core1 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_000, pid);
+    let (core1, _, _) = keys(CONTAINER_ID, TS, pid);
     assert!(
-        store.get(&ObjectPath::from(core1.as_str())).await.is_err(),
+        is_absent(&store, &core1).await,
         "abandoned upload must not store a core"
     );
 
     // The abandoned crash refunded the budget of 1: the next crash uploads.
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 11,
-        timestamp: 1_749_600_010,
-        exe: "!usr!bin!crasher".into(),
-    };
     let mut core_in: &[u8] = b"core payload after deadline abort";
-    run(args, &config, &mut core_in, Some(store.clone()))
-        .await
-        .unwrap();
-    let core2 = upload::core_object_key("test", pod_uid, container_id, 1_749_600_010, pid);
+    run(
+        capture_args(pid, 11, TS + 10),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+    let (core2, _, _) = keys(CONTAINER_ID, TS + 10, pid);
     get_object(&store, &core2).await;
-
-    std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// 2a -- no store: run completes Ok, core discarded, no manifest written.
+/// No store: the core is drained and discarded so the kernel's pipe completes,
+/// and nothing else runs - including the rate limiter, which is only consulted
+/// when a core would actually upload.
 #[tokio::test]
-async fn handler_run_without_store_discards_silently() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id = "abc123def456abc123def456";
+async fn run_without_store_discards_silently() {
     let pid = 100;
 
-    let tmp = unique_tmp("nostore");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
 
-    let config = base_config(&proc_dir);
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 6,
-        timestamp: 1_000_000,
-        exe: "!usr!bin!app".into(),
-    };
+    let mut config = base_config(tmp.path());
+    config.max_cores_per_hour = 1;
 
     let mut core_in: &[u8] = b"some core bytes";
     // No store_override, config.store_url = None -> DiscardBackend, no manifest.
-    run(args, &config, &mut core_in, None).await.unwrap();
+    run(capture_args(pid, 6, 1_000_000), &config, &mut core_in, None)
+        .await
+        .unwrap();
 
-    std::fs::remove_dir_all(&tmp).ok();
+    assert!(
+        !std::path::Path::new(&config.rate_state_path).exists(),
+        "no store means no upload to budget, so the limiter must not run"
+    );
 }
 
-/// 2a -- non-k8s cgroup: run completes Ok, core discarded (no key derivable).
+/// Non-k8s cgroup: no identity, so no object key is derivable and nothing is
+/// written - the core is still drained.
 #[tokio::test]
-async fn handler_run_non_kubernetes_cgroup_skips_uploads() {
+async fn run_non_kubernetes_cgroup_skips_uploads() {
     let pid = 200;
 
-    let tmp = unique_tmp("nokube");
-    let proc_dir = tmp.join("proc");
-    let pid_dir = proc_dir.join(pid.to_string());
+    let tmp = TempDir::new().unwrap();
+    let pid_dir = proc_root(tmp.path()).join(pid.to_string());
     std::fs::create_dir_all(&pid_dir).unwrap();
     // Non-k8s cgroup -> parse_cgroup returns None.
     std::fs::write(pid_dir.join("cgroup"), "0::/system.slice/sshd.service\n").unwrap();
 
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    let config = base_config(&proc_dir);
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 9,
-        timestamp: 2_000_000,
-        exe: "!usr!sbin!sshd".into(),
-    };
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let config = base_config(tmp.path());
 
     let mut core_in: &[u8] = b"core bytes";
-    run(args, &config, &mut core_in, Some(store.clone()))
-        .await
-        .unwrap();
+    run(
+        capture_args(pid, 9, 2_000_000),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
 
-    // No identity -> no objects written.
     let result = store.list_with_delimiter(None).await.unwrap();
     assert!(
         result.objects.is_empty(),
         "no objects should be written without a k8s cgroup"
     );
-
-    std::fs::remove_dir_all(&tmp).ok();
 }
 
-// ── FailManifestStore ─────────────────────────────────────────────────────────
-//
-// Thin ObjectStore wrapper that fails every put whose key ends with
-// `-manifest.json`. Used in the 2c blob-first ordering test.
-
-struct FailManifestStore {
-    inner: Arc<InMemory>,
-}
-
-impl fmt::Display for FailManifestStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FailManifestStore")
-    }
-}
-
-impl fmt::Debug for FailManifestStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FailManifestStore")
-    }
-}
-
-#[async_trait]
-impl ObjectStore for FailManifestStore {
-    async fn put_opts(
-        &self,
-        location: &ObjectPath,
-        payload: PutPayload,
-        opts: PutOptions,
-    ) -> object_store::Result<PutResult> {
-        if location.as_ref().ends_with("-manifest.json") {
-            return Err(object_store::Error::Generic {
-                store: "FailManifestStore",
-                source: Box::new(std::io::Error::other("injected manifest write failure")),
-            });
-        }
-        self.inner.put_opts(location, payload, opts).await
-    }
-
-    async fn put_multipart_opts(
-        &self,
-        location: &ObjectPath,
-        opts: PutMultipartOptions,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.inner.put_multipart_opts(location, opts).await
-    }
-
-    async fn get_opts(
-        &self,
-        location: &ObjectPath,
-        options: GetOptions,
-    ) -> object_store::Result<GetResult> {
-        self.inner.get_opts(location, options).await
-    }
-
-    fn delete_stream(
-        &self,
-        locations: BoxStream<'static, object_store::Result<ObjectPath>>,
-    ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
-        self.inner.delete_stream(locations)
-    }
-
-    fn list(
-        &self,
-        prefix: Option<&ObjectPath>,
-    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner.list(prefix)
-    }
-
-    async fn list_with_delimiter(
-        &self,
-        prefix: Option<&ObjectPath>,
-    ) -> object_store::Result<ListResult> {
-        self.inner.list_with_delimiter(prefix).await
-    }
-
-    async fn copy_opts(
-        &self,
-        from: &ObjectPath,
-        to: &ObjectPath,
-        options: CopyOptions,
-    ) -> object_store::Result<()> {
-        self.inner.copy_opts(from, to, options).await
-    }
-}
-
-// ── FailCoreStore ─────────────────────────────────────────────────────────────
-//
-// Rejects `-core.zst` writes on both the single-put and multipart paths
-// (BufWriter picks per payload size); everything else delegates. Used in the
-// rate-limit refund test.
-
-struct FailCoreStore {
-    inner: Arc<InMemory>,
-}
-
-impl fmt::Display for FailCoreStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FailCoreStore")
-    }
-}
-
-impl fmt::Debug for FailCoreStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FailCoreStore")
-    }
-}
-
-#[async_trait]
-impl ObjectStore for FailCoreStore {
-    async fn put_opts(
-        &self,
-        location: &ObjectPath,
-        payload: PutPayload,
-        opts: PutOptions,
-    ) -> object_store::Result<PutResult> {
-        if location.as_ref().ends_with("-core.zst") {
-            return Err(object_store::Error::Generic {
-                store: "FailCoreStore",
-                source: Box::new(std::io::Error::other("injected core upload failure")),
-            });
-        }
-        self.inner.put_opts(location, payload, opts).await
-    }
-
-    async fn put_multipart_opts(
-        &self,
-        location: &ObjectPath,
-        opts: PutMultipartOptions,
-    ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        if location.as_ref().ends_with("-core.zst") {
-            return Err(object_store::Error::Generic {
-                store: "FailCoreStore",
-                source: Box::new(std::io::Error::other("injected core upload failure")),
-            });
-        }
-        self.inner.put_multipart_opts(location, opts).await
-    }
-
-    async fn get_opts(
-        &self,
-        location: &ObjectPath,
-        options: GetOptions,
-    ) -> object_store::Result<GetResult> {
-        self.inner.get_opts(location, options).await
-    }
-
-    fn delete_stream(
-        &self,
-        locations: BoxStream<'static, object_store::Result<ObjectPath>>,
-    ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
-        self.inner.delete_stream(locations)
-    }
-
-    fn list(
-        &self,
-        prefix: Option<&ObjectPath>,
-    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner.list(prefix)
-    }
-
-    async fn list_with_delimiter(
-        &self,
-        prefix: Option<&ObjectPath>,
-    ) -> object_store::Result<ListResult> {
-        self.inner.list_with_delimiter(prefix).await
-    }
-
-    async fn copy_opts(
-        &self,
-        from: &ObjectPath,
-        to: &ObjectPath,
-        options: CopyOptions,
-    ) -> object_store::Result<()> {
-        self.inner.copy_opts(from, to, options).await
-    }
-}
-
-/// 2c -- blob-first write ordering: when the manifest PUT fails, the core and
+/// Blob-first write ordering: when the manifest PUT fails, the core and
 /// proc-snapshot are still present. An orphan blob is acceptable; a dangling
 /// manifest (pointing at a missing core) is not.
 #[tokio::test]
-async fn handler_run_blob_first_core_survives_manifest_failure() {
-    let pod_uid = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-    let container_id = "abc123def456abc123def456";
-    let ts: i64 = 1_749_600_000;
+async fn run_blob_first_core_survives_manifest_failure() {
     let pid = 4242;
 
-    let tmp = unique_tmp("blobfirst");
-    let proc_dir = tmp.join("proc");
-    write_fixture_proc(&proc_dir, pid, pod_uid, container_id);
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
 
     let inner = Arc::new(InMemory::new());
-    let store: Arc<dyn ObjectStore> = Arc::new(FailManifestStore {
-        inner: inner.clone(),
-    });
-    let config = base_config(&proc_dir);
-    let args = CaptureArgs {
-        host_pid: pid,
-        signal: 11,
-        timestamp: ts,
-        exe: "!usr!bin!crasher".into(),
-    };
+    let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::manifest(inner.clone()));
+    let config = base_config(tmp.path());
 
     let mut core_in: &[u8] = b"core payload for blob-first test";
     // run() must complete Ok even when manifest write fails (handler warns + continues).
-    run(args, &config, &mut core_in, Some(store)).await.unwrap();
+    run(
+        capture_args(pid, 11, TS),
+        &config,
+        &mut core_in,
+        Some(store),
+    )
+    .await
+    .unwrap();
 
+    let (core_key, snap_key, manifest_key) = keys(CONTAINER_ID, TS, pid);
+    let inner: Arc<dyn ObjectStore> = inner;
     // Core and proc-snapshot are present (written before the manifest attempt).
-    let core_key = upload::core_object_key("test", pod_uid, container_id, ts, pid);
-    let snap_key = upload::proc_snapshot_object_key("test", pod_uid, container_id, ts, pid);
-    inner
-        .get(&ObjectPath::from(core_key.as_str()))
-        .await
-        .expect("core present");
-    inner
-        .get(&ObjectPath::from(snap_key.as_str()))
-        .await
-        .expect("proc-snapshot present");
-
-    // Manifest was NOT written (the FailManifestStore rejected it).
-    let manifest_key = upload::manifest_object_key("test", pod_uid, container_id, ts, pid);
+    get_object(&inner, &core_key).await;
+    get_object(&inner, &snap_key).await;
     assert!(
-        inner
-            .get(&ObjectPath::from(manifest_key.as_str()))
-            .await
-            .is_err(),
-        "manifest must not exist when write failed"
+        is_absent(&inner, &manifest_key).await,
+        "manifest must not exist when its write failed"
     );
-
-    std::fs::remove_dir_all(&tmp).ok();
 }

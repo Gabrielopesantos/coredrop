@@ -90,10 +90,10 @@ mod tests {
 
     #[test]
     fn parses_cgroupfs_v2() {
-        let content = "0::/kubepods/burstable/pod1234abcd-5678-90ef-ghij-klmnopqrstuv/\
+        let content = "0::/kubepods/burstable/poded1e9c81-9a92-4f7e-be2c-8b26b56d3b98/\
              3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c\n";
         let id = parse_cgroup(content).unwrap();
-        assert_eq!(id.pod_uid, "1234abcd-5678-90ef-ghij-klmnopqrstuv");
+        assert_eq!(id.pod_uid, "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98");
         assert_eq!(
             id.container_id,
             "3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
@@ -103,10 +103,10 @@ mod tests {
     #[test]
     fn parses_systemd_v2_with_underscored_uid_and_runtime_prefix() {
         let content = "0::/kubepods.slice/kubepods-burstable.slice/\
-             kubepods-burstable-pod1234abcd_5678_90ef_ghij_klmnopqrstuv.slice/\
+             kubepods-burstable-poded1e9c81_9a92_4f7e_be2c_8b26b56d3b98.slice/\
              cri-containerd-3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c.scope\n";
         let id = parse_cgroup(content).unwrap();
-        assert_eq!(id.pod_uid, "1234abcd-5678-90ef-ghij-klmnopqrstuv");
+        assert_eq!(id.pod_uid, "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98");
         assert_eq!(
             id.container_id,
             "3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
@@ -126,17 +126,17 @@ mod tests {
     #[test]
     fn parse_pod_slice_path_recognizes_pod_level_not_scope_or_qos() {
         let sd = "/kubepods.slice/kubepods-burstable.slice/\
-             kubepods-burstable-pod1234abcd_5678_90ef_ghij_klmnopqrstuv.slice";
+             kubepods-burstable-poded1e9c81_9a92_4f7e_be2c_8b26b56d3b98.slice";
         assert_eq!(
             parse_pod_slice_path(sd).as_deref(),
-            Some("1234abcd-5678-90ef-ghij-klmnopqrstuv")
+            Some("ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98")
         );
-        let cf = "/kubepods/burstable/pod1234abcd-5678-90ef-ghij-klmnopqrstuv";
+        let cf = "/kubepods/burstable/poded1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
         assert_eq!(
             parse_pod_slice_path(cf).as_deref(),
-            Some("1234abcd-5678-90ef-ghij-klmnopqrstuv")
+            Some("ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98")
         );
-        let scope = "/kubepods.slice/kubepods-burstable-pod1234abcd_5678.slice/\
+        let scope = "/kubepods.slice/kubepods-burstable-poded1e9c81_9a92.slice/\
              cri-containerd-3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c.scope";
         assert!(parse_pod_slice_path(scope).is_none());
         assert!(parse_pod_slice_path("/kubepods.slice/kubepods-burstable.slice").is_none());

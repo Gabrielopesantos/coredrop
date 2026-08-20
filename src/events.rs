@@ -101,6 +101,7 @@ pub fn send_capture_event(socket_path: Option<&str>, payload: &CaptureEventPaylo
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     fn payload() -> CaptureEventPayload {
         CaptureEventPayload {
@@ -119,24 +120,23 @@ mod tests {
 
     #[test]
     fn payload_round_trips_through_json() {
+        // The handler serializes and the daemon deserializes across a socket,
+        // so the two ends only agree if this holds - including `outcome`'s
+        // kebab-case representation.
         let p = payload();
         let json = serde_json::to_vec(&p).unwrap();
+        assert!(
+            String::from_utf8_lossy(&json).contains(r#""outcome":"uploaded""#),
+            "outcome must travel as its kebab-case name"
+        );
         let back: CaptureEventPayload = serde_json::from_slice(&json).unwrap();
         assert_eq!(back, p);
     }
 
     #[test]
     fn send_capture_event_delivers_to_a_bound_socket() {
-        let dir = std::env::temp_dir().join(format!(
-            "coredrop-events-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock_path = dir.join("events.sock");
+        let dir = TempDir::new().unwrap();
+        let sock_path = dir.path().join("events.sock");
         let listener = StdUnixDatagram::bind(&sock_path).unwrap();
         listener
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -148,19 +148,14 @@ mod tests {
         let n = listener.recv(&mut buf).unwrap();
         let got: CaptureEventPayload = serde_json::from_slice(&buf[..n]).unwrap();
         assert_eq!(got, payload());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn send_capture_event_skips_cleanly_when_socket_path_is_none() {
-        // No socket, no panic, no log-worthy failure path exercised.
+    fn send_capture_event_is_best_effort() {
+        // Events disabled: nothing to do, and no log noise on the hot path.
         send_capture_event(None, &payload());
-    }
-
-    #[test]
-    fn send_capture_event_is_best_effort_when_nothing_is_listening() {
-        // A path with no bound listener: send fails, but must not panic.
+        // Enabled but nothing listening (daemon restarting, socket removed):
+        // the send fails, and the capture must be unaffected.
         send_capture_event(Some("/run/coredrop/no-such-listener.sock"), &payload());
     }
 }

@@ -305,20 +305,21 @@ impl HandlerConfig {
 mod tests {
     use std::os::unix::fs::MetadataExt;
 
-    use super::*;
+    use tempfile::TempDir;
 
-    // Nested one level below the system temp dir so `write()`'s
-    // `ensure_private_dir` only ever chmods a dir this test owns - never the
-    // shared system temp dir itself.
-    fn tmp(tag: &str) -> String {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let mut p = std::env::temp_dir();
-        p.push(format!("coredrop-cfg-{}-{tag}-{nanos}", std::process::id()));
-        p.push("handler.json");
-        p.to_string_lossy().into_owned()
+    use super::*;
+    use crate::testutil::ENV_LOCK;
+
+    /// A config path inside a fresh temp dir. The `TempDir` is returned so the
+    /// caller keeps it alive; dropping it removes the tree even on panic.
+    fn tmp_config() -> (TempDir, String) {
+        let dir = TempDir::new().unwrap();
+        let path = dir
+            .path()
+            .join("handler.json")
+            .to_string_lossy()
+            .into_owned();
+        (dir, path)
     }
 
     #[test]
@@ -341,30 +342,21 @@ mod tests {
             rate_state_path: "/run/coredrop/recent.json".into(),
             event_socket_path: Some("/run/coredrop/events.sock".into()),
         };
-        let path = tmp("rt");
+        let (_dir, path) = tmp_config();
         cfg.write(&path).unwrap();
-        let got = HandlerConfig::read(&path).unwrap();
-        assert_eq!(got, cfg);
-        std::fs::remove_file(&path).ok();
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            std::fs::remove_dir_all(parent).ok();
-        }
+        assert_eq!(HandlerConfig::read(&path).unwrap(), cfg);
     }
 
     #[test]
     fn write_sets_0600_file_and_0700_parent_dir() {
-        let path = tmp("perm");
+        let (dir, path) = tmp_config();
         HandlerConfig::default().write(&path).unwrap();
 
         let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(file_mode, 0o600, "config file should be mode 0600");
 
-        let parent = std::path::Path::new(&path).parent().unwrap();
-        let dir_mode = std::fs::metadata(parent).unwrap().mode() & 0o777;
+        let dir_mode = std::fs::metadata(dir.path()).unwrap().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "config parent dir should be mode 0700");
-
-        std::fs::remove_file(&path).ok();
-        std::fs::remove_dir_all(parent).ok();
     }
 
     #[test]
@@ -373,23 +365,23 @@ mod tests {
         // the config file can already exist and be world-readable when the
         // daemon first writes it. `OpenOptions::mode` only applies when
         // `O_CREAT` makes a new inode, so that write must chmod explicitly.
-        let path = tmp("loose");
-        let parent = std::path::Path::new(&path).parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = TempDir::new().unwrap();
+        let run_dir = dir.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = run_dir.join("handler.json");
         std::fs::write(&path, b"{}").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        HandlerConfig::default().write(&path).unwrap();
+        HandlerConfig::default()
+            .write(&path.to_string_lossy())
+            .unwrap();
 
         let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(file_mode, 0o600, "existing config file should become 0600");
 
-        let dir_mode = std::fs::metadata(&parent).unwrap().mode() & 0o777;
+        let dir_mode = std::fs::metadata(&run_dir).unwrap().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "existing config dir should become 0700");
-
-        std::fs::remove_file(&path).ok();
-        std::fs::remove_dir_all(&parent).ok();
     }
 
     #[test]
@@ -398,17 +390,45 @@ mod tests {
     }
 
     #[test]
-    fn event_socket_path_for_derives_sibling_of_config_path() {
+    fn read_unparseable_config_returns_none() {
+        // Present but not JSON at all: the handler falls back to env rather
+        // than propagating a parse error out of a crash-time code path.
+        let (_dir, path) = tmp_config();
+        std::fs::write(&path, b"{not json!").unwrap();
+        assert!(HandlerConfig::read(&path).is_none());
+    }
+
+    #[test]
+    fn read_invalid_config_returns_none() {
+        // Parses as JSON, but `validate` rejects the relative crictl path.
+        let (_dir, path) = tmp_config();
+        let cfg = HandlerConfig {
+            crictl_path: "relative".into(),
+            ..Default::default()
+        };
+        cfg.write(&path).unwrap();
+        assert!(HandlerConfig::read(&path).is_none());
+    }
+
+    #[test]
+    fn sibling_paths_are_derived_from_the_config_path() {
         assert_eq!(
             event_socket_path_for("/run/coredrop/handler.json"),
             "/run/coredrop/events.sock"
         );
+        assert_eq!(
+            rate_state_path_for("/run/coredrop/handler.json"),
+            "/run/coredrop/recent.json"
+        );
+        // A parentless path falls back to the defaults rather than producing a
+        // relative sibling `validate` would then reject.
+        assert_eq!(event_socket_path_for(""), "/run/coredrop/events.sock");
+        assert_eq!(rate_state_path_for(""), "/run/coredrop/recent.json");
     }
 
     #[test]
     fn no_store_url_yields_no_object_store() {
-        let cfg = HandlerConfig::default();
-        assert!(cfg.object_store().is_none());
+        assert!(HandlerConfig::default().object_store().is_none());
     }
 
     #[test]
@@ -417,61 +437,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_relative_crictl_path() {
-        let cfg = HandlerConfig {
-            crictl_path: "crictl".into(),
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
+    fn validate_rejects_relative_paths() {
+        let relative = [
+            HandlerConfig {
+                crictl_path: "crictl".into(),
+                ..Default::default()
+            },
+            HandlerConfig {
+                proc_root: "proc".into(),
+                ..Default::default()
+            },
+            HandlerConfig {
+                rate_state_path: "recent.json".into(),
+                ..Default::default()
+            },
+            HandlerConfig {
+                event_socket_path: Some("events.sock".into()),
+                ..Default::default()
+            },
+        ];
+        for cfg in relative {
+            assert!(cfg.validate().is_err(), "{cfg:?} should be rejected");
+        }
     }
 
     #[test]
-    fn validate_rejects_relative_proc_root() {
-        let cfg = HandlerConfig {
-            proc_root: "proc".into(),
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_relative_rate_state_path() {
-        let cfg = HandlerConfig {
-            rate_state_path: "recent.json".into(),
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_relative_event_socket_path() {
-        let cfg = HandlerConfig {
-            event_socket_path: Some("events.sock".into()),
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_invalid_store_url() {
-        let cfg = HandlerConfig {
-            store_url: Some("not a url".into()),
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_unsupported_store_url_scheme() {
-        let cfg = HandlerConfig {
-            store_url: Some("memory://bucket".into()),
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_accepts_s3_gs_az_urls() {
+    fn validate_accepts_only_supported_store_url_schemes() {
         for url in [
             "s3://crash-artifacts",
             "gs://crash-artifacts",
@@ -483,33 +474,23 @@ mod tests {
             };
             assert!(cfg.validate().is_ok(), "{url} should be valid");
         }
-    }
-
-    #[test]
-    fn read_invalid_config_returns_none() {
-        let path = tmp("invalid");
-        let cfg = HandlerConfig {
-            crictl_path: "relative".into(),
-            ..Default::default()
-        };
-        cfg.write(&path).unwrap();
-        assert!(HandlerConfig::read(&path).is_none());
-
-        std::fs::remove_file(&path).ok();
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            std::fs::remove_dir_all(parent).ok();
+        // Not a URL at all, and a URL whose scheme we deliberately don't serve
+        // from a daemon-written config.
+        for url in ["not a url", "memory://bucket", "file:///var/tmp"] {
+            let cfg = HandlerConfig {
+                store_url: Some(url.into()),
+                ..Default::default()
+            };
+            assert!(cfg.validate().is_err(), "{url} should be rejected");
         }
     }
-
-    // `std::env::vars` is process-global; serialize the env-mutating test(s)
-    // in this module so a parallel `cargo test` run can't interleave sets.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn parse_bool_env_recognizes_true_values() {
         let _guard = ENV_LOCK.lock().unwrap();
         for value in ["1", "true", "TRUE", "TrUe", "yes", "YES", "on", "ON"] {
-            // SAFETY: serialized by ENV_LOCK; this test owns this key.
+            // SAFETY: every env-mutating test in this binary holds ENV_LOCK,
+            // so no other thread reads or writes the environment here.
             unsafe {
                 std::env::set_var("COREDROP_TEST_BOOL", value);
             }
@@ -518,17 +499,22 @@ mod tests {
                 "{value:?} should parse as true"
             );
         }
-        // SAFETY: serialized by ENV_LOCK.
+        // SAFETY: as above.
         unsafe {
             std::env::remove_var("COREDROP_TEST_BOOL");
         }
     }
 
     #[test]
-    fn parse_bool_env_recognizes_false_values() {
+    fn parse_bool_env_treats_everything_else_as_false() {
         let _guard = ENV_LOCK.lock().unwrap();
-        for value in ["0", "false", "FALSE", "FaLsE", "no", "NO", "off", "OFF", ""] {
-            // SAFETY: serialized by ENV_LOCK; this test owns this key.
+        // Explicit falses, the empty string, and unrecognized garbage all
+        // resolve to false - an unparseable value must never silently enable
+        // something like `no_redact`.
+        for value in [
+            "0", "false", "FALSE", "FaLsE", "no", "NO", "off", "OFF", "", "maybe",
+        ] {
+            // SAFETY: every env-mutating test in this binary holds ENV_LOCK.
             unsafe {
                 std::env::set_var("COREDROP_TEST_BOOL", value);
             }
@@ -537,33 +523,14 @@ mod tests {
                 "{value:?} should parse as false"
             );
         }
-        // SAFETY: serialized by ENV_LOCK.
-        unsafe {
-            std::env::remove_var("COREDROP_TEST_BOOL");
-        }
-    }
-
-    #[test]
-    fn parse_bool_env_unset_is_false() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK; this test owns this key.
+        // SAFETY: as above.
         unsafe {
             std::env::remove_var("COREDROP_TEST_BOOL_UNSET");
-        }
-        assert!(!parse_bool_env("COREDROP_TEST_BOOL_UNSET"));
-    }
-
-    #[test]
-    fn parse_bool_env_garbage_is_false_no_panic() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK; this test owns this key.
-        unsafe {
-            std::env::set_var("COREDROP_TEST_BOOL", "maybe");
-        }
-        assert!(!parse_bool_env("COREDROP_TEST_BOOL"));
-        // SAFETY: serialized by ENV_LOCK.
-        unsafe {
             std::env::remove_var("COREDROP_TEST_BOOL");
         }
+        assert!(
+            !parse_bool_env("COREDROP_TEST_BOOL_UNSET"),
+            "unset is false"
+        );
     }
 }

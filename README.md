@@ -99,17 +99,6 @@ Objects land at:
   runs a post-delete hook that removes the binary, the runtime files and the
   hostPath directories themselves.
 
-## Limitations
-
-`core_pipe_limit` caps how many crashes the kernel will hold open for the
-handler at once (coredrop sets 128). Per `man 5 core`, crashes beyond the
-cap are skipped silently: the handler is never exec'd, so there is no
-manifest, log line, or k8s Event - the only trace is
-`Pid <N> over core_pipe_limit` in the node's kernel log. The upload
-deadline (`--upload-deadline-secs`, default 300) keeps a slow store from
-pinning slots and widening that window. `desm`/`journalctl -k` can be used to
-check for dropped crashes.
-
 ## Events
 
 Node logs and bucket listing are the only crash-discovery paths otherwise
@@ -221,15 +210,6 @@ the daemon writes it mode `0600` on a `0700` directory. The daemon
 rewrites the config on startup and the Helm post-delete hook removes 
 it (along with the capture-event socket and the rate-limit state) on 
 `helm uninstall`.
-
-## TODO
-
-When a crash storm exceeds `core_pipe_limit`, the kernel skips the excess 
-dumps silently (see Limitations); the only trace is the node's kernel log.
-The daemon could tail `/dev/kmsg` for `Pid <N> over core_pipe_limit` and 
-surface each drop - as a metric once coredrop grows a metrics endpoint 
-(it has none today), and possibly as a node-scoped k8s Event. Until then
-the kernel log is the only signal.
 
 ## License
 

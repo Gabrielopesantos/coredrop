@@ -106,7 +106,7 @@ impl ProcSnapshot {
                 truncated: false,
             });
         }
-        let build_id = exe_target.as_deref().and_then(build_id_from_path);
+        let build_id = build_id_from_path(&base.join("exe"));
 
         Self {
             host_pid: pid,
@@ -305,6 +305,35 @@ mod tests {
         assert!(fd.starts_with("3 -> "), "fd listing: {fd}");
         assert!(files.contains_key("exe"));
         assert_eq!(snap.build_id.as_deref(), Some("abcdef"));
+    }
+
+    /// The build-id must be read through the `exe` symlink, not through the path
+    /// `read_link` reports.
+    ///
+    /// In production the two differ in a way no same-namespace fixture shows:
+    /// the handler runs in the HOST mount namespace while `exe` points at a
+    /// path inside the CONTAINER's (`/usr/local/bin/app`), so opening the
+    /// target by name gets ENOENT and every real capture lost its build-id.
+    /// A relative link reproduces the same shape - the target string resolves
+    /// against the reader's directory, not the symlink's - without needing
+    /// mount namespaces.
+    #[test]
+    fn reads_build_id_through_the_exe_symlink_not_its_target_path() {
+        let dir = TempDir::new().unwrap();
+        let proc_pid = dir.path().join("42");
+        std::fs::create_dir_all(&proc_pid).unwrap();
+        std::fs::write(proc_pid.join("maps"), b"x").unwrap();
+        std::fs::write(
+            proc_pid.join("the-binary"),
+            synthetic_elf_with_build_id(&[0xfe, 0xed, 0xfa]),
+        )
+        .unwrap();
+        // Relative target: resolvable from the symlink's own directory, not
+        // from the test process's cwd.
+        std::os::unix::fs::symlink("the-binary", proc_pid.join("exe")).unwrap();
+
+        let snap = ProcSnapshot::capture(dir.path(), 42, &Redactor::default());
+        assert_eq!(snap.build_id.as_deref(), Some("feedfa"));
     }
 
     #[test]

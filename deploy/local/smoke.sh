@@ -4,10 +4,10 @@
 # produces a core, and coredrop streams a valid core + redacted proc-snapshot +
 # manifest to MinIO - then uninstall restores core_pattern. coredrop has no
 # control plane, so every assertion is made directly against the bucket (mc over
-# a port-forward), not a REST API. See docs/testing.md, Layer 3.
+# a port-forward), not a REST API. See README.md.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-require kubectl helm mc zstd jq tar limactl
+require kubectl helm mc zstd jq tar sha256sum limactl
 kube_context
 
 LOCAL_PORT="${LOCAL_PORT:-19000}"
@@ -85,14 +85,21 @@ mc rm --recursive --force "$MC_ALIAS/$BUCKET" >/dev/null 2>&1 || true
 # and the DaemonSet/MinIO rollout waits above take longer than that).
 # `regarding.name` is a selectable field on events.k8s.io/v1 Events, so
 # scoping to the current pod is both correct and non-destructive.
-# Newest RUNNING pod, not `.items[0]`: up.sh restarts the deployment, and during
-# a rollout the old pod is still listed - `.items` is name-ordered, not
-# age-ordered, so `[0]` can be the terminating one, whose Events never arrive.
-crash_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods -l app=crash-segfault \
-  --field-selector status.phase=Running --sort-by=.metadata.creationTimestamp \
-  -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
-[ -n "$crash_pod" ] || die "could not resolve the crash-segfault pod in $DEMO_NAMESPACE"
-log "crash workload pod: $crash_pod"
+# Use the running pod of the active ReplicaSet (replicas > 0). During a
+# rollout the old pod is still listed, and its Events stop. creationTimestamp
+# has one-second granularity, so it cannot tell the two pods apart. Pods with a
+# deletionTimestamp are terminating, so the filter removes them.
+active_hash="$(kubectl -n "$DEMO_NAMESPACE" get rs -l app=crash-segfault -o json 2>/dev/null \
+  | jq -r '.items[] | select(.spec.replicas > 0) | .metadata.labels["pod-template-hash"]' | head -n1)"
+[ -n "$active_hash" ] || die "could not resolve the active crash-segfault ReplicaSet in $DEMO_NAMESPACE"
+crash_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods \
+  -l "app=crash-segfault,pod-template-hash=$active_hash" -o json 2>/dev/null \
+  | jq -r '.items[]
+           | select(.status.phase == "Running")
+           | select(.metadata.deletionTimestamp == null)
+           | .metadata.name' | head -n1)"
+[ -n "$crash_pod" ] || die "could not resolve a running crash-segfault pod in $DEMO_NAMESPACE"
+log "crash workload pod: $crash_pod (replicaset $active_hash)"
 
 log "polling s3://$BUCKET for a captured manifest (up to ${SMOKE_TIMEOUT}s)"
 manifest_key=""
@@ -130,6 +137,7 @@ if [ -s "$WORKDIR/manifest.json" ]; then
   m_ns="$(jq -r '.identity.namespace // empty' "$WORKDIR/manifest.json" 2>/dev/null)"
   m_pod="$(jq -r '.identity.pod_name // empty' "$WORKDIR/manifest.json" 2>/dev/null)"
   m_ctr="$(jq -r '.identity.container_name // empty' "$WORKDIR/manifest.json" 2>/dev/null)"
+  build_id="$(jq -r '.build_id // empty' "$WORKDIR/manifest.json" 2>/dev/null)"
 
   [ "$present" = "true" ] && log "  manifest core.present=true" || { warn "  manifest core.present=$present (expected true)"; fail=1; }
   [ "$signal" = "11" ]    && log "  manifest signal=11 (SIGSEGV)" || { warn "  manifest signal=$signal (expected 11)"; fail=1; }
@@ -138,12 +146,54 @@ if [ -s "$WORKDIR/manifest.json" ]; then
   else
     warn "  crictl identity incomplete (ns='$m_ns' pod='$m_pod' container='$m_ctr') - enrichment path failed"; fail=1
   fi
+  # The workload is built with -Wl,--build-id, so the handler must read a real
+  # NT_GNU_BUILD_ID from /proc/<pid>/exe.
+  if printf '%s' "$build_id" | grep -Eq '^[0-9a-f]+$'; then
+    log "  build_id read from the faulting binary: $build_id"
+  else
+    warn "  manifest build_id missing or not lowercase hex (got '$build_id')"; fail=1
+  fi
 fi
 
-# 7. core object is a valid, non-empty zstd frame
+# 7. core object: valid zstd frame, matching sha256, and a real ELF core dump
 mc cat "$MC_ALIAS/$BUCKET/$core_key" > "$WORKDIR/core.zst" 2>/dev/null || true
 if [ -s "$WORKDIR/core.zst" ] && zstd -t "$WORKDIR/core.zst" >/dev/null 2>&1; then
   log "  core.zst is a valid zstd frame ($(wc -c < "$WORKDIR/core.zst") compressed bytes)"
+
+  # The manifest sha256 is the hash of the stored object (after zstd). The
+  # handler calculates it during the upload.
+  want_sha="$(jq -r '.core.sha256 // empty' "$WORKDIR/manifest.json" 2>/dev/null)"
+  got_sha="$(sha256sum "$WORKDIR/core.zst" | awk '{print $1}')"
+  if [ -z "$want_sha" ]; then
+    warn "  manifest carries no core.sha256"; fail=1
+  elif [ "$want_sha" = "$got_sha" ]; then
+    log "  core.zst sha256 matches the manifest ($want_sha)"
+  else
+    warn "  core.zst sha256 MISMATCH: manifest=$want_sha stored=$got_sha"; fail=1
+  fi
+
+  # An empty or wrong stream also gives a valid zstd frame, so check the ELF
+  # header of the decompressed core.
+  #
+  # Write to a file, not a pipe into `head`. With `set -o pipefail` (lib.sh),
+  # an early close gives zstd SIGPIPE and the pipeline exits 141.
+  if zstd -dc "$WORKDIR/core.zst" > "$WORKDIR/core" 2>/dev/null; then
+    hdr() { dd if="$WORKDIR/core" bs=1 skip="$1" count="$2" 2>/dev/null | od -An -tx1 | tr -d ' \n'; }
+    magic="$(hdr 0 4)"    # \x7fELF
+    etype="$(hdr 16 2)"   # e_type; 0400 = ET_CORE, little-endian
+    if [ "$magic" = "7f454c46" ]; then
+      log "  decompressed core has ELF magic ($(wc -c < "$WORKDIR/core") bytes)"
+    else
+      warn "  decompressed core is not an ELF (magic=$magic)"; fail=1
+    fi
+    if [ "$etype" = "0400" ]; then
+      log "  decompressed core is ET_CORE (a real core dump, not some other ELF)"
+    else
+      warn "  decompressed core e_type=$etype (expected 0400 = ET_CORE)"; fail=1
+    fi
+  else
+    warn "  could not decompress core.zst"; fail=1
+  fi
 else
   warn "  core.zst missing, empty, or not a valid zstd frame"; fail=1
 fi

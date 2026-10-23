@@ -49,9 +49,11 @@ ENTRYPOINT ["/bin/coredrop"]
 # --- workload-builder: compile the null-deref crash binary --------------------
 FROM gcc:bookworm AS workload-builder
 COPY deploy/local/workloads/segfault.c /segfault.c
-# -O0 so the optimizer can't elide the faulting store; -static so the runtime
-# image needs no shared libc for the binary itself.
-RUN gcc -O0 -static -o /segfault /segfault.c
+# -O0 prevents the optimizer from removing the faulting store. -static makes
+# sure that the binary needs no shared libc in the runtime image.
+# --build-id gives the binary the build-id that the smoke test expects in the
+# manifest.
+RUN gcc -O0 -static -Wl,--build-id -o /segfault /segfault.c
 
 # --- segfault: the crash workload image ---------------------------------------
 # /bin/sh comes from debian-slim; the workload manifest wraps the binary in a

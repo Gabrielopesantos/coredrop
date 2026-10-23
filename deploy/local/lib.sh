@@ -7,7 +7,7 @@
 # core_pattern sysctl, and the kernel's init-namespace coredump-handler
 # invocation all line up in the SAME namespace - which is exactly what coredrop's
 # capture path needs and a container cannot fake. Images are built on the host
-# and imported straight into the VM's k3s containerd. See docs/testing.md.
+# and imported straight into the VM's k3s containerd. See README.md.
 
 set -euo pipefail
 

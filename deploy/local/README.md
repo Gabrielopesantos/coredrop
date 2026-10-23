@@ -30,8 +30,10 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
 1. The coredrop DaemonSet is ready.
 2. The node's `core_pattern` points at the handler.
 3. A manifest appears in the bucket for the segfaulting demo workload.
-4. The core object is a valid zstd stream and the proc-snapshot tar is
-   well-formed.
+4. The core object is a valid zstd stream. Its sha256 is the same as the
+   sha256 in the manifest. It decompresses to a real ELF `ET_CORE` dump. The
+   proc-snapshot tar is well-formed. The manifest contains the build-id of the
+   faulting binary.
 5. The workload's `SECRET_FOO` canary value was redacted from the captured
    `environ`, and its `--db-password` canary from the captured `cmdline`.
 6. After `helm uninstall`, the node's `core_pattern` is restored to its

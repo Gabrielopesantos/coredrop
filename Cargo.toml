@@ -34,7 +34,7 @@ serde_json = "1"
 tar = "0.4"
 
 # Core upload: stream core fd -> zstd -> sha256 -> object store, never buffering
-object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
+object_store = { version = "0.14", features = ["aws", "gcp", "azure"] }
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 sha2 = "0.11"
 url = "2"
@@ -54,7 +54,7 @@ rustix = { version = "1", features = ["fs"] }
 
 # Hand-rolled Kubernetes Event client (daemon side only): already transitive
 # via object_store, so the dep tree barely moves.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
 # Errors
 anyhow = "1"
@@ -68,7 +68,7 @@ unwrap_used = "warn"
 expect_used = "warn"
 
 [dev-dependencies]
-object_store = { version = "0.13" }
+object_store = { version = "0.14" }
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 async-trait = "0.1"
 futures-util = "0.3"

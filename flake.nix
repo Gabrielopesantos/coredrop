@@ -78,6 +78,11 @@
             inherit (pkg) version;
             src = builtins.path { path = ./.; };
             cargoLock.lockFile = ./Cargo.lock;
+            # reqwest reads the system CA bundle to build an HTTP client, and
+            # the build sandbox has none.
+            preCheck = ''
+              export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+            '';
           };
         in
         {

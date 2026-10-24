@@ -62,7 +62,7 @@ pub struct ContainerInfo {
 }
 
 /// Shell out to `crictl inspect <container_id>` and parse the result. Returns
-/// `None` on any subprocess or parse failure - callers degrade gracefully to
+/// `None` on any subprocess or parse failure - callers fall back to
 /// cgroup-only identity.
 pub async fn inspect(container_id: &str, config: &HandlerConfig) -> Option<ContainerInfo> {
     let mut cmd = tokio::process::Command::new(&config.crictl_path);

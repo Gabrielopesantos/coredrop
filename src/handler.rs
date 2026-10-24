@@ -137,7 +137,7 @@ pub async fn run(
         )
     });
 
-    // Rate limit: consult only when a core would actually upload
+    // Rate limit: consult only when a core would upload
     // (identity + store resolved).
     let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
     let mut rate_recorded = false;
@@ -174,14 +174,10 @@ pub async fn run(
         info!("no object store configured or identity unresolved; discarding core");
         Box::new(DiscardBackend)
     };
-    // The handler holds one of the node's `core_pipe_limit` slots for its
-    // whole lifetime, so the drain gets a deadline: past it the upload is
-    // abandoned. The abandoned drain follows the failure path below, so the
-    // rate-limit budget is refunded. The deadline is enforced inside
-    // `drain_core` itself (not a `tokio::time::timeout` wrapped around this
-    // call) so a backend streaming to an object store can abort its
-    // in-flight multipart upload before giving up - see the comment above
-    // `race` in upload.rs for why that has to happen inside, not out here.
+    // The handler holds a `core_pipe_limit` slot while it runs, so the drain
+    // has a deadline. On expiry the drain fails and the budget is refunded
+    // below. `drain_core` enforces the deadline itself so it can abort the
+    // multipart upload - see `race` in upload.rs.
     let deadline = (config.upload_deadline_secs != 0)
         .then(|| std::time::Duration::from_secs(config.upload_deadline_secs));
     let drained = backend.drain_core(core_in, deadline).await;
@@ -244,7 +240,7 @@ pub async fn run(
         _ => None,
     };
 
-    // Step 4: Crictl enrichment (post-drain - no longer time-critical).
+    // Step 4: Crictl enrichment (after the drain, so not time-critical).
     let container_info = if let Some(id) = &identity {
         crictl::inspect(&id.container_id, config).await
     } else {
@@ -336,7 +332,7 @@ pub async fn run(
         None
     };
 
-    // One summary line per capture, whatever the path taken - the log
+    // One summary line per capture, on every path - the log
     // interface operators alert on.
     let outcome = if identity.is_none() {
         Outcome::SkippedNonK8s

@@ -96,16 +96,16 @@ pub struct HandlerConfig {
     pub cluster: String,
     /// Pass `environ` and `cmdline` through un-redacted.
     pub no_redact: bool,
-    /// `/proc` root (overridable for tests / non-standard layouts).
+    /// `/proc` root (overridable for tests/non-standard layouts).
     pub proc_root: String,
     /// Object-store URL (e.g. `s3://crash-artifacts`); `None` disables upload.
     pub store_url: Option<String>,
-    /// `object_store` config options (the `AWS_*` / cloud keys) forwarded verbatim.
+    /// `object_store` config options (the `AWS_*`/cloud keys) forwarded verbatim.
     pub store_options: Vec<(String, String)>,
     /// Path to the `crictl` binary for post-drain container enrichment.
     pub crictl_path: String,
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
-    /// `None` lets crictl use its own default / `CONTAINER_RUNTIME_ENDPOINT`.
+    /// `None` lets crictl use its own default/`CONTAINER_RUNTIME_ENDPOINT`.
     pub cri_runtime_endpoint: Option<String>,
     /// Max uncompressed core bytes stored per crash; `0` = unlimited. The
     /// remainder is drained but not stored.
@@ -361,10 +361,8 @@ mod tests {
 
     #[test]
     fn write_tightens_an_existing_loose_file() {
-        // The hostPath starts life 0755 (kubelet, before the daemon runs), so
-        // the config file can already exist and be world-readable when the
-        // daemon first writes it. `OpenOptions::mode` only applies when
-        // `O_CREAT` makes a new inode, so that write must chmod explicitly.
+        // The file can already exist with a loose mode - see
+        // `HandlerConfig::write`.
         let dir = TempDir::new().unwrap();
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -474,7 +472,7 @@ mod tests {
             };
             assert!(cfg.validate().is_ok(), "{url} should be valid");
         }
-        // Not a URL at all, and a URL whose scheme we deliberately don't serve
+        // Not a URL at all, and a URL whose scheme we do not serve
         // from a daemon-written config.
         for url in ["not a url", "memory://bucket", "file:///var/tmp"] {
             let cfg = HandlerConfig {

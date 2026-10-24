@@ -5,11 +5,11 @@ k3s cluster inside a lima VM, an in-cluster MinIO as the object store, a
 crash-looping demo workload, and a smoke test that asserts real captures land
 in the bucket.
 
-A VM (not kind/minikube-in-docker) is deliberate: the VM kernel is a real
+The stack uses a VM, not kind or minikube in docker. The VM kernel is a real
 node boundary with kubelet running directly on it, so `hostPID`, the
 host-global `core_pattern` sysctl, and the kernel's init-namespace handler
-invocation all line up in the same namespace - which is exactly what the
-capture path needs and a container cannot fake.
+invocation all line up in the same namespace. The capture path needs this,
+and a container cannot provide it.
 
 ## Prerequisites
 
@@ -36,15 +36,21 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
    faulting binary.
 5. The workload's `SECRET_FOO` canary value was redacted from the captured
    `environ`, and its `--db-password` canary from the captured `cmdline`.
-6. After `helm uninstall`, the node's `core_pattern` is restored to its
+6. The crash-looping workload is rate-limited after its budget: a manifest
+   with `core.skipped_reason=rate_limit` and no core object.
+7. The crash pod has a `CoreDumped` Event, and a `CoreDumpSuppressed` Event
+   whose `series.count` grows.
+8. After `helm uninstall`, the node's `core_pattern` is restored to its
    pre-install value (recorded by `up.sh`).
+9. Both hostPath directories are gone from the node after the post-delete
+   hook.
 
 ## Pieces
 
 | File | Purpose |
 | --- | --- |
 | `lib.sh` | Shared config (namespaces, image tags, release/bucket names) + helpers |
-| `cluster-lima-k3s.sh` | lima VM lifecycle: `cluster_up` / `cluster_down` / `load_images` |
+| `cluster-lima-k3s.sh` | lima VM lifecycle: `cluster_up`/`cluster_down`/`load_images` |
 | `build-images.sh` | Builds the coredrop image + the segfault workload image (multi-stage `Dockerfile`) |
 | `minio/minio.yaml` | In-cluster MinIO + bucket-creation Job |
 | `helm-values/coredrop.local.yaml` | Chart overlay: local image, MinIO store, k3s CRI socket path |
@@ -58,10 +64,9 @@ DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
   upload endpoint (the node's root netns can reach a ClusterIP via
   kube-proxy's DNAT rules).
 - k3s runs its own containerd, with its CRI socket under `/run/k3s/containerd/`
-  rather than the upstream `/run/containerd/`. The chart leaves
-  `cri.runtimeEndpoint` empty by default and lets crictl self-resolve, but the
-  overlay pins it anyway so the smoke test exercises the pinned path - which is
-  also where the chart then mounts the socket from.
+  rather than `/run/containerd/`. The chart default for `cri.runtimeEndpoint`
+  is empty. The overlay sets it to the k3s socket, so the smoke test covers the
+  pinned path and the socket mount.
 - The per-pod rate-limit state (`/run/coredrop/recent.json` on the
   node) persists across daemon restarts and is only removed by the
   `helm uninstall` post-delete hook, so `up.sh` restarts the demo deployment to

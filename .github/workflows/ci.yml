@@ -1,7 +1,7 @@
 name: CI
 
-# Docs-only changes skip CI. Deliberately a denylist (paths-ignore, not paths)
-# so new code paths are checked by default.
+# Docs-only changes skip CI. It is a denylist (paths-ignore, not paths), so new
+# code paths are checked by default.
 on:
   push:
     branches: [main]

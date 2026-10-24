@@ -23,6 +23,7 @@ spec:
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
+      # Always on, not a chart value. See the chart README, "Why privileged + hostPID".
       hostPID: true
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -49,8 +49,8 @@ async fn read_manifest(store: &Arc<dyn ObjectStore>, key: &str) -> Manifest {
 }
 
 /// Happy path: core, proc-snapshot, and manifest all land in the store.
-/// Verifies the load-bearing blob-first invariant: the manifest's
-/// `core.object_key` points at an object that actually exists (no dangling
+/// Verifies the blob-first invariant: the manifest's
+/// `core.object_key` points at an object that exists (no dangling
 /// manifests).
 #[tokio::test]
 async fn run_uploads_core_snapshot_and_writes_manifest() {
@@ -554,7 +554,7 @@ async fn run_upload_deadline_aborts_stalled_drain() {
 
 /// No store: the core is drained and discarded so the kernel's pipe completes,
 /// and nothing else runs - including the rate limiter, which is only consulted
-/// when a core would actually upload.
+/// when a core would upload.
 #[tokio::test]
 async fn run_without_store_discards_silently() {
     let pid = 100;

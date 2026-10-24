@@ -13,7 +13,7 @@ use crate::core_pattern::build_pattern;
 ///
 /// # Errors
 ///
-/// Fails when `core_pattern` cannot be read, no longer points at our handler,
+/// Fails when `core_pattern` cannot be read, does not point at our handler,
 /// the handler config is missing or invalid, or the capture-event socket the
 /// config advertises is gone.
 pub fn check(handler_path: &str, config_path: &str, core_pattern_path: &str) -> Result<()> {

@@ -5,7 +5,7 @@
 //! keeps its state in a JSON file on the same hostPath as the handler config,
 //! guarded by an exclusive `flock` against concurrent handlers (crash storms).
 //!
-//! Fail-open by design: any IO or parse error yields `Allowed` - a broken
+//! Fail-open: any IO or parse error yields `Allowed` - a broken
 //! limiter must never lose a core. Only *allowed* uploads are recorded, so a
 //! crash-looping pod keeps getting its budget every window instead of
 //! being starved forever.
@@ -217,9 +217,8 @@ mod tests {
 
     #[test]
     fn check_and_record_tightens_an_existing_loose_state_file() {
-        // Same hazard as `HandlerConfig::write`: the hostPath can already hold
-        // a world-readable state file, and `OpenOptions::mode` only applies to
-        // a newly created inode.
+        // The file can already exist with a loose mode - see
+        // `HandlerConfig::write`.
         let dir = TempDir::new().unwrap();
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();

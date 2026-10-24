@@ -46,7 +46,7 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_NO_REDACT")]
     no_redact: bool,
 
-    /// `/proc` root (overridable for tests / non-standard layouts).
+    /// `/proc` root (overridable for tests/non-standard layouts).
     #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = "/proc")]
     proc_root: String,
 
@@ -83,7 +83,7 @@ struct DaemonArgs {
     #[arg(long, env = "CRICTL_TIMEOUT_SECS", default_value_t = coredrop::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
     crictl_timeout_secs: u64,
 
-    /// Disable k8s Event emission on capture (`kubectl describe pod` /
+    /// Disable k8s Event emission on capture (`kubectl describe pod`/
     /// `kubectl get events` surfacing). Events are on by default.
     #[arg(long, env = "CAPTURE_NO_EVENTS")]
     no_events: bool,
@@ -207,7 +207,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     }
 
     // Bind the capture-event socket before writing the config, so the handler
-    // only ever gets a path the daemon is actually listening on rather than one
+    // only ever gets a path the daemon is listening on rather than one
     // it would send datagrams into the void. `event_socket_path` is `Some`
     // exactly when events are enabled.
     let events_socket = match &config.event_socket_path {
@@ -262,7 +262,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     shutdown_signal().await?;
     info!("shutdown signal received");
 
-    // `_guard` drops here -> core_pattern / core_pipe_limit restored.
+    // `_guard` drops here -> core_pattern/core_pipe_limit restored.
     Ok(())
 }
 

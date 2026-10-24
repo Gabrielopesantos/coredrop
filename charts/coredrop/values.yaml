@@ -12,7 +12,7 @@ image:
   pullPolicy: IfNotPresent
 
 serviceAccount:
-  # For cloud workload identity (IRSA / GKE WI / AKS WI), annotate here and
+  # For cloud workload identity (IRSA/GKE WI/AKS WI), annotate here and
   # leave objectStore credentials empty.
   # -- Annotations on the daemon's ServiceAccount (e.g. cloud workload identity).
   annotations: {}
@@ -28,8 +28,8 @@ securityContext:
 # so it reads the hostRunDir config file the daemon wrote, not env vars.
 corePattern:
   # Node-global sysctl: max crashes concurrently held open for the handler.
-  # Beyond it the kernel skips the dump entirely (handler never exec'd) rather
-  # than queuing - see the chart README's "Why privileged + hostPID" section.
+  # Beyond it the kernel skips the dump (the handler is not exec'd); it does
+  # not queue.
   # -- `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`.
   pipeLimit: 128
   # -- Host path the handler binary is installed to (resolved in the host mount ns).
@@ -44,14 +44,10 @@ capture:
   cluster: "local"
   # -- Truncate stored cores at this many bytes (2 GiB default).
   maxCoreBytes: 2147483648
-  # Per-pod core upload rate limit; excess crashes still get a manifest,
-  # core payload is skipped.
   # -- Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only.
   maxCoresPerHour: 3
   # -- Core upload deadline in seconds; past it the upload is abandoned. 0 disables.
   uploadDeadlineSeconds: 300
-  # Timeout in seconds for `crictl inspect` in the handler;  crictl runs after the core drain,
-  # so a wedged CRI socket must not pin the handler's `core_pipe_limit` slot forever.
   # -- Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
   crictlTimeoutSeconds: 10
   # -- Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing.
@@ -84,10 +80,9 @@ capture:
 # CRI socket for crictl enrichment (post-drain identity: namespace, pod name,
 # container name, image, restart count).
 #
-# Empty by default: the handler runs in the host mount namespace, so leaving
-# this unset lets the node's own crictl resolve the endpoint from
-# /etc/crictl.yaml and its built-in fallbacks (containerd, CRI-O, cri-dockerd),
-# which is right on far more runtimes than any single hard-coded path.
+# Empty by default: the handler runs in the host mount namespace, so the
+# node's own crictl resolves the endpoint from /etc/crictl.yaml and its
+# built-in fallbacks (containerd, CRI-O, cri-dockerd).
 cri:
   # -- CRI endpoint for crictl enrichment; when set, its `unix://` path is also the socket mounted from the host. Empty lets crictl self-resolve on the node.
   runtimeEndpoint: ""
@@ -106,11 +101,10 @@ cleanup:
   image: "rancher/kubectl:v1.35.6"
 
 # k8s Event emission on capture: posts an event on the crashing pod
-# ("core dumped, artifacts at {key}") so kubectl describe pod / kubectl get
-# events surfaces it. Disabling skips the daemon's socket listener and the
-# events RBAC (ClusterRole/ClusterRoleBinding) is not rendered; the daemon
-# pod also stops getting a ServiceAccount token mounted
-# (automountServiceAccountToken: false), since it has no more use for one.
+# ("core dumped, artifacts at {key}") so kubectl describe pod/kubectl get
+# events surfaces it. Disabling skips the daemon's socket listener, the events
+# RBAC (ClusterRole/ClusterRoleBinding) and the ServiceAccount token mount
+# (automountServiceAccountToken: false).
 events:
   # -- Post a k8s Event on the crashing pod per capture; `false` also skips the events RBAC.
   enabled: true

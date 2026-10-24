@@ -84,7 +84,7 @@
           default = coredrop;
 
           # Release container image, published to ghcr.io on `app-v*` tags. Built
-          # natively per system (x86_64 / aarch64); CI stitches both into one
+          # natively per system (x86_64/aarch64); CI stitches both into one
           # multi-arch manifest. cacert covers object-store TLS. No crictl here:
           # the kernel-exec'd handler runs in the host mount ns and shells out to
           # the *node's* crictl (cri.crictlPath), not the image's.

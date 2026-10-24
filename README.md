@@ -13,7 +13,7 @@ identity via the CRI, and writes a JSON manifest next to the artifacts.
 
 coredrop is inspired by [IBM/core-dump-handler](https://github.com/IBM/core-dump-handler),
 a well-known implementation of the DaemonSet + `core_pattern` approach for Kubernetes. It differs
-in a few deliberate ways:
+in these ways:
 
 - **Streaming, no node disk** - core-dump-handler's composer writes a zip
   (core + metadata) to a hostPath directory, and a separate agent watches
@@ -23,8 +23,8 @@ in a few deliberate ways:
   watch loop, or disk quota to manage.
 - **Pre-reap `/proc` snapshot** - coredrop captures `maps`, `smaps`, `fd`,
   `environ`, `limits`, `stack`, and the executable's GNU build-id while the
-  kernel still holds the faulting process - state that no longer exists once
-  the process is reaped.
+  kernel still holds the faulting process. This state is gone after the
+  kernel reaps the process.
 - **Secret redaction by default** - captured `environ` and `cmdline` values
   are redacted via a keyword list plus an entropy/shape heuristic before they
   leave the node.
@@ -50,10 +50,11 @@ The single `coredrop` binary runs in three modes:
   on stdin. Because the kernel exec's it with a clean environment, it reads
   the daemon-written hostPath config instead of env vars.
 - **Health check** (`coredrop check`) - what the chart's readiness and liveness
-  probes exec. Exits non-zero when `core_pattern` no longer points at the
+  probes exec. Exits non-zero when `core_pattern` does not point at the
   handler, the handler config is missing or invalid, or the capture-event
   socket is gone. Startup failures already exit the daemon non-zero; this
-  catches drift afterwards, and the liveness restart reinstalls both.
+  catches drift after startup, and the liveness restart reinstalls
+  `core_pattern` and the config.
 
 Handler flow, ordered by time-criticality:
 
@@ -104,7 +105,7 @@ Objects land at:
 Node logs and bucket listing are the only crash-discovery paths otherwise
 available, but most people debugging a pod start at `kubectl`. coredrop also
 reports each capture as a Kubernetes Event on the crashing pod, so
-`kubectl describe pod` / `kubectl get events` surfaces the crash directly:
+`kubectl describe pod`/`kubectl get events` surfaces the crash directly:
 
 ```sh
 $ kubectl get events --field-selector reason=CoreDumped
@@ -126,7 +127,7 @@ creating a new object per crash. Events require crictl-enriched identity
 (namespace + pod name) - a cgroup-only identity has no pod object to target
 and is skipped.
 
-Disable with `--no-events` / `CAPTURE_NO_EVENTS`, or the chart's
+Disable with `--no-events`/`CAPTURE_NO_EVENTS`, or the chart's
 `events.enabled: false` (also skips rendering the events RBAC).
 
 ## Retrieving artifacts
@@ -136,7 +137,7 @@ predictable key, so any object-store CLI works. Given a manifest key (from a
 k8s Event's message, or listing the bucket) or its
 `{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}` prefix:
 
-**S3 / S3-compatible (MinIO, etc.)**
+**S3/S3-compatible (MinIO, etc.)**
 
 ```sh
 aws s3 cp s3://crash-artifacts/<prefix>-manifest.json - | jq .
@@ -190,7 +191,7 @@ The main ones:
 | Flag | Env | Default | Purpose |
 | --- | --- | --- | --- |
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
-| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...` / `gs://...` / `az://...`; unset = drain but store nothing |
+| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = drain but store nothing |
 | `--max-core-bytes` | `CAPTURE_MAX_CORE_BYTES` | 2 GiB | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod upload budget; 0 = unlimited |
 | `--upload-deadline-secs` | `CAPTURE_UPLOAD_DEADLINE_SECS` | 300 | Per-core upload deadline; past it the upload is abandoned to free the `core_pipe_limit` slot; 0 = no deadline |
@@ -205,11 +206,10 @@ Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
 flags - and only an allowlist of keys is forwarded to the handler
 (`src/upload.rs`, `ALLOWED_STORE_OPTS`).
 
-The handler config file contains these credentials in plaintext; 
-the daemon writes it mode `0600` on a `0700` directory. The daemon 
-rewrites the config on startup and the Helm post-delete hook removes 
-it (along with the capture-event socket and the rate-limit state) on 
-`helm uninstall`.
+The handler config file contains these credentials in plaintext. The daemon
+writes it mode `0600` in a `0700` directory and rewrites it on startup. On
+`helm uninstall`, the post-delete hook removes it, the capture-event socket and
+the rate-limit state.
 
 ## License
 

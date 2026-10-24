@@ -6,10 +6,6 @@
 //! a missing socket, a full send buffer, or an unreachable API server never
 //! affects the capture itself. The daemon-side listener and k8s Event client
 //! live in [`crate::k8s_events`].
-//!
-//! The payload also carries `outcome` and `stored_bytes` - not needed for
-//! Events, but designed in now so a future metrics exporter needs no protocol
-//! change.
 
 use std::fmt::Display;
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;

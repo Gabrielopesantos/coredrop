@@ -4,7 +4,7 @@
 //! `/proc/<pid>/environ` is NUL-separated `KEY=VALUE` entries. We redact an
 //! entry's value (never the key) when either the key matches a curated
 //! secret keyword *or* the value looks secret-shaped (high-entropy token, JWT,
-//! or PEM block). The match is deliberately not a greedy substring over
+//! or PEM block). The match is not a greedy substring over
 //! the whole entry: `API_TIMEOUT=30` must survive while `API_KEY=...` must not.
 //!
 //! Values that parse as URLs get a second pass ([`Redactor::redact_url`]):
@@ -15,7 +15,7 @@
 //! `/proc/<pid>/cmdline` is NUL-separated argv and gets the same per-entry
 //! treatment for `key=value`-shaped arguments, plus a lookahead rule: an
 //! argument shaped `--secret-keyword` redacts the argument that follows it.
-//! cmdline redaction is deliberately best-effort and biased to over-redact -
+//! cmdline redaction is best-effort and biased to over-redact -
 //! argv has no schema, so `--keyspace default` loses its value rather than
 //! risk `--key <token>` keeping one. Positional arguments are left alone.
 //!
@@ -175,7 +175,7 @@ impl Redactor {
                     format!("{user}:{REDACTED}@{host}")
                 }
                 // `token@host` - no password field, but a long high-entropy
-                // userinfo is a bearer credential in disguise.
+                // userinfo is likely a bearer credential.
                 None if looks_secret_value(userinfo) => {
                     changed = true;
                     format!("{REDACTED}@{host}")
@@ -445,7 +445,7 @@ mod tests {
         );
     }
 
-    /// Known limitation, pinned so a change to it is deliberate: `/proc`
+    /// Known limitation, pinned by this test: `/proc`
     /// guarantees no encoding, and a non-UTF-8 entry is passed through
     /// verbatim - keyword matching needs `str`. A secret in such an entry is
     /// not redacted. The NUL framing around it still survives, so one bad

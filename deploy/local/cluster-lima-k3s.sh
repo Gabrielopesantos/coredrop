@@ -4,9 +4,9 @@
 # on it), so hostPID, the host-global core_pattern, and the kernel's
 # init-namespace coredump-handler invocation all line up in the SAME namespace.
 # That is what the capture path needs, and it also avoids this host's
-# rootless-podman / no-docker-daemon constraints.
+# rootless-podman/no-docker-daemon constraints.
 #
-# Defines: cluster_up / cluster_down / kube_context / load_images.
+# Defines: cluster_up/cluster_down/kube_context/load_images.
 
 cluster_up() {
   require limactl kubectl helm docker

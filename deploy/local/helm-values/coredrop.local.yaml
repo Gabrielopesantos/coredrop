@@ -25,7 +25,7 @@ capture:
 
 # k3s runs its OWN containerd, with its CRI socket under /run/k3s rather than
 # the upstream /run/containerd. The chart defaults this to empty and lets
-# crictl self-resolve; pinned here on purpose so the smoke test covers the
+# crictl self-resolve; it is pinned here so the smoke test covers the
 # pinned path, including the hostPath socket mount the chart then renders.
 cri:
   runtimeEndpoint: "unix:///run/k3s/containerd/containerd.sock"

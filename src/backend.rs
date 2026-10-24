@@ -22,7 +22,7 @@ use tracing::warn;
 pub struct CoreStats {
     /// Uncompressed bytes drained from the kernel's core pipe.
     pub bytes: u64,
-    /// Bytes actually stored in the object store (zstd-compressed). `0` for
+    /// Bytes stored in the object store (zstd-compressed). `0` for
     /// `DiscardBackend`, which stores nothing.
     pub stored_bytes: u64,
     /// sha256 (hex) of the *stored* object - the zstd-compressed bytes.
@@ -38,12 +38,8 @@ pub struct CoreStats {
 /// Sink for the kernel's core stream. Implementations must consume `reader`
 /// to completion - the kernel blocks on the core pipe until fully drained.
 ///
-/// `deadline`, when set, bounds the entire drain: the handler holds one of
-/// the node's `core_pipe_limit` slots for as long as this call runs, so no
-/// implementation may wait on it unboundedly (see
-/// [`StandaloneBackend`](crate::upload::StandaloneBackend) for why a naive
-/// `tokio::time::timeout` around the whole call is not enough once object
-/// storage is involved).
+/// `deadline`, when set, bounds the entire drain: the handler holds a
+/// `core_pipe_limit` slot while this call runs.
 #[async_trait]
 pub trait CaptureBackend: Send + Sync {
     async fn drain_core(
@@ -64,10 +60,7 @@ impl CaptureBackend for DiscardBackend {
         reader: &mut (dyn AsyncRead + Unpin + Send),
         deadline: Option<Duration>,
     ) -> Result<CoreStats> {
-        // Nothing is stored here, so there is nothing to clean up on
-        // timeout - a plain per-read race is enough (contrast with
-        // StandaloneBackend, which owns an object-store multipart upload
-        // that needs an explicit abort).
+        // Nothing is stored, so a timeout needs no cleanup.
         let deadline_at = deadline.map(|d| Instant::now() + d);
         let mut buf = vec![0u8; 64 * 1024];
         let mut bytes = 0u64;

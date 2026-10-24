@@ -141,9 +141,9 @@ spec:
               rmdir "$bin_dir" 2>/dev/null || true
               rmdir "$run_dir" 2>/dev/null || true
 
-              # Safety net for ungraceful daemon shutdowns: if core_pattern still
-              # points at our handler, restore a sane default. The original value
-              # is unknown at this point, so we fall back to the kernel default.
+              # For a daemon killed without a clean shutdown: if core_pattern still
+              # points at our handler, reset it to the kernel default. The original
+              # value is unknown at this point.
               pattern=$(cat /proc/sys/kernel/core_pattern)
               case "$pattern" in
                 *"{{ $binDir }}/coredrop"*)

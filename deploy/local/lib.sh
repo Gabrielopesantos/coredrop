@@ -2,12 +2,9 @@
 # Shared config + helpers for the coredrop local deploy scaffold. Sourced by the
 # other scripts.
 #
-# ONE environment: single-node k3s inside a lima VM. The VM is a real kernel
-# boundary with kubelet running directly on it, so hostPID, the host-global
-# core_pattern sysctl, and the kernel's init-namespace coredump-handler
-# invocation all line up in the SAME namespace - which is exactly what coredrop's
-# capture path needs and a container cannot fake. Images are built on the host
-# and imported straight into the VM's k3s containerd. See README.md.
+# ONE environment: single-node k3s inside a lima VM (see cluster-lima-k3s.sh).
+# Images are built on the host and imported into the VM's k3s containerd. See
+# README.md.
 
 set -euo pipefail
 

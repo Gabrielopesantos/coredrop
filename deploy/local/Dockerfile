@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # Multi-stage build for the live smoke test. Build context is the REPO
-# ROOT (so Cargo.toml / src are in scope), not deploy/local:
+# ROOT (so Cargo.toml/src are in scope), not deploy/local:
 #
 #   docker build -f deploy/local/Dockerfile --target runtime  -t coredrop:dev          .
 #   docker build -f deploy/local/Dockerfile --target segfault -t coredrop-segfault:dev .
@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # NOTE: unused by the capture path - the kernel-exec'd handler runs in the host
 # mount ns and calls the NODE's crictl (k3s provides /usr/local/bin/crictl), not
 # this image's. Kept only so the runtime image is self-describing. Pinned to a
-# v1.31 client (CRI v1). TARGETARCH is populated by BuildKit (amd64 / arm64).
+# v1.31 client (CRI v1). TARGETARCH is populated by BuildKit (amd64/arm64).
 FROM debian:bookworm-slim AS crictl
 ARG CRICTL_VERSION=v1.31.1
 ARG TARGETARCH=amd64

@@ -1,5 +1,5 @@
 //! Daemon side: listener for [`crate::events::CaptureEventPayload`] datagrams
-//! plus a minimal k8s Event client, so `kubectl describe pod` /
+//! plus a minimal k8s Event client, so `kubectl describe pod`/
 //! `kubectl get events` can surface a capture.
 //!
 //! The handler sends the payload (see [`crate::events`]); this module owns
@@ -26,8 +26,7 @@ const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount
 /// default Event TTL, so this never outlives the object it's tracking.
 const AGGREGATION_TTL: Duration = Duration::from_hours(1);
 
-/// Mode for the capture-event unix socket. The parent directory is already
-/// `0700` (only owner/root can reach it);
+/// Mode for the capture-event unix socket. The parent directory is `0700`.
 const EVENT_SOCKET_MODE: u32 = 0o600;
 
 /// Bind the capture-event unix datagram socket, removing a stale file left by
@@ -96,9 +95,9 @@ const MAX_AGGREGATION_KEYS: usize = 10_000;
 /// capture events arrive. Quiet daemons must not hold stale entries forever.
 const AGGREGATION_SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 
-/// Maximum length Kubernetes accepts for a namespace or resource name. Used as a
-/// cheap sanity bound on the capture-event payload so obviously spoofed values
-/// are rejected before any API server call.
+/// Maximum length Kubernetes accepts for a namespace or resource name. The
+/// capture-event payload is checked against it, so spoofed values are rejected
+/// before any API server call.
 const MAX_K8S_NAME_LEN: usize = 253;
 
 /// Outcome of recording one capture against the aggregator.
@@ -620,11 +619,8 @@ mod tests {
         assert_eq!(recorded.event_name, "ev-2");
     }
 
-    /// Regression test: `metav1.MicroTime`'s Go decoder parses against a
-    /// fixed-width `.000000` reference layout, so a value missing the
-    /// fractional part (what plain `to_rfc3339()` produces for a
-    /// zero-nanosecond timestamp) fails to decode and the API server 400s
-    /// event creation - this exact bug shipped once already.
+    /// A whole-second timestamp must still have six fractional digits - see
+    /// `rfc3339_micro`.
     #[test]
     fn rfc3339_micro_always_has_six_fractional_digits() {
         assert_eq!(rfc3339_micro(1_749_600_000), "2025-06-11T00:00:00.000000Z");

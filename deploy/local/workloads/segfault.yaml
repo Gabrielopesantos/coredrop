@@ -9,7 +9,7 @@
 # special handling) and the dump is unambiguous. The child shares the
 # container's cgroup, so cgroup identity resolution still lands on this pod.
 #
-# `ulimit -c unlimited` is LOAD-BEARING: a 0 core soft-limit suppresses the dump
+# `ulimit -c unlimited` is required: a 0 core soft-limit suppresses the dump
 # entirely, so the kernel never invokes the pipe handler and no core is captured.
 # It is inherited by the child.
 #

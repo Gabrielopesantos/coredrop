@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end local bring-up: ensure the lima/k3s VM -> build -> load -> minio ->
-# helm install coredrop -> demo crash workload -> smoke test. See lib.sh / README.
+# helm install coredrop -> demo crash workload -> smoke test. See lib.sh/README.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 cluster_up

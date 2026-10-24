@@ -1,11 +1,11 @@
 //! GNU build-id capture: read the faulting executable's `NT_GNU_BUILD_ID` at
-//! crash time so symbols can be resolved later against a symbol store /
-//! debuginfod. Never blocks capture - any parse difficulty yields `None`.
+//! crash time so symbols can be resolved later against a symbol
+//! store/debuginfod. Never blocks capture - any parse difficulty yields `None`.
 //!
 //! We parse only what the build-id needs: the ELF header, the program headers,
 //! and the `PT_NOTE` segments. No section headers, no external ELF crate - a
-//! crashed process's `/proc/<pid>/exe` is best-effort input, so a compact,
-//! bounds-checked, dependency-free reader that fails soft is the right tool.
+//! crashed process's `/proc/<pid>/exe` is best-effort input, so the reader is
+//! small, bounds-checked, has no dependencies, and fails soft.
 
 use std::io::Read;
 use std::path::Path;

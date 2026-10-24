@@ -1,5 +1,4 @@
-//! The pre-reap `/proc/<hostpid>` snapshot - the irreplaceable, time-critical
-//! capture work.
+//! The pre-reap `/proc/<hostpid>` snapshot - the time-critical capture work.
 //!
 //! The kernel holds the faulting process while the `core_pattern` handler runs
 //! (with `core_pipe_limit` raised, see [`crate::core_pattern`]). The handler
@@ -22,7 +21,7 @@ use std::path::Path;
 use crate::buildid::build_id_from_path;
 use crate::redact::Redactor;
 
-// Cap snapshot files at 8 MBs
+// Cap each snapshot file at 8 MiB.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 // Cap the fd listing: a process with millions of open fds must not make the
@@ -308,15 +307,11 @@ mod tests {
     }
 
     /// The build-id must be read through the `exe` symlink, not through the path
-    /// `read_link` reports.
-    ///
-    /// In production the two differ in a way no same-namespace fixture shows:
-    /// the handler runs in the HOST mount namespace while `exe` points at a
-    /// path inside the CONTAINER's (`/usr/local/bin/app`), so opening the
-    /// target by name gets ENOENT and every real capture lost its build-id.
-    /// A relative link reproduces the same shape - the target string resolves
-    /// against the reader's directory, not the symlink's - without needing
-    /// mount namespaces.
+    /// `read_link` reports. The handler runs in the host mount namespace, but
+    /// the `exe` target is a path in the container (`/usr/local/bin/app`), so
+    /// opening the target by name gets ENOENT. A relative link gives the same
+    /// failure without mount namespaces: the target resolves against the
+    /// reader's directory, not the symlink's.
     #[test]
     fn reads_build_id_through_the_exe_symlink_not_its_target_path() {
         let dir = TempDir::new().unwrap();
@@ -347,7 +342,7 @@ mod tests {
 
     #[test]
     fn a_file_of_exactly_the_cap_is_not_truncated() {
-        // `read_capped` reads one byte past the cap precisely so this case is
+        // `read_capped` reads one byte past the cap so that this case is
         // distinguishable from a longer file. Without it, an exactly-cap-sized
         // file would be mislabelled as a partial prefix.
         let exact = vec![b'x'; MAX_FILE_BYTES as usize];

@@ -12,7 +12,7 @@ fi
 kube_context
 log "uninstalling Helm release '$RELEASE' (daemon restores core_pattern on shutdown; post-delete hook removes hostPath files)"
 helm uninstall "$RELEASE" -n "$NAMESPACE" --ignore-not-found \
-  || warn "helm uninstall failed (post-delete cleanup hook?); the namespace delete below still removes the workloads, but the node may keep $HOST_BIN_DIR / $HOST_RUN_DIR"
+  || warn "helm uninstall failed (post-delete cleanup hook?); the namespace delete below still removes the workloads, but the node may keep $HOST_BIN_DIR and $HOST_RUN_DIR"
 
 log "deleting demo workload + namespaces"
 kubectl delete namespace "$DEMO_NAMESPACE" --ignore-not-found >/dev/null

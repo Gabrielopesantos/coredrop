@@ -77,14 +77,10 @@ mc alias set "$MC_ALIAS" "http://127.0.0.1:$LOCAL_PORT" minioadmin minioadmin >/
 # satisfy (or break) the assertions below.
 mc rm --recursive --force "$MC_ALIAS/$BUCKET" >/dev/null 2>&1 || true
 
-# k8s Events (8c/8d below) get scoped to this run's actual crash pod:
-# unlike the bucket, a fresh CoreDumped Event isn't guaranteed to appear
-# *after* this point - it only fires on the first max-cores-per-hour
-# captures of a given container (ratelimit.rs), which can easily already be
-# spent by the time this script starts (the workload faults on a ~5s loop,
-# and the DaemonSet/MinIO rollout waits above take longer than that).
-# `regarding.name` is a selectable field on events.k8s.io/v1 Events, so
-# scoping to the current pod is both correct and non-destructive.
+# Scope the k8s Events (8c/8d below) to this run's crash pod. A CoreDumped
+# Event fires only for the first max-cores-per-hour captures of a pod, so it
+# can be older than this point. `regarding.name` is a selectable field on
+# events.k8s.io/v1 Events.
 # Use the running pod of the active ReplicaSet (replicas > 0). During a
 # rollout the old pod is still listed, and its Events stop. creationTimestamp
 # has one-second granularity, so it cannot tell the two pods apart. Pods with a
@@ -267,15 +263,10 @@ else
 fi
 
 # 8c. k8s Events emitted on the crashing pod (kubectl get events)
-# The daemon posts an events.k8s.io/v1 Event on the crash workload's own pod,
-# in its own namespace (not coredrop's) - regardless of the object store path.
-# `events.events.k8s.io` (not the bare `events` shortname, which kubectl
-# resolves to the legacy core/v1 compat schema: `involvedObject` instead of
-# `regarding`, `reportingComponent` instead of `reportingController`) so the
-# JSON below actually has the fields the daemon posted. `regarding.name`
-# scopes to $crash_pod specifically - a CoreDumped Event from earlier in this
-# same pod's life (even seconds after it started, before this script got
-# here) is exactly the evidence wanted, not something to wait past.
+# The daemon posts an events.k8s.io/v1 Event on the crash pod, in the pod's
+# own namespace. Use `events.events.k8s.io`: the bare `events` name gives the
+# core/v1 schema (`involvedObject`, `reportingComponent`), not the fields the
+# daemon posted. An Event from earlier in this pod's life also counts.
 log "checking for a CoreDumped k8s Event on $crash_pod (up to ${SMOKE_TIMEOUT}s)"
 dumped_json=""
 deadline=$(( SECONDS + SMOKE_TIMEOUT ))
@@ -362,9 +353,8 @@ fi
 
 # --- 10. the post-delete hook left nothing on the node ------------------------
 # The cleanup worker removes the handler binary, runtime config/state AND the
-# hostPath directories themselves. The directories are the part that regressed
-# before (they were mounted at their own path, so rmdir hit EBUSY), so assert
-# them directly on the node rather than trusting the hook's exit status.
+# hostPath directories themselves. A successful hook does not prove that the
+# directories are gone, so check them on the node.
 log "checking the node for leftover coredrop hostPath directories"
 for d in "$HOST_BIN_DIR" "$HOST_RUN_DIR"; do
   if node_exec test -e "$d"; then

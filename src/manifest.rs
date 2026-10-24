@@ -50,7 +50,7 @@ pub struct ManifestIdentity {
 /// Reference to the captured core object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreRef {
-    /// Whether a core was actually stored (`false` when no store is
+    /// Whether a core was stored (`false` when no store is
     /// configured).
     pub present: bool,
     pub object_key: Option<String>,

@@ -25,7 +25,7 @@ use tracing::warn;
 
 use crate::backend::{CaptureBackend, CoreStats};
 
-// Core chunks of 256 KBs
+// Read the core in 256 KiB chunks.
 const CORE_READ_CHUNK: usize = 256 * 1024;
 
 /// Build the core's object key:
@@ -127,23 +127,16 @@ impl CaptureBackend for StandaloneBackend {
     }
 }
 
-// BufWriter has no Drop impl (object_store 0.13.1).
-// MultipartUpload docs say S3/GCS "cannot perform cleanup on drop" -
-// targets configured. So racing the whole drain against a timeout
-// and letting the loser get dropped (the old approach) always leaked
-// the in-progress multipart on timeout: abort() must be called explicitly,
-// which means whatever cancels the read/write has to still own the BufWriter
-// afterward. `race()` below races individual awaits, not the whole
-// function, so `encoder`/`sink` stay in scope to call `abort_multipart` on
-// timeout instead of being dropped with it.
+// `BufWriter` does not abort its multipart upload on drop, and S3/GCS cannot
+// clean up a dropped upload. A timeout around the whole drain would leak the
+// upload. `race` puts the deadline on each await instead, so the caller still
+// owns the `BufWriter` on timeout and can call `abort_multipart`.
 //
-// Caveat: `BufWriter::poll_shutdown` consumes the multipart handle into its
-// own finish future on the first poll of `shutdown()`, so `abort()`
-// panics ("Already shut down") if shutdown has been polled even once.
-// `abort_multipart` is therefore only called from the read/write loop,
-// never after `shutdown()` is invoked - a deadline landing during that
-// final call has no safe abort path and relies on the bucket lifecycle
-// rule in the chart README's Retention section instead.
+// The first poll of `shutdown()` moves the multipart handle into the finish
+// future, and `abort()` then panics ("Already shut down"). Call
+// `abort_multipart` only from the read/write loop. A deadline during
+// `shutdown()` has no abort; the bucket lifecycle rule (chart README,
+// Retention) removes those parts.
 async fn race<T>(
     fut: impl std::future::Future<Output = T>,
     deadline_at: Option<Instant>,
@@ -154,9 +147,8 @@ async fn race<T>(
     }
 }
 
-/// Abort the in-progress multipart upload. Only safe to call before
-/// `shutdown()`/finalize has ever been polled - see the module comment
-/// above `race`.
+/// Abort the in-progress multipart upload. Call it only before the first
+/// poll of `shutdown()` - see the comment above `race`.
 async fn abort_multipart(encoder: ZstdEncoder<HashingWriter<BufWriter>>) {
     let HashingWriter {
         inner: mut sink, ..
@@ -316,9 +308,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// The `AWS_*` and GCP/Azure keys `object_store` recognizes. Forwarding only
 /// these (an allowlist) keeps an unknown env key from making `parse_url_opts`
 /// error out and needlessly disabling capture.
-// These are the exact env-var-shaped keys each cloud's workload-identity
-// webhook injects into the pod, and each is confirmed wired to a real credential
-// provider, not just stored and ignored:
+// The workload-identity keys are the env vars each cloud's webhook injects
+// into the pod, and `object_store` passes each to a credential provider:
 //
 // - IRSA (EKS): the pod-identity webhook injects `AWS_ROLE_ARN` +
 //   `AWS_WEB_IDENTITY_TOKEN_FILE` (+ `AWS_DEFAULT_REGION`).
@@ -333,7 +324,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 //   when no service-account key/path is configured - nothing to add
 //   to this allowlist for GCP WI to work.
 //
-// `AWS_STS_REGIONAL_ENDPOINTS` is deliberately absent: it is an AWS SDK setting,
+// `AWS_STS_REGIONAL_ENDPOINTS` is not in the list: it is an AWS SDK setting,
 // not an `AmazonS3ConfigKey`, so `object_store` never reads it.
 pub const ALLOWED_STORE_OPTS: &[&str] = &[
     "AWS_ACCESS_KEY_ID",
@@ -373,7 +364,7 @@ pub fn store_options_from_env() -> Vec<(String, String)> {
 /// Whether the forwarded store options point at a plaintext endpoint. Cores
 /// are secret-bearing, so an `http://` endpoint (or a blanket `AWS_ALLOW_HTTP`)
 /// puts them on the network in the clear - acceptable for an in-cluster dev
-/// store, worth a startup warning anywhere else.
+/// store. Anywhere else the daemon logs a startup warning.
 #[must_use]
 pub fn is_plaintext_endpoint(opts: &[(String, String)]) -> bool {
     let get = |key: &str| {
@@ -493,7 +484,7 @@ mod tests {
 
     /// The Helm chart hard-codes a copy of [`ALLOWED_STORE_OPTS`] so it can
     /// `fail` on a typo'd key at render time. Nothing links the two lists, so
-    /// this test is what keeps the copy honest: without it, adding a key here
+    /// this test keeps the copy in sync: without it, adding a key here
     /// makes the chart reject a legitimate value.
     #[test]
     fn helpers_store_opts_match_allowlist() {

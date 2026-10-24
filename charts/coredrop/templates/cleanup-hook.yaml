@@ -92,12 +92,11 @@ spec:
       serviceAccountName: {{ include "coredrop.fullname" . }}-cleanup
       restartPolicy: Never
       initContainers:
-        # Nothing owns the worker DaemonSet - it is applied by kubectl after the
-        # release is already gone - so if a previous uninstall's Job died before
-        # its `delete` step, that DaemonSet is still running. Reap it first:
-        # otherwise this run's `rollout status` would observe the stale
-        # generation, and a surviving privileged worker would happily wipe a
-        # freshly reinstalled handler.
+        # Nothing owns the worker DaemonSet: kubectl applies it after the release
+        # is gone. If an earlier uninstall's Job died before its `delete` step,
+        # that DaemonSet still runs. Remove it first. Otherwise `rollout status`
+        # sees the stale generation, and the privileged worker can wipe a newly
+        # installed handler.
         - name: reap-stale
           image: "{{ .Values.cleanup.image }}"
           command:

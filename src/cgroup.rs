@@ -4,7 +4,7 @@
 //! process's cgroup path carries its Kubernetes identity. This pure parse
 //! makes the object key handler-derivable before any enrichment.
 //!
-//! Two cgroup layouts appear in the wild, by the kubelet's cgroup driver:
+//! There are two cgroup layouts, one for each kubelet cgroup driver:
 //!   - cgroupfs: `.../kubepods/<qos>/pod<uid>/<containerID>`. `<uid>` keeps
 //!     its dashes; `<containerID>` is the bare hex id.
 //!   - systemd: `.../kubepods-<qos>-pod<uid>.slice/cri-containerd-<cid>.scope`.

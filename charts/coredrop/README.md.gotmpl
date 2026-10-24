@@ -114,22 +114,24 @@ contents:
 
 Replace `local/` with your `capture.cluster` value.
 
-The handler explicitly aborts an in-progress multipart upload when its
-upload deadline fires mid-stream, so most abandoned captures clean up after
-themselves. Two narrower cases can still leave an incomplete multipart
-upload behind - invisible to a normal listing but still billed: the deadline
-landing during the last finalize/complete-multipart-upload call (no longer
-abortable at that point), or the handler process dying outright. Pair the
-expiry rule with incomplete-multipart cleanup as belt-and-braces: S3's
-`AbortIncompleteMultipartUpload` (shown above), GCS's
-`AbortIncompleteMultipartUpload` lifecycle action; Azure garbage-collects
-uncommitted blocks on its own after about a week.
+The handler aborts an in-progress multipart upload when its upload deadline
+fires during the stream. Two cases can still leave an incomplete multipart
+upload. A normal listing does not show it, but it is billed:
+
+- The deadline fires during the final complete-multipart-upload call. The
+  upload cannot be aborted at that point.
+- The handler process dies.
+
+Add incomplete-multipart cleanup to the expiry rule: S3's
+`AbortIncompleteMultipartUpload` (shown above) or GCS's
+`AbortIncompleteMultipartUpload` lifecycle action. Azure deletes uncommitted
+blocks on its own after about a week.
 
 ## Rate limit
 
 `capture.maxCoresPerHour` (default 3) is a per-pod sliding-window budget. The
 daemon stores the window state in `recent.json` on the same hostPath as the
-handler config (`corePattern.hostRunDir`). The daemon deliberately keeps that
+handler config (`corePattern.hostRunDir`). The daemon keeps that
 state across its own restarts, upgrades and node drains: otherwise a
 crash-looping pod could evade its budget by forcing a daemon restart. Only
 `helm uninstall` clears it, via the post-delete cleanup hook below. A workload
@@ -186,11 +188,11 @@ a Ready pod that silently captures nothing.
 Drift after startup is caught by the readiness and liveness probes, which
 exec `coredrop check`. It verifies that `core_pattern` still routes to our
 handler, that the handler config is present and valid, and that the capture-event
-socket is still bound - the state another agent on the node (a competing coredump
-handler, a node-config daemon, a wiped `/run`) can take out from under a healthy-looking
-daemon.. The restart is the remediation - the daemon reinstalls `core_pattern` and
-rewrites the config on the way up. In-flight captures are separate kernel-exec'd
-processes and survive the restart.
+socket is still bound. Another agent on the node (a competing coredump handler, a
+node-config daemon, a wiped `/run`) can change this state while the daemon looks
+healthy. A failed probe restarts the pod, and at startup the daemon reinstalls
+`core_pattern` and rewrites the config. In-flight captures are separate
+kernel-exec'd processes and survive the restart.
 
 ## Why privileged + hostPID
 
@@ -212,16 +214,14 @@ setting. The handler is kernel-exec'd in the host mount namespace, so it shells
 out to the node's own crictl against the node's own socket - it never goes
 through a mount in this pod. Leaving the endpoint unset means crictl resolves
 it the way it already knows how: `/etc/crictl.yaml` and then its built-in
-fallbacks for containerd, CRI-O and cri-dockerd. Pinning a single path here
-can only make that resolution worse.
+fallbacks for containerd, CRI-O and cri-dockerd.
 
 Set it when you want the endpoint fixed and checked at install time. A set
 `unix://` value is passed to crictl as `CONTAINER_RUNTIME_ENDPOINT` and,
 minus the prefix, mounted read-only from the node as `hostPath: type: Socket` -
 so a wrong path makes the kubelet refuse to start the pod rather than running
-it with crictl pointed at nothing. That is a deliberate trade: it turns a
-best-effort feature into an install-blocking one, which is useful on a fleet
-with a known runtime and unhelpful on a mixed one.
+it with crictl pointed at nothing. This makes a best-effort feature block the
+install, so use it on a fleet with one known runtime, not on a mixed one.
 
 A non-`unix://` endpoint (e.g. `tcp://`) is never mounted and cannot be checked
 that way; the daemon logs a warning at startup when a configured socket does
@@ -240,10 +240,10 @@ applies a short-lived privileged DaemonSet, waits for it to roll out on every
 node, then deletes it. On each node that worker removes the handler binary,
 `handler.json`, `events.sock` and `recent.json`, then the
 `corePattern.hostBinDir` and `corePattern.hostRunDir` directories themselves.
-As a safety net for an ungracefully killed daemon, it also resets
+If the daemon was killed without a clean shutdown, it also resets
 `core_pattern` to the kernel default `core` if it still points at the handler.
 
-Two details worth knowing:
+Two details:
 
 - The worker mounts the **parent** of each configured directory, not the
   directory itself. A hostPath mounted at its own path is a mount point inside

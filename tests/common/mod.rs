@@ -114,6 +114,20 @@ pub async fn get_object(store: &Arc<dyn ObjectStore>, key: &str) -> Vec<u8> {
         .to_vec()
 }
 
+/// Read one named file from a rendered proc-snapshot tar.
+pub fn tar_entry(tar_bytes: &[u8], name: &str) -> Option<Vec<u8>> {
+    let mut archive = tar::Archive::new(tar_bytes);
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        if entry.path().unwrap().to_string_lossy() == name {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+            return Some(bytes);
+        }
+    }
+    None
+}
+
 /// Whether `key` is absent from the store.
 pub async fn is_absent(store: &Arc<dyn ObjectStore>, key: &str) -> bool {
     store.get(&ObjectPath::from(key)).await.is_err()

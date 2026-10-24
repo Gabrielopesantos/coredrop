@@ -19,7 +19,7 @@ use coredrop::upload;
 mod common;
 use common::{
     FailingStore, StallReader, base_config, fake_crictl_script, get_object, is_absent, proc_root,
-    unzstd, write_fake_crictl, write_fixture_proc,
+    tar_entry, unzstd, write_fake_crictl, write_fixture_proc,
 };
 
 const POD_UID: &str = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
@@ -200,6 +200,135 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
         "the event must point at the manifest that was actually written"
     );
     assert_eq!(event.stored_bytes, manifest.core.stored_bytes);
+}
+
+/// The `outcome` value selects the reason of the k8s Event, so each outcome
+/// must arrive on the events socket with the correct value. This test covers
+/// rate-limit suppression and discard when there is no store.
+#[tokio::test]
+async fn run_reports_non_upload_outcomes_on_the_events_socket() {
+    let _guard = common::SPAWN_LOCK.lock().await;
+    let pid = 4248;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let crictl = write_fake_crictl(
+        tmp.path(),
+        &fake_crictl_script("production", "nginx-abc123", "mycontainer"),
+    );
+
+    let sock_path = tmp.path().join("events.sock");
+    let listener = std::os::unix::net::UnixDatagram::bind(&sock_path).unwrap();
+    listener
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(tmp.path());
+    config.crictl_path = crictl.to_string_lossy().into_owned();
+    config.crictl_timeout_secs = 10;
+    config.event_socket_path = Some(sock_path.to_string_lossy().into_owned());
+    config.max_cores_per_hour = 1;
+
+    // The budget is 1. The first crash uploads. The handler suppresses the
+    // second crash.
+    for ts in [TS, TS + 10] {
+        let mut core_in: &[u8] = b"core payload for the outcome test";
+        run(
+            capture_args(pid, 11, ts),
+            &config,
+            &mut core_in,
+            Some(store.clone()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("run at {ts} failed: {e}"));
+    }
+
+    // There is no store override, and `base_config` does not set `store_url`.
+    // Thus the handler drains the core and discards it. This path does not use
+    // the limiter, so the empty budget from above does not change the outcome.
+    let mut core_in: &[u8] = b"core payload with nowhere to go";
+    run(capture_args(pid, 11, TS + 20), &config, &mut core_in, None)
+        .await
+        .unwrap();
+
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut outcomes = Vec::new();
+    for _ in 0..3 {
+        let n = listener
+            .recv(&mut buf)
+            .expect("each capture must report on the events socket");
+        let event: CaptureEventPayload = serde_json::from_slice(&buf[..n]).unwrap();
+        outcomes.push(event.outcome);
+    }
+    assert_eq!(
+        outcomes,
+        vec![
+            Outcome::Uploaded,
+            Outcome::SuppressedRateLimit,
+            Outcome::NoStoreDiscard,
+        ]
+    );
+}
+
+/// The fixture adds `SECRET_KEY=hunter2`. The uploaded proc-snapshot tar must
+/// not contain it, unless `no_redact` is set.
+#[tokio::test]
+async fn run_redacts_snapshot_environ_unless_no_redact_is_set() {
+    let (redacting_pid, raw_pid) = (4252, 4253);
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), redacting_pid, POD_UID, CONTAINER_ID);
+    write_fixture_proc(tmp.path(), raw_pid, POD_UID, CONTAINER_ID);
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut config = base_config(tmp.path());
+
+    // The default config redacts.
+    let mut core_in: &[u8] = b"core payload for the redaction test";
+    run(
+        capture_args(redacting_pid, 11, TS),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+
+    let (_, snap_key, _) = keys(CONTAINER_ID, TS, redacting_pid);
+    let environ = tar_entry(&get_object(&store, &snap_key).await, "environ")
+        .expect("environ in the proc-snapshot tar");
+    let environ = String::from_utf8_lossy(&environ);
+    assert!(
+        environ.contains("SECRET_KEY=<redacted>"),
+        "environ: {environ:?}"
+    );
+    assert!(!environ.contains("hunter2"), "environ: {environ:?}");
+    assert!(
+        environ.contains("LANG=en_US.UTF-8"),
+        "innocuous vars survive: {environ:?}"
+    );
+
+    // `--no-redact` keeps the raw blob.
+    config.no_redact = true;
+    let mut core_in: &[u8] = b"core payload for the no-redact test";
+    run(
+        capture_args(raw_pid, 11, TS),
+        &config,
+        &mut core_in,
+        Some(store.clone()),
+    )
+    .await
+    .unwrap();
+
+    let (_, snap_key, _) = keys(CONTAINER_ID, TS, raw_pid);
+    let environ = tar_entry(&get_object(&store, &snap_key).await, "environ")
+        .expect("environ in the proc-snapshot tar");
+    let environ = String::from_utf8_lossy(&environ);
+    assert!(
+        environ.contains("SECRET_KEY=hunter2"),
+        "no_redact must pass the raw value through: {environ:?}"
+    );
 }
 
 /// Size cap: only the first `max_core_bytes` land in the store; the manifest

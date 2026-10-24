@@ -26,6 +26,33 @@ pub(crate) mod testutil {
     /// would serialize only against itself, which is no guarantee at all.
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// A core stream that gives `chunk` one time and then fails the next read.
+    /// It simulates a kernel pipe that fails during a dump. Use it to test the
+    /// stream-error paths of the two backends.
+    pub(crate) struct FlakyReader {
+        pub(crate) chunk: Vec<u8>,
+        pub(crate) sent: bool,
+    }
+
+    impl tokio::io::AsyncRead for FlakyReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.sent {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "boom",
+                )));
+            }
+            self.sent = true;
+            let n = self.chunk.len().min(buf.remaining());
+            buf.put_slice(&self.chunk[..n]);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     /// A core stream that never yields data nor EOF - stands in for a hung
     /// kernel pipe or a wedged store, so deadline handling can be exercised.
     pub(crate) struct StallReader;

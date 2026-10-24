@@ -110,7 +110,7 @@ impl CaptureBackend for DiscardBackend {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::testutil::StallReader;
+    use crate::testutil::{FlakyReader, StallReader};
 
     #[tokio::test]
     async fn discard_counts_every_byte() {
@@ -132,6 +132,23 @@ mod tests {
         assert_eq!(stats.bytes, 0);
         assert_eq!(stats.stored_bytes, 0);
         assert!(!stats.truncated);
+    }
+
+    #[tokio::test]
+    async fn discard_marks_truncated_on_a_read_error() {
+        // A read error does not stop the drain. The drain counts the bytes that
+        // arrived and reports that the stream ended early.
+        let mut reader = FlakyReader {
+            chunk: vec![0x5Au8; 50_000],
+            sent: false,
+        };
+        let stats = DiscardBackend.drain_core(&mut reader, None).await.unwrap();
+
+        assert_eq!(stats.bytes, 50_000, "bytes drained before the error");
+        assert!(stats.truncated);
+        assert_eq!(stats.truncated_reason.as_deref(), Some("stream_error"));
+        assert_eq!(stats.stored_bytes, 0);
+        assert_eq!(stats.sha256, None);
     }
 
     #[tokio::test(start_paused = true)]

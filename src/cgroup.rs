@@ -144,6 +144,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_docker_and_crio_container_id_prefixes() {
+        // `extract_container_id` also removes these runtime prefixes. Each
+        // prefix must give the same bare hex id.
+        for prefix in ["docker-", "crio-"] {
+            let path = format!(
+                "/kubepods.slice/kubepods-besteffort-podaaaa1111_bbbb.slice/\
+                 {prefix}abcdef0123456789abcdef.scope"
+            );
+            let id = parse_cgroup_path(&path).unwrap();
+            assert_eq!(id.pod_uid, "aaaa1111-bbbb", "{prefix}");
+            assert_eq!(id.container_id, "abcdef0123456789abcdef", "{prefix}");
+        }
+    }
+
+    #[test]
     fn non_kubernetes_cgroup_is_none() {
         assert!(parse_cgroup("0::/system.slice/sshd.service\n").is_none());
         assert!(parse_cgroup("0::/kubepods.slice\n").is_none());

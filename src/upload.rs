@@ -485,7 +485,7 @@ pub fn object_store_from_url_opts(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::testutil::{ENV_LOCK, StallReader};
+    use crate::testutil::{ENV_LOCK, FlakyReader, StallReader};
     use async_compression::tokio::bufread::ZstdDecoder;
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
@@ -677,27 +677,6 @@ mod tests {
             store.get(&ObjectPath::from(key.as_str())).await.is_err(),
             "an abandoned drain must not leave a completed object"
         );
-    }
-
-    struct FlakyReader {
-        chunk: Vec<u8>,
-        sent: bool,
-    }
-
-    impl AsyncRead for FlakyReader {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            _cx: &mut TaskContext<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            if self.sent {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "boom")));
-            }
-            self.sent = true;
-            let n = self.chunk.len().min(buf.remaining());
-            buf.put_slice(&self.chunk[..n]);
-            Poll::Ready(Ok(()))
-        }
     }
 
     #[tokio::test]

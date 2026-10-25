@@ -95,10 +95,33 @@ const MAX_AGGREGATION_KEYS: usize = 10_000;
 /// capture events arrive. Quiet daemons must not hold stale entries forever.
 const AGGREGATION_SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 
-/// Maximum length Kubernetes accepts for a namespace or resource name. The
-/// capture-event payload is checked against it, so spoofed values are rejected
-/// before any API server call.
+/// Maximum length of a pod UID in a capture-event payload. Kubernetes UIDs are
+/// 36-character UUIDs; this bound only rejects absurd values.
 const MAX_K8S_NAME_LEN: usize = 253;
+
+/// Maximum length of a namespace, which Kubernetes requires to be a DNS-1123
+/// label.
+const MAX_NAMESPACE_LEN: usize = 63;
+
+/// Whether `s` is a DNS-1123 label, the form Kubernetes requires for a
+/// namespace: lowercase alphanumerics and `-`, alphanumeric at both ends.
+fn is_dns1123_label(s: &str) -> bool {
+    let alnum = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let bytes = s.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_NAMESPACE_LEN
+        && bytes.iter().all(|&c| alnum(c) || c == b'-')
+        && alnum(bytes[0])
+        && alnum(bytes[bytes.len() - 1])
+}
+
+/// Whether `s` has the characters of a pod UID: lowercase hex digits and `-`.
+fn is_pod_uid(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_K8S_NAME_LEN
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || c == b'-')
+}
 
 /// Outcome of recording one capture against the aggregator.
 struct Recorded {
@@ -326,15 +349,13 @@ async fn handle_payload(
         return;
     };
 
-    if payload.namespace.is_empty()
-        || payload.namespace.len() > MAX_K8S_NAME_LEN
-        || payload.pod_uid.is_empty()
-        || payload.pod_uid.len() > MAX_K8S_NAME_LEN
-    {
+    // Both values go into request URLs unencoded, so check their characters,
+    // not only their length.
+    if !is_dns1123_label(&payload.namespace) || !is_pod_uid(&payload.pod_uid) {
         warn!(
             namespace = %payload.namespace,
             pod_uid = %payload.pod_uid,
-            "capture event payload has empty or oversized namespace/pod_uid; dropping"
+            "capture event payload has an invalid namespace/pod_uid; dropping"
         );
         return;
     }
@@ -726,13 +747,27 @@ mod tests {
         let client = EventClient::new_for_test(http, "http://127.0.0.1:1".into(), "test".into());
 
         let mut agg = Aggregator::default();
-        let long = "x".repeat(MAX_K8S_NAME_LEN + 1);
+        let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        let long_namespace = "x".repeat(MAX_NAMESPACE_LEN + 1);
+        let long_uid = "a".repeat(MAX_K8S_NAME_LEN + 1);
 
         for (namespace, pod_uid, label) in [
-            ("", "valid-uid", "empty namespace"),
-            (long.as_str(), "valid-uid", "oversized namespace"),
+            ("", uid, "empty namespace"),
+            (long_namespace.as_str(), uid, "oversized namespace"),
+            ("kube/system", uid, "namespace with /"),
+            ("default?x=1", uid, "namespace with ?"),
+            ("default%2F", uid, "namespace with %"),
+            ("..", uid, "namespace .."),
+            ("Default", uid, "uppercase namespace"),
+            ("-default", uid, "namespace with leading -"),
+            ("default-", uid, "namespace with trailing -"),
             ("default", "", "empty pod uid"),
-            ("default", long.as_str(), "oversized pod uid"),
+            ("default", long_uid.as_str(), "oversized pod uid"),
+            ("default", "0f1e/../2d3c", "pod uid with /"),
+            ("default", "0f1e?x=1", "pod uid with ?"),
+            ("default", "0f1e%2F", "pod uid with %"),
+            ("default", "..", "pod uid .."),
+            ("default", "0F1E2D3C", "uppercase pod uid"),
         ] {
             handle_payload(
                 Some(&client),
@@ -750,7 +785,7 @@ mod tests {
             Some(&client),
             &mut agg,
             "test-node",
-            &payload("default", "valid-uid"),
+            &payload("default", uid),
         )
         .await;
         assert_eq!(agg.entries.len(), 1);

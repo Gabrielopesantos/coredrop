@@ -141,11 +141,13 @@ async fn main() -> Result<()> {
     // carries kernel-supplied positionals (`%P %s %t %E`), not user config, so
     // it is parsed by hand - not clap - and both subcommands are dispatched
     // before the daemon's flag parsing.
-    let mut argv = std::env::args();
+    // `args_os`, not `args`: `args` panics on a non-UTF-8 argument, and `%E`
+    // is a file name the crashing workload controls.
+    let mut argv = std::env::args_os();
     let _bin = argv.next();
-    match argv.next().as_deref() {
+    match argv.next().as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("capture") => {
-            let rest: Vec<String> = argv.collect();
+            let rest: Vec<std::ffi::OsString> = argv.collect();
             let capture_args = CaptureArgs::parse(&rest)?;
             // The kernel exec's with a clean environment, so read the daemon-written
             // hostPath config, not env. Absent (local/test runs) -> env.

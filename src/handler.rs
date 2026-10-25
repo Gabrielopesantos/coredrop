@@ -16,6 +16,7 @@
 //!    k8s Event on the crashing pod. Best-effort; requires crictl-enriched
 //!    identity (namespace + pod name).
 
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -54,7 +55,11 @@ impl CaptureArgs {
     ///
     /// Fails when the argument count is not 4 or when pid/signal/timestamp
     /// are not parseable integers.
-    pub fn parse(args: &[String]) -> Result<Self> {
+    ///
+    /// Takes `OsString`s because `%E` is a file name the crashing workload
+    /// chooses: it need not be UTF-8, and a panic here would lose the core.
+    /// `exe` is converted lossily; only the numeric fields must be exact.
+    pub fn parse(args: &[OsString]) -> Result<Self> {
         let [pid, sig, ts, exe] = args else {
             bail!(
                 "capture expects 4 args (%P %s %t %E), got {}: {args:?}",
@@ -62,16 +67,18 @@ impl CaptureArgs {
             );
         };
         Ok(Self {
-            host_pid: pid
-                .parse()
-                .with_context(|| format!("bad host pid {pid:?}"))?,
-            signal: sig.parse().with_context(|| format!("bad signal {sig:?}"))?,
-            timestamp: ts
-                .parse()
-                .with_context(|| format!("bad timestamp {ts:?}"))?,
-            exe: exe.clone(),
+            host_pid: parse_number(pid)
+                .with_context(|| format!("bad host pid {}", pid.display()))?,
+            signal: parse_number(sig).with_context(|| format!("bad signal {}", sig.display()))?,
+            timestamp: parse_number(ts)
+                .with_context(|| format!("bad timestamp {}", ts.display()))?,
+            exe: exe.to_string_lossy().into_owned(),
         })
     }
+}
+
+fn parse_number<T: std::str::FromStr>(arg: &OsStr) -> Option<T> {
+    arg.to_str()?.parse().ok()
 }
 
 /// Run the handler: snapshot /proc, drain core, enrich via crictl, write manifest.
@@ -436,8 +443,27 @@ fn signal_name(sig: i32) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    fn args(v: &[&str]) -> Vec<String> {
-        v.iter().map(std::string::ToString::to_string).collect()
+    fn args(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn accepts_a_non_utf8_exe() {
+        use std::os::unix::ffi::OsStringExt;
+        let exe = OsString::from_vec(b"!usr!bin!app\xff\xfe".to_vec());
+        let mut argv = args(&["4242", "11", "1749600000"]);
+        argv.push(exe);
+        let parsed = CaptureArgs::parse(&argv).unwrap();
+        assert_eq!(parsed.exe, "!usr!bin!app\u{fffd}\u{fffd}");
+        assert_eq!(parsed.host_pid, 4242);
+    }
+
+    #[test]
+    fn rejects_a_non_utf8_number() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut argv = vec![OsString::from_vec(b"42\xff".to_vec())];
+        argv.extend(args(&["11", "0", "exe"]));
+        assert!(CaptureArgs::parse(&argv).is_err());
     }
 
     #[test]

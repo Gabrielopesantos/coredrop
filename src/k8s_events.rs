@@ -185,6 +185,26 @@ impl Aggregator {
     }
 }
 
+/// HTTP client for the API server that trusts every certificate in `ca_pem`
+/// and nothing else. The API server certificate is signed by the cluster CA,
+/// so trusting the system bundle too would let any public CA impersonate it
+/// and receive the `ServiceAccount` token. `ca.crt` holds two CAs during a
+/// cluster CA rotation, so every certificate in it is read. `None` when
+/// `ca_pem` holds no certificate.
+fn build_http(ca_pem: &[u8]) -> Option<reqwest::Client> {
+    let certs = reqwest::Certificate::from_pem_bundle(ca_pem).ok()?;
+    if certs.is_empty() {
+        return None;
+    }
+    reqwest::Client::builder()
+        // The API server must never wedge the capture-event loop on an
+        // in-flight request; all event posts are best-effort.
+        .timeout(Duration::from_secs(30))
+        .tls_certs_only(certs)
+        .build()
+        .ok()
+}
+
 /// Minimal `events.k8s.io/v1` client: create on first occurrence, `PATCH`
 /// `series` on repeats. Hand-rolled with `reqwest` rather than `kube-rs` - one
 /// endpoint doesn't justify the dependency tree.
@@ -204,7 +224,12 @@ impl EventClient {
             .trim()
             .to_string();
         let ca_pem = std::fs::read(format!("{SERVICE_ACCOUNT_DIR}/ca.crt")).ok()?;
-        let cert = reqwest::Certificate::from_pem(&ca_pem).ok()?;
+        let Some(http) = build_http(&ca_pem) else {
+            warn!(
+                "no usable certificate in {SERVICE_ACCOUNT_DIR}/ca.crt; cannot reach the API server"
+            );
+            return None;
+        };
         let host = std::env::var("KUBERNETES_SERVICE_HOST").ok()?;
         let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
         let host = if host.contains(':') && !host.starts_with('[') {
@@ -212,13 +237,6 @@ impl EventClient {
         } else {
             host
         };
-        let http = reqwest::Client::builder()
-            // The API server must never wedge the capture-event loop on an
-            // in-flight request; all event posts are best-effort.
-            .timeout(Duration::from_secs(30))
-            .add_root_certificate(cert)
-            .build()
-            .ok()?;
         Some(Self {
             http,
             api_server: format!("https://{host}:{port}"),
@@ -789,5 +807,48 @@ mod tests {
         )
         .await;
         assert_eq!(agg.entries.len(), 1);
+    }
+
+    /// Self-signed P-256 test CAs (`CN=test-ca-1`, `CN=test-ca-2`).
+    const TEST_CA_1: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBfzCCASWgAwIBAgIUJbJWkLJJqhX+NszCpokTPUg+DE0wCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJdGVzdC1jYS0xMCAXDTI2MTAyNTE2MTc1NloYDzIxMjYxMDAx
+MTYxNzU2WjAUMRIwEAYDVQQDDAl0ZXN0LWNhLTEwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAT3smZYjInK1qwoqXGKMQX5RywlkqeTC5fRpgDVwRFxhpKJd3WNE8vQ
+mgrVZUTi7xyZItEi0U2QXPp9IuLiQInJo1MwUTAdBgNVHQ4EFgQUwASJEzdMF4QZ
+bjQVQ8bwWlVBtSkwHwYDVR0jBBgwFoAUwASJEzdMF4QZbjQVQ8bwWlVBtSkwDwYD
+VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiAaAPKpfQx65kd2zpdXYDQM
+WCb01nHlU5vOrJ0xdzMbTwIhAIoUy34vYSThgzJ2z6dLPdY6IT8+MjkzoEJH1lS9
+S4WP
+-----END CERTIFICATE-----
+";
+    const TEST_CA_2: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBfzCCASWgAwIBAgIUMx1Z0GqBi7U/bcDVQX0KYFApxtUwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJdGVzdC1jYS0yMCAXDTI2MTAyNTE2MTc1NloYDzIxMjYxMDAx
+MTYxNzU2WjAUMRIwEAYDVQQDDAl0ZXN0LWNhLTIwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAT3mLiKb/NOxIbvlJH9J5wygOjhoxh2Ha34vqcCVUsdozyzzsNEC7sJ
+lmeJR4hyKlZ4RO35MQhwrl3+Ay6x+Jy9o1MwUTAdBgNVHQ4EFgQUu5B3Fe20Rm8X
+qoPmEMZWfA8pxUswHwYDVR0jBBgwFoAUu5B3Fe20Rm8XqoPmEMZWfA8pxUswDwYD
+VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEAxvgpt/B7x2CHfvJgQxsz
+Qk3ftY8cokYo8zDjg7phpOkCICYrIQ0gyWa4NboPK2ncWw/n6IqzPVKisAzgbK5v
+Kf3s
+-----END CERTIFICATE-----
+";
+
+    #[test]
+    fn build_http_trusts_every_cert_in_the_bundle() {
+        // `ca.crt` during a cluster CA rotation: old and new CA back to back.
+        let bundle = format!("{TEST_CA_1}{TEST_CA_2}");
+        let certs = reqwest::Certificate::from_pem_bundle(bundle.as_bytes()).unwrap();
+        assert_eq!(certs.len(), 2, "both CAs in ca.crt must be parsed");
+        assert!(build_http(bundle.as_bytes()).is_some());
+    }
+
+    #[test]
+    fn build_http_rejects_a_bundle_without_certs() {
+        assert!(build_http(b"").is_none());
+        assert!(build_http(b"not a pem").is_none());
     }
 }

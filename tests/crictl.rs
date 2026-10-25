@@ -106,7 +106,16 @@ async fn inspect_times_out_and_returns_none() {
     let _guard = SPAWN_LOCK.lock().await;
     let tmp = TempDir::new().unwrap();
     // Sleep longer than the 1s timeout configured in `config_with_crictl`.
-    let script = write_fake_crictl(tmp.path(), "#!/bin/sh\nsleep 5\nprintf '%s' '{}'\n");
+    // `exec` keeps the recorded PID on the sleeping process itself: killing a
+    // shell that forked `sleep` would leave the `sleep` running.
+    let pid_file = tmp.path().join("pid");
+    let script = write_fake_crictl(
+        tmp.path(),
+        &format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 5\n",
+            pid_file.display()
+        ),
+    );
 
     let config = config_with_crictl(script.to_str().unwrap());
     let start = std::time::Instant::now();
@@ -118,4 +127,26 @@ async fn inspect_times_out_and_returns_none() {
         elapsed < Duration::from_secs(3),
         "timed-out crictl should return quickly, got {elapsed:?}"
     );
+
+    // The timed-out subprocess must be killed, not orphaned. The kill is
+    // asynchronous and a killed child stays a zombie until reaped, so poll
+    // for the process to be gone or in state `Z`.
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    let stat_path = format!("/proc/{}/stat", pid.trim());
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let alive = std::fs::read_to_string(&stat_path).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+        });
+        if !alive {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed-out crictl (pid {}) is still running",
+            pid.trim()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

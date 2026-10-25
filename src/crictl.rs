@@ -69,6 +69,9 @@ pub async fn inspect(container_id: &str, config: &HandlerConfig) -> Option<Conta
     cmd.arg("inspect").arg(container_id);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
+    // A timeout drops the `output()` future; without this the child keeps
+    // running on the node after the handler exits.
+    cmd.kill_on_drop(true);
 
     if let Some(endpoint) = &config.cri_runtime_endpoint {
         cmd.env("CONTAINER_RUNTIME_ENDPOINT", endpoint);

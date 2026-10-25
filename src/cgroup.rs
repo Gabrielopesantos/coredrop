@@ -13,6 +13,11 @@
 //!
 //! cgroup v2 is a single `0::<path>` line; v1 has many `n:subsys:<path>`
 //! lines. We scan every line's path tail and take the first that yields both ids.
+//!
+//! The container id is the segment directly below the pod segment, not the
+//! last one. A container can have its own cgroups below that (systemd in a
+//! container makes `init.scope`), and a container with a writable cgroupfs
+//! can name them as it likes, so the last segment can be missing or a lie.
 
 /// Pod + container identity recovered from a process's cgroup path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,25 +40,28 @@ pub fn parse_cgroup(content: &str) -> Option<CgroupIdentity> {
 /// Pull `(podUID, containerID)` out of one cgroup path.
 #[must_use]
 pub fn parse_cgroup_path(path: &str) -> Option<CgroupIdentity> {
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let pod_uid = segments.iter().find_map(|s| extract_pod_uid(s))?;
-    let container_id = segments.last().and_then(|s| extract_container_id(s))?;
+    let mut segments = path.split('/').filter(|s| !s.is_empty());
+    let pod_uid = segments.by_ref().find_map(extract_pod_uid)?;
+    let container_id = extract_container_id(segments.next()?)?;
     Some(CgroupIdentity {
         pod_uid,
         container_id,
     })
 }
 
-/// Pull the podUID from a pod-level cgroup slice path - the directory whose
-/// final segment names a pod but not a container.
+/// Whether `s` has the characters of a pod UID: lowercase hex digits and `-`.
+/// The UID goes into object keys and API request URLs.
 #[must_use]
-pub fn parse_pod_slice_path(path: &str) -> Option<String> {
-    let last = path.split('/').rfind(|s| !s.is_empty())?;
-    if extract_container_id(last).is_some() {
-        return None;
-    }
-    extract_pod_uid(last)
+pub fn is_pod_uid(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_POD_UID_LEN
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || c == b'-')
 }
+
+/// Upper bound on a pod UID. Kubernetes UIDs are 36-character UUIDs; this
+/// bound only rejects absurd values.
+pub const MAX_POD_UID_LEN: usize = 253;
 
 fn extract_pod_uid(seg: &str) -> Option<String> {
     let s = seg.strip_suffix(".slice").unwrap_or(seg);
@@ -63,10 +71,8 @@ fn extract_pod_uid(seg: &str) -> Option<String> {
         let idx = s.find("-pod")?;
         &s[idx + "-pod".len()..]
     };
-    if uid.is_empty() {
-        return None;
-    }
-    Some(uid.replace('_', "-"))
+    let uid = uid.replace('_', "-");
+    is_pod_uid(&uid).then_some(uid)
 }
 
 fn extract_container_id(seg: &str) -> Option<String> {
@@ -124,26 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_pod_slice_path_recognizes_pod_level_not_scope_or_qos() {
-        let sd = "/kubepods.slice/kubepods-burstable.slice/\
-             kubepods-burstable-poded1e9c81_9a92_4f7e_be2c_8b26b56d3b98.slice";
-        assert_eq!(
-            parse_pod_slice_path(sd).as_deref(),
-            Some("ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98")
-        );
-        let cf = "/kubepods/burstable/poded1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
-        assert_eq!(
-            parse_pod_slice_path(cf).as_deref(),
-            Some("ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98")
-        );
-        let scope = "/kubepods.slice/kubepods-burstable-poded1e9c81_9a92.slice/\
-             cri-containerd-3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c.scope";
-        assert!(parse_pod_slice_path(scope).is_none());
-        assert!(parse_pod_slice_path("/kubepods.slice/kubepods-burstable.slice").is_none());
-        assert!(parse_pod_slice_path("/system.slice/sshd.service").is_none());
-    }
-
-    #[test]
     fn parses_docker_and_crio_container_id_prefixes() {
         // `extract_container_id` also removes these runtime prefixes. Each
         // prefix must give the same bare hex id.
@@ -162,5 +148,49 @@ mod tests {
     fn non_kubernetes_cgroup_is_none() {
         assert!(parse_cgroup("0::/system.slice/sshd.service\n").is_none());
         assert!(parse_cgroup("0::/kubepods.slice\n").is_none());
+    }
+
+    const POD: &str = "poded1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+    const CID: &str = "3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c";
+
+    #[test]
+    fn nested_cgroup_below_the_container_keeps_the_container_id() {
+        // systemd inside the container makes `init.scope` below the
+        // container's own cgroup.
+        let id = parse_cgroup_path(&format!("/kubepods/burstable/{POD}/{CID}/init.scope")).unwrap();
+        assert_eq!(id.container_id, CID);
+    }
+
+    #[test]
+    fn a_hex_segment_made_below_the_container_is_ignored() {
+        // A container with a writable cgroupfs names its own sub-cgroup after
+        // another container's id; the real id is still the one used.
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let id = parse_cgroup_path(&format!("/kubepods/burstable/{POD}/{CID}/x/{other}")).unwrap();
+        assert_eq!(id.container_id, CID);
+    }
+
+    #[test]
+    fn pod_cgroup_without_a_container_below_it_is_none() {
+        assert!(parse_cgroup_path(&format!("/kubepods/burstable/{POD}")).is_none());
+        assert!(parse_cgroup_path(&format!("/kubepods/burstable/{POD}/init.scope")).is_none());
+    }
+
+    #[test]
+    fn non_hex_pod_uid_is_rejected() {
+        for pod in ["podEVIL", "pod..", "pod", "podzz11-22"] {
+            assert!(
+                parse_cgroup_path(&format!("/kubepods/burstable/{pod}/{CID}")).is_none(),
+                "{pod}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_pod_uid_accepts_uuids_only_in_lowercase_hex() {
+        assert!(is_pod_uid("ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98"));
+        assert!(!is_pod_uid("ED1E9C81-9A92"));
+        assert!(!is_pod_uid(""));
+        assert!(!is_pod_uid(&"a".repeat(MAX_POD_UID_LEN + 1)));
     }
 }

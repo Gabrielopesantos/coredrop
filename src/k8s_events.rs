@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use crate::cgroup::is_pod_uid;
 use crate::config::ensure_private_dir;
 use crate::events::{CaptureEventPayload, Outcome};
 
@@ -95,10 +96,6 @@ const MAX_AGGREGATION_KEYS: usize = 10_000;
 /// capture events arrive. Quiet daemons must not hold stale entries forever.
 const AGGREGATION_SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 
-/// Maximum length of a pod UID in a capture-event payload. Kubernetes UIDs are
-/// 36-character UUIDs; this bound only rejects absurd values.
-const MAX_K8S_NAME_LEN: usize = 253;
-
 /// Maximum length of a namespace, which Kubernetes requires to be a DNS-1123
 /// label.
 const MAX_NAMESPACE_LEN: usize = 63;
@@ -113,14 +110,6 @@ fn is_dns1123_label(s: &str) -> bool {
         && bytes.iter().all(|&c| alnum(c) || c == b'-')
         && alnum(bytes[0])
         && alnum(bytes[bytes.len() - 1])
-}
-
-/// Whether `s` has the characters of a pod UID: lowercase hex digits and `-`.
-fn is_pod_uid(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= MAX_K8S_NAME_LEN
-        && s.bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || c == b'-')
 }
 
 /// Outcome of recording one capture against the aggregator.
@@ -794,7 +783,7 @@ mod tests {
         let mut agg = Aggregator::default();
         let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
         let long_namespace = "x".repeat(MAX_NAMESPACE_LEN + 1);
-        let long_uid = "a".repeat(MAX_K8S_NAME_LEN + 1);
+        let long_uid = "a".repeat(crate::cgroup::MAX_POD_UID_LEN + 1);
 
         for (namespace, pod_uid, label) in [
             ("", uid, "empty namespace"),

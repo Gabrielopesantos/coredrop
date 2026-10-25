@@ -210,8 +210,15 @@ fn build_http(ca_pem: &[u8]) -> Option<reqwest::Client> {
 /// endpoint doesn't justify the dependency tree.
 struct EventClient {
     http: reqwest::Client,
-    api_server: String,
+    /// `https://<api server>/apis/events.k8s.io/v1/namespaces`, parsed once.
+    /// Requests append their path segments to it.
+    events_base: reqwest::Url,
     token: String,
+}
+
+/// The events API base for an API server origin (`https://host:port`).
+fn events_base(origin: &str) -> Option<reqwest::Url> {
+    reqwest::Url::parse(&format!("{origin}/apis/events.k8s.io/v1/namespaces")).ok()
 }
 
 impl EventClient {
@@ -237,18 +244,40 @@ impl EventClient {
         } else {
             host
         };
+        let Some(events_base) = events_base(&format!("https://{host}:{port}")) else {
+            warn!(
+                host,
+                port, "invalid KUBERNETES_SERVICE_HOST/PORT; cannot reach the API server"
+            );
+            return None;
+        };
         Some(Self {
             http,
-            api_server: format!("https://{host}:{port}"),
+            events_base,
             token,
         })
     }
 
+    /// URL of the namespace's events collection, or of one event when `name`
+    /// is set. Each segment is percent-encoded, so a `/` or `?` in a value
+    /// cannot change the path. `.` and `..` segments are dropped by `url`;
+    /// `handle_payload` rejects those before any request.
+    fn events_url(&self, namespace: &str, name: Option<&str>) -> Result<reqwest::Url, String> {
+        let mut url = self.events_base.clone();
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|()| format!("{} cannot be a base URL", self.events_base))?;
+            segments.extend([namespace, "events"]);
+            if let Some(name) = name {
+                segments.push(name);
+            }
+        }
+        Ok(url)
+    }
+
     async fn create_event(&self, namespace: &str, body: &Value) -> Result<(), String> {
-        let url = format!(
-            "{}/apis/events.k8s.io/v1/namespaces/{namespace}/events",
-            self.api_server
-        );
+        let url = self.events_url(namespace, None)?;
         let resp = self
             .http
             .post(url)
@@ -266,10 +295,7 @@ impl EventClient {
         name: &str,
         body: &Value,
     ) -> Result<(), String> {
-        let url = format!(
-            "{}/apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}",
-            self.api_server
-        );
+        let url = self.events_url(namespace, Some(name))?;
         let resp = self
             .http
             .patch(url)
@@ -284,13 +310,14 @@ impl EventClient {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 impl EventClient {
     /// Build an `EventClient` directly for unit tests. The underlying HTTP
     /// client is supplied by the caller so the test can control timeouts.
-    fn new_for_test(http: reqwest::Client, api_server: String, token: String) -> Self {
+    fn new_for_test(http: reqwest::Client, api_server: &str, token: String) -> Self {
         Self {
             http,
-            api_server,
+            events_base: events_base(api_server).unwrap(),
             token,
         }
     }
@@ -762,7 +789,7 @@ mod tests {
             .timeout(Duration::from_secs(1))
             .build()
             .unwrap();
-        let client = EventClient::new_for_test(http, "http://127.0.0.1:1".into(), "test".into());
+        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", "test".into());
 
         let mut agg = Aggregator::default();
         let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
@@ -850,5 +877,49 @@ Kf3s
     fn build_http_rejects_a_bundle_without_certs() {
         assert!(build_http(b"").is_none());
         assert!(build_http(b"not a pem").is_none());
+    }
+
+    fn test_client(origin: &str) -> EventClient {
+        EventClient::new_for_test(
+            build_http(TEST_CA_1.as_bytes()).unwrap(),
+            origin,
+            "test".into(),
+        )
+    }
+
+    #[test]
+    fn events_url_builds_create_and_patch_paths() {
+        let client = test_client("https://10.0.0.1:443");
+        assert_eq!(
+            client.events_url("default", None).unwrap().as_str(),
+            "https://10.0.0.1/apis/events.k8s.io/v1/namespaces/default/events"
+        );
+        assert_eq!(
+            client
+                .events_url("default", Some("my-event.abc"))
+                .unwrap()
+                .as_str(),
+            "https://10.0.0.1/apis/events.k8s.io/v1/namespaces/default/events/my-event.abc"
+        );
+    }
+
+    #[test]
+    fn events_url_encodes_each_segment() {
+        let client = test_client("https://10.0.0.1:6443");
+        let url = client.events_url("a/b?c%", Some("x/y")).unwrap();
+        assert_eq!(
+            url.path(),
+            "/apis/events.k8s.io/v1/namespaces/a%2Fb%3Fc%25/events/x%2Fy"
+        );
+        assert_eq!(url.query(), None);
+    }
+
+    #[test]
+    fn events_base_keeps_ipv6_brackets() {
+        let client = test_client("https://[fd00::1]:6443");
+        assert_eq!(
+            client.events_url("default", None).unwrap().as_str(),
+            "https://[fd00::1]:6443/apis/events.k8s.io/v1/namespaces/default/events"
+        );
     }
 }

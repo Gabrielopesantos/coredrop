@@ -268,28 +268,29 @@ impl HandlerConfig {
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
         }
         let json = serde_json::to_vec_pretty(self).context("serializing handler config")?;
-        let file = std::fs::OpenOptions::new()
+
+        // Write a temp file and rename it over `path`. A handler that starts
+        // while the daemon writes must see the old file or the new one, never
+        // a half-written one: it would fall back to defaults and discard the
+        // core. `create_new` (`O_EXCL`) also means the file is always a new
+        // inode, so `mode(0o600)` always applies, and a planted file or
+        // symlink at either path is replaced, never written through.
+        let tmp = format!("{path}.tmp");
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing stale {tmp}")),
+        }
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(path)
-            .with_context(|| format!("opening handler config {path}"))?;
-
-        let mut writer = std::io::BufWriter::new(file);
-        writer
-            .write_all(&json)
-            .with_context(|| format!("writing handler config {path}"))?;
-        writer
-            .flush()
-            .with_context(|| format!("flushing handler config {path}"))?;
-
-        // `OpenOptions::mode` only applies when `O_CREAT` creates a new inode.
-        // The kubelet makes this hostPath 0755 before the daemon first runs, so
-        // anything on the node can plant a world-readable `handler.json` for the
-        // daemon to fill with credentials. Chmod what we opened, unconditionally.
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("securing handler config {path}"))?;
+            .open(&tmp)
+            .with_context(|| format!("creating {tmp}"))?;
+        file.write_all(&json)
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("writing {tmp}"))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("renaming {tmp} to {path}"))?;
         Ok(())
     }
 
@@ -380,6 +381,30 @@ mod tests {
 
         let dir_mode = std::fs::metadata(&run_dir).unwrap().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "existing config dir should become 0700");
+    }
+
+    #[test]
+    fn write_replaces_a_planted_symlink_and_a_stale_temp_file() {
+        let (dir, path) = tmp_config();
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        std::fs::write(format!("{path}.tmp"), b"left by a killed daemon").unwrap();
+
+        let cfg = HandlerConfig::default();
+        cfg.write(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"untouched",
+            "symlink target must not be written"
+        );
+        assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
+        assert_eq!(HandlerConfig::read(&path), Some(cfg));
+        assert!(
+            !Path::new(&format!("{path}.tmp")).exists(),
+            "temp file must be renamed away"
+        );
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub const CORE_PATTERN_PATH: &str = "/proc/sys/kernel/core_pattern";
 /// Kernel sysctl bounding how many dumps may be held open for a handler.
 pub const CORE_PIPE_LIMIT_PATH: &str = "/proc/sys/kernel/core_pipe_limit";
 
+/// The kernel's own `core_pattern` default.
+const KERNEL_DEFAULT_PATTERN: &str = "core";
+
 /// Build the `core_pattern` value routing cores to our handler:
 /// `|<handler> capture %P %s %t %E`.
 #[must_use]
@@ -55,8 +58,17 @@ impl CorePatternGuard {
         pattern_path: PathBuf,
         pipe_limit_path: PathBuf,
     ) -> Result<Self> {
-        let prev_pattern = std::fs::read_to_string(&pattern_path)
+        let mut prev_pattern = std::fs::read_to_string(&pattern_path)
             .with_context(|| format!("reading {}", pattern_path.display()))?;
+        // A daemon killed without a clean shutdown leaves our pattern in place.
+        // Saving it as the previous value would point the node at the handler
+        // after we stop. The real previous value is lost, so use the default.
+        if prev_pattern.trim_end() == build_pattern(handler_path) {
+            warn!(
+                "core_pattern already routes to our handler (previous daemon did not restore it); will restore the kernel default `core`"
+            );
+            prev_pattern = KERNEL_DEFAULT_PATTERN.to_string();
+        }
         let prev_pipe_limit = std::fs::read_to_string(&pipe_limit_path).unwrap_or_default();
 
         std::fs::write(&pattern_path, build_pattern(handler_path))
@@ -151,5 +163,19 @@ mod tests {
         assert!(format!("{err:#}").contains("core_pattern"), "{err:#}");
         // Nothing was installed, so core_pipe_limit must be untouched too.
         assert_eq!(std::fs::read_to_string(&pipe).unwrap(), "0\n");
+    }
+
+    #[test]
+    fn install_over_our_own_pattern_restores_the_kernel_default() {
+        // A previous daemon was killed and left the handler installed.
+        let dir = TempDir::new().unwrap();
+        let pattern = dir.path().join("core_pattern");
+        let pipe = dir.path().join("core_pipe_limit");
+        std::fs::write(&pattern, format!("{}\n", build_pattern("/h/coredrop"))).unwrap();
+        std::fs::write(&pipe, "128\n").unwrap();
+
+        drop(CorePatternGuard::install_at("/h/coredrop", 16, pattern.clone(), pipe).unwrap());
+
+        assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core");
     }
 }

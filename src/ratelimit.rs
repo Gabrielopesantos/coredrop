@@ -123,8 +123,9 @@ impl RateLimiter {
             .mode(0o600)
             .open(&self.state_path)?;
         // `OpenOptions::mode` only applies when `O_CREAT` creates a new inode,
-        // so a planted file keeps its own mode - see `HandlerConfig::write`.
-        std::fs::set_permissions(&self.state_path, std::fs::Permissions::from_mode(0o600))?;
+        // so an existing file keeps its own mode. Chmod the open fd, not the
+        // path: the path could be replaced between the open and the chmod.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         // Blocking exclusive lock: contenders are only concurrent handlers on
         // this node, each holding the lock for a few milliseconds.
         rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;

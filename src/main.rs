@@ -94,6 +94,12 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_PIPE_LIMIT", default_value_t = coredrop::core_pattern::DEFAULT_PIPE_LIMIT)]
     pipe_limit: u32,
 
+    /// Node name reported on k8s Events (the chart sets it from
+    /// `spec.nodeName`). Unset falls back to the hostname, which in a pod
+    /// without `hostNetwork` is the pod name, not the node.
+    #[arg(long, env = "NODE_NAME")]
+    node_name: Option<String>,
+
     /// Kernel sysctl the handler is installed into. Not a flag or env knob -
     /// an internal seam so tests can drive `run_daemon` against temp files
     /// instead of the real `/proc/sys`.
@@ -257,7 +263,11 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     };
 
     if let Some(socket) = events_socket {
-        let node = coredrop::handler::node_hostname();
+        let node = args
+            .node_name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(coredrop::handler::node_hostname);
         tokio::spawn(coredrop::k8s_events::run_listener(socket, node));
     }
 
@@ -310,6 +320,7 @@ mod tests {
             crictl_timeout_secs: 0,
             no_events: true,
             pipe_limit: 16,
+            node_name: None,
             core_pattern_path: pattern.to_path_buf(),
             core_pipe_limit_path: pipe.to_path_buf(),
         }

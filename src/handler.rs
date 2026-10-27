@@ -399,7 +399,8 @@ pub async fn run(
     Ok(())
 }
 
-/// The node hostname for the manifest and k8s Events. Reads
+/// The UTS hostname: the node name for the handler, which the kernel runs in
+/// the host namespaces. The daemon pod prefers `NODE_NAME`. Reads
 /// `/proc/sys/kernel/hostname`; falls back to `localhost`.
 #[must_use]
 pub fn node_hostname() -> String {

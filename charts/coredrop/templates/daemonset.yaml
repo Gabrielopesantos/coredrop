@@ -56,6 +56,11 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
+            # Node name for k8s Events. The pod hostname is the pod name.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             # corePattern: how the kernel is wired to the handler.
             - name: CAPTURE_HANDLER_PATH
               value: "{{ .Values.corePattern.hostBinDir }}/coredrop"

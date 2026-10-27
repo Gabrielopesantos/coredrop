@@ -39,7 +39,7 @@ struct DaemonArgs {
     config_path: String,
 
     /// Cluster name - the first path segment of the object key.
-    #[arg(long, env = "CAPTURE_CLUSTER", default_value = "local")]
+    #[arg(long, env = "CAPTURE_CLUSTER", default_value = coredrop::config::DEFAULT_CLUSTER)]
     cluster: String,
 
     /// Pass `environ` and `cmdline` through un-redacted.
@@ -47,7 +47,7 @@ struct DaemonArgs {
     no_redact: bool,
 
     /// `/proc` root (overridable for tests/non-standard layouts).
-    #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = "/proc")]
+    #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = coredrop::config::DEFAULT_PROC_ROOT)]
     proc_root: String,
 
     /// Object-store URL for the streamed core (e.g. `s3://crash-artifacts`);
@@ -56,7 +56,7 @@ struct DaemonArgs {
     store_url: Option<String>,
 
     /// Path to the `crictl` binary for post-drain container enrichment.
-    #[arg(long, env = "CRICTL_PATH", default_value = "/usr/local/bin/crictl")]
+    #[arg(long, env = "CRICTL_PATH", default_value = coredrop::config::DEFAULT_CRICTL_PATH)]
     crictl_path: String,
 
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
@@ -156,9 +156,9 @@ async fn main() -> Result<()> {
             let rest: Vec<std::ffi::OsString> = argv.collect();
             let capture_args = CaptureArgs::parse(&rest)?;
             // The kernel exec's with a clean environment, so read the daemon-written
-            // hostPath config, not env. Absent (local/test runs) -> env.
+            // hostPath config. Without it, the defaults store nothing.
             let config_path = env_or("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH);
-            let config = HandlerConfig::read(&config_path).unwrap_or_else(HandlerConfig::from_env);
+            let config = HandlerConfig::read(&config_path).unwrap_or_default();
             let mut stdin = tokio::io::stdin();
             run_handler(capture_args, &config, &mut stdin, None).await
         }

@@ -351,9 +351,8 @@ pub const ALLOWED_STORE_OPTS: &[&str] = &[
 ];
 
 /// Collect the `object_store` config options ([`ALLOWED_STORE_OPTS`]) present
-/// in the process environment. Shared by the daemon (building the config it
-/// writes for the handler) and the handler (its own `from_env` fallback when
-/// the daemon-written config is unreadable).
+/// in the process environment. The daemon forwards them in the config it
+/// writes for the handler.
 #[must_use]
 pub fn store_options_from_env() -> Vec<(String, String)> {
     std::env::vars()

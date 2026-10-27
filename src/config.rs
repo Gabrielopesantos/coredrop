@@ -29,21 +29,14 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
-/// Parse a boolean env var. `1`/`true`/`yes`/`on` (case-insensitive) -> `true`;
-/// `0`/`false`/`no`/`off`/unset/empty -> `false`; anything else -> `false`
-fn parse_bool_env(key: &str) -> bool {
-    let Ok(value) = std::env::var(key) else {
-        return false;
-    };
-    match value.to_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" | "" => false,
-        _ => {
-            tracing::warn!(var = key, value = %value, "unrecognized boolean env value; treating as false");
-            false
-        }
-    }
-}
+/// Default cluster name, the first segment of every object key.
+pub const DEFAULT_CLUSTER: &str = "local";
+
+/// Default `/proc` root.
+pub const DEFAULT_PROC_ROOT: &str = "/proc";
+
+/// Default path of the node's `crictl`.
+pub const DEFAULT_CRICTL_PATH: &str = "/usr/local/bin/crictl";
 
 /// Default cap on stored (uncompressed) core bytes per crash: 2 GiB.
 pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -174,12 +167,12 @@ impl std::fmt::Debug for HandlerConfig {
 impl Default for HandlerConfig {
     fn default() -> Self {
         Self {
-            cluster: "local".to_string(),
+            cluster: DEFAULT_CLUSTER.to_string(),
             no_redact: false,
-            proc_root: "/proc".to_string(),
+            proc_root: DEFAULT_PROC_ROOT.to_string(),
             store_url: None,
             store_options: Vec::new(),
-            crictl_path: "/usr/local/bin/crictl".to_string(),
+            crictl_path: DEFAULT_CRICTL_PATH.to_string(),
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
             max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
@@ -224,58 +217,15 @@ impl HandlerConfig {
         Ok(())
     }
 
-    /// Build from the daemon's environment.
-    #[must_use]
-    pub fn from_env() -> Self {
-        let store_url = std::env::var("CAPTURE_STORE_URL")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let store_options = upload::store_options_from_env();
-        Self {
-            cluster: std::env::var("CAPTURE_CLUSTER").unwrap_or_else(|_| "local".to_string()),
-            no_redact: parse_bool_env("CAPTURE_NO_REDACT"),
-            proc_root: std::env::var("CAPTURE_PROC_ROOT").unwrap_or_else(|_| "/proc".to_string()),
-            store_url,
-            store_options,
-            crictl_path: std::env::var("CRICTL_PATH")
-                .unwrap_or_else(|_| "/usr/local/bin/crictl".to_string()),
-            cri_runtime_endpoint: std::env::var("CONTAINER_RUNTIME_ENDPOINT").ok(),
-            max_core_bytes: std::env::var("CAPTURE_MAX_CORE_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_MAX_CORE_BYTES),
-            max_cores_per_hour: std::env::var("CAPTURE_MAX_CORES_PER_HOUR")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_MAX_CORES_PER_HOUR),
-            upload_deadline_secs: std::env::var("CAPTURE_UPLOAD_DEADLINE_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_UPLOAD_DEADLINE_SECS),
-            crictl_timeout_secs: std::env::var("CRICTL_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_CRICTL_TIMEOUT_SECS),
-            rate_state_path: rate_state_path_for(
-                &std::env::var("CAPTURE_CONFIG_PATH")
-                    .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
-            ),
-            event_socket_path: (!parse_bool_env("CAPTURE_NO_EVENTS")).then(|| {
-                event_socket_path_for(
-                    &std::env::var("CAPTURE_CONFIG_PATH")
-                        .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
-                )
-            }),
-        }
-    }
-
     /// Read the config from `path`. `None` when absent, unparseable, or invalid -
-    /// the handler then falls back to [`Self::from_env`].
+    /// the handler then uses [`Self::default`], which stores nothing. The
+    /// kernel runs the handler with an empty environment, so there is no env
+    /// to fall back to.
     pub fn read(path: &str) -> Option<Self> {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                tracing::debug!(error = %e, path, "handler config not readable; falling back to env");
+                tracing::warn!(error = %e, path, "handler config not readable; using defaults, nothing is stored");
                 return None;
             }
         };
@@ -351,7 +301,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::testutil::ENV_LOCK;
 
     /// A config path inside a fresh temp dir. The `TempDir` is returned so the
     /// caller keeps it alive; dropping it removes the tree even on panic.
@@ -467,7 +416,7 @@ mod tests {
 
     #[test]
     fn read_unparseable_config_returns_none() {
-        // Present but not JSON at all: the handler falls back to env rather
+        // Present but not JSON at all: the handler uses the defaults rather
         // than propagating a parse error out of a crash-time code path.
         let (_dir, path) = tmp_config();
         std::fs::write(&path, b"{not json!").unwrap();
@@ -559,54 +508,5 @@ mod tests {
             };
             assert!(cfg.validate().is_err(), "{url} should be rejected");
         }
-    }
-
-    #[test]
-    fn parse_bool_env_recognizes_true_values() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        for value in ["1", "true", "TRUE", "TrUe", "yes", "YES", "on", "ON"] {
-            // SAFETY: every env-mutating test in this binary holds ENV_LOCK,
-            // so no other thread reads or writes the environment here.
-            unsafe {
-                std::env::set_var("COREDROP_TEST_BOOL", value);
-            }
-            assert!(
-                parse_bool_env("COREDROP_TEST_BOOL"),
-                "{value:?} should parse as true"
-            );
-        }
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var("COREDROP_TEST_BOOL");
-        }
-    }
-
-    #[test]
-    fn parse_bool_env_treats_everything_else_as_false() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // Explicit falses, the empty string, and unrecognized garbage all
-        // resolve to false - an unparseable value must never silently enable
-        // something like `no_redact`.
-        for value in [
-            "0", "false", "FALSE", "FaLsE", "no", "NO", "off", "OFF", "", "maybe",
-        ] {
-            // SAFETY: every env-mutating test in this binary holds ENV_LOCK.
-            unsafe {
-                std::env::set_var("COREDROP_TEST_BOOL", value);
-            }
-            assert!(
-                !parse_bool_env("COREDROP_TEST_BOOL"),
-                "{value:?} should parse as false"
-            );
-        }
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var("COREDROP_TEST_BOOL_UNSET");
-            std::env::remove_var("COREDROP_TEST_BOOL");
-        }
-        assert!(
-            !parse_bool_env("COREDROP_TEST_BOOL_UNSET"),
-            "unset is false"
-        );
     }
 }

@@ -90,7 +90,7 @@ pub fn event_socket_path_for(config_path: &str) -> String {
 
 /// Everything the kernel-exec'd handler needs that env can't deliver. The
 /// daemon fills it from its own env and writes it; the handler reads it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandlerConfig {
     /// Cluster name - the first path segment of the object key.
     pub cluster: String,
@@ -127,6 +127,48 @@ pub struct HandlerConfig {
     /// Capture-event unix datagram socket the daemon listens on, sibling of
     /// the handler config on the hostPath. `None` when events are disabled.
     pub event_socket_path: Option<String>,
+}
+
+/// Hand-written so `store_options` values (object-store credentials) never
+/// reach a log line. The destructuring makes a new field a compile error here
+/// until it is listed.
+impl std::fmt::Debug for HandlerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            cluster,
+            no_redact,
+            proc_root,
+            store_url,
+            store_options,
+            crictl_path,
+            cri_runtime_endpoint,
+            max_core_bytes,
+            max_cores_per_hour,
+            upload_deadline_secs,
+            crictl_timeout_secs,
+            rate_state_path,
+            event_socket_path,
+        } = self;
+        let store_option_keys: Vec<(&str, &str)> = store_options
+            .iter()
+            .map(|(key, _)| (key.as_str(), "<redacted>"))
+            .collect();
+        f.debug_struct("HandlerConfig")
+            .field("cluster", cluster)
+            .field("no_redact", no_redact)
+            .field("proc_root", proc_root)
+            .field("store_url", store_url)
+            .field("store_options", &store_option_keys)
+            .field("crictl_path", crictl_path)
+            .field("cri_runtime_endpoint", cri_runtime_endpoint)
+            .field("max_core_bytes", max_core_bytes)
+            .field("max_cores_per_hour", max_cores_per_hour)
+            .field("upload_deadline_secs", upload_deadline_secs)
+            .field("crictl_timeout_secs", crictl_timeout_secs)
+            .field("rate_state_path", rate_state_path)
+            .field("event_socket_path", event_socket_path)
+            .finish()
+    }
 }
 
 impl Default for HandlerConfig {
@@ -405,6 +447,17 @@ mod tests {
             !Path::new(&format!("{path}.tmp")).exists(),
             "temp file must be renamed away"
         );
+    }
+
+    #[test]
+    fn debug_hides_store_option_values() {
+        let cfg = HandlerConfig {
+            store_options: vec![("AWS_SECRET_ACCESS_KEY".into(), "s3cr3t-debug-canary".into())],
+            ..HandlerConfig::default()
+        };
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("AWS_SECRET_ACCESS_KEY"), "{debug}");
+        assert!(!debug.contains("s3cr3t-debug-canary"), "{debug}");
     }
 
     #[test]

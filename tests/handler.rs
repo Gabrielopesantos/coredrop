@@ -38,9 +38,9 @@ fn capture_args(pid: i32, signal: i32, timestamp: i64) -> CaptureArgs {
 /// The three object keys one capture produces, for the standard fixture identity.
 fn keys(container_id: &str, ts: i64, pid: i32) -> (String, String, String) {
     (
-        upload::core_object_key("test", POD_UID, container_id, ts, pid),
-        upload::proc_snapshot_object_key("test", POD_UID, container_id, ts, pid),
-        upload::manifest_object_key("test", POD_UID, container_id, ts, pid),
+        upload::ObjectKeys::new("test", POD_UID, container_id, ts, pid).core(),
+        upload::ObjectKeys::new("test", POD_UID, container_id, ts, pid).proc_snapshot(),
+        upload::ObjectKeys::new("test", POD_UID, container_id, ts, pid).manifest(),
     )
 }
 

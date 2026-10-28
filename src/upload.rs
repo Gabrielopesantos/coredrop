@@ -28,46 +28,49 @@ use crate::backend::{CaptureBackend, CoreStats};
 // Read the core in 256 KiB chunks.
 const CORE_READ_CHUNK: usize = 256 * 1024;
 
-/// Build the core's object key:
-/// `{cluster}/{podUID}/{containerID}/{timestamp}-{hostPid}-core.zst`.
-/// Handler-derivable from the cgroup - no UUIDs; the manifest carries the
-/// human-readable identity from crictl. The host PID disambiguates two
-/// crashes in the same container within the same second (possible before the
-/// rate limiter engages), which would otherwise overwrite each other.
-#[must_use]
-pub fn core_object_key(
-    cluster: &str,
-    pod_uid: &str,
-    container_id: &str,
-    timestamp: i64,
-    host_pid: i32,
-) -> String {
-    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}-core.zst")
+/// Object keys for one capture. Every object of a capture shares the prefix
+/// `{cluster}/{podUID}/{containerID}/{timestamp}-{hostPid}`; the suffix names
+/// the object. Handler-derivable from the cgroup - no UUIDs; the manifest
+/// carries the human-readable identity from crictl. The host PID
+/// disambiguates two crashes in the same container within the same second
+/// (possible before the rate limiter engages), which would otherwise
+/// overwrite each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectKeys {
+    prefix: String,
 }
 
-/// Build the `/proc` snapshot's object key, mirroring `core_object_key`'s
-/// scheme - same prefix, distinct suffix.
-#[must_use]
-pub fn proc_snapshot_object_key(
-    cluster: &str,
-    pod_uid: &str,
-    container_id: &str,
-    timestamp: i64,
-    host_pid: i32,
-) -> String {
-    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}-procsnapshot.tar")
-}
+impl ObjectKeys {
+    #[must_use]
+    pub fn new(
+        cluster: &str,
+        pod_uid: &str,
+        container_id: &str,
+        timestamp: i64,
+        host_pid: i32,
+    ) -> Self {
+        Self {
+            prefix: format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}"),
+        }
+    }
 
-/// Build the JSON manifest's object key, sibling to the core.
-#[must_use]
-pub fn manifest_object_key(
-    cluster: &str,
-    pod_uid: &str,
-    container_id: &str,
-    timestamp: i64,
-    host_pid: i32,
-) -> String {
-    format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}-manifest.json")
+    /// `<prefix>-core.zst`
+    #[must_use]
+    pub fn core(&self) -> String {
+        format!("{}-core.zst", self.prefix)
+    }
+
+    /// `<prefix>-procsnapshot.tar`
+    #[must_use]
+    pub fn proc_snapshot(&self) -> String {
+        format!("{}-procsnapshot.tar", self.prefix)
+    }
+
+    /// `<prefix>-manifest.json`, written last (blob-first ordering).
+    #[must_use]
+    pub fn manifest(&self) -> String {
+        format!("{}-manifest.json", self.prefix)
+    }
 }
 
 /// Buffered single-shot PUT of a small object (the proc snapshot tar or the
@@ -513,30 +516,31 @@ mod tests {
     #[test]
     fn builds_object_keys() {
         assert_eq!(
-            core_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242),
+            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242).core(),
             "prod/pod-uid-123/abc123def/1749600000-4242-core.zst"
         );
         assert_eq!(
-            proc_snapshot_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242),
+            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242)
+                .proc_snapshot(),
             "prod/pod-uid-123/abc123def/1749600000-4242-procsnapshot.tar"
         );
         assert_eq!(
-            manifest_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242),
+            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242).manifest(),
             "prod/pod-uid-123/abc123def/1749600000-4242-manifest.json"
         );
     }
 
     #[test]
     fn distinct_pids_yield_distinct_keys_within_the_same_second() {
-        let a = core_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 111);
-        let b = core_object_key("prod", "pod-uid-123", "abc123def", 1_749_600_000, 222);
+        let a = ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 111).core();
+        let b = ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 222).core();
         assert_ne!(a, b);
     }
 
     #[tokio::test]
     async fn put_object_round_trips_a_buffered_blob() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let key = proc_snapshot_object_key("local", "pod-a", "cid-b", 7, 4242);
+        let key = ObjectKeys::new("local", "pod-a", "cid-b", 7, 4242).proc_snapshot();
         let tar = b"a-small-tar-bundle".to_vec();
         put_object(&store, &key, tar.clone()).await.unwrap();
 
@@ -565,7 +569,7 @@ mod tests {
     async fn streams_zstd_with_integrity_and_round_trips() {
         let core: Vec<u8> = (0..200_000u32).map(|i| (i % 7) as u8).collect();
         let store = Arc::new(InMemory::new());
-        let key = core_object_key("local", "pod-aaa", "cid-bbb", 42, 4242);
+        let key = ObjectKeys::new("local", "pod-aaa", "cid-bbb", 42, 4242).core();
 
         let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader: &[u8] = &core;
@@ -654,7 +658,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn drain_errors_on_deadline_before_any_bytes_arrive() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let key = core_object_key("local", "pod-stall", "cid-stall", 1, 4242);
+        let key = ObjectKeys::new("local", "pod-stall", "cid-stall", 1, 4242).core();
 
         let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader = StallReader;
@@ -673,7 +677,7 @@ mod tests {
     async fn marks_truncated_on_a_short_read_but_finalizes_the_partial() {
         let chunk = vec![0x5Au8; 50_000];
         let store = Arc::new(InMemory::new());
-        let key = core_object_key("local", "pod-x", "cid-y", 7, 4242);
+        let key = ObjectKeys::new("local", "pod-x", "cid-y", 7, 4242).core();
 
         let backend = StandaloneBackend::new(store.clone(), &key, 0);
         let mut reader = FlakyReader {
@@ -704,7 +708,7 @@ mod tests {
     async fn caps_stored_core_but_drains_and_counts_everything() {
         let core: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
         let store = Arc::new(InMemory::new());
-        let key = core_object_key("local", "pod-cap", "cid-cap", 9, 4242);
+        let key = ObjectKeys::new("local", "pod-cap", "cid-cap", 9, 4242).core();
 
         let backend = StandaloneBackend::new(store.clone(), &key, 10_000);
         let mut reader: &[u8] = &core;

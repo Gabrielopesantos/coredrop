@@ -34,7 +34,7 @@ use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
 use crate::ratelimit::{RateDecision, RateLimiter};
 use crate::redact::Redactor;
 use crate::snapshot::ProcSnapshot;
-use crate::upload::{self, StandaloneBackend};
+use crate::upload::{self, ObjectKeys, StandaloneBackend};
 
 /// The positional args the kernel passes after the `capture` subcommand,
 /// matching the `core_pattern` template `%P %s %t %E`.
@@ -134,8 +134,8 @@ pub async fn run(
     let cluster = config.cluster.as_str();
     let store = store_override.or_else(|| config.object_store());
 
-    let core_key = identity.as_ref().map(|id| {
-        upload::core_object_key(
+    let keys = identity.as_ref().map(|id| {
+        ObjectKeys::new(
             cluster,
             &id.pod_uid,
             &id.container_id,
@@ -143,13 +143,20 @@ pub async fn run(
             args.host_pid,
         )
     });
+    let core_key = keys.as_ref().map(ObjectKeys::core);
+    // Identity and store both resolved: the only case where anything uploads.
+    let target = identity
+        .as_ref()
+        .zip(store.as_ref())
+        .zip(keys.as_ref())
+        .map(|((id, store), keys)| (id, store, keys));
 
     // Rate limit: consult only when a core would upload
     // (identity + store resolved).
     let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
     let mut rate_recorded = false;
-    let rate_suppressed = match (&identity, &store) {
-        (Some(id), Some(_)) => match limiter.check_and_record(&id.pod_uid, args.timestamp) {
+    let rate_suppressed = match target {
+        Some((id, _, _)) => match limiter.check_and_record(&id.pod_uid, args.timestamp) {
             RateDecision::Suppressed { recent } => {
                 warn!(
                     pod_uid = %id.pod_uid,
@@ -164,17 +171,18 @@ pub async fn run(
                 false
             }
         },
-        _ => false,
+        None => false,
     };
 
     // Step 2: Drain core (releases the kernel's pipe).
     let backend: Box<dyn CaptureBackend> = if rate_suppressed {
         Box::new(DiscardBackend)
-    } else if let (Some(key), Some(store)) = (core_key.as_deref(), store.as_ref()) {
+    } else if let Some((_, store, keys)) = target {
+        let key = keys.core();
         info!(key = %key, "streaming core to object store");
         Box::new(StandaloneBackend::new(
             store.clone(),
-            key,
+            &key,
             config.max_core_bytes,
         ))
     } else {
@@ -193,7 +201,7 @@ pub async fn run(
         Err(e) => {
             // Nothing was stored: give the budget slot back, or a transient
             // store outage would exhaust the budget with zero cores kept.
-            if rate_recorded && let Some(id) = &identity {
+            if rate_recorded && let Some((id, _, _)) = target {
                 limiter.refund(&id.pod_uid, args.timestamp);
             }
             info!(
@@ -215,15 +223,9 @@ pub async fn run(
     );
 
     // Step 3: Upload proc snapshot (small, buffered).
-    let proc_snapshot_key = match (&identity, &store) {
-        (Some(id), Some(store)) => {
-            let key = upload::proc_snapshot_object_key(
-                cluster,
-                &id.pod_uid,
-                &id.container_id,
-                args.timestamp,
-                args.host_pid,
-            );
+    let proc_snapshot_key = match target {
+        Some((_, store, keys)) => {
+            let key = keys.proc_snapshot();
             match snapshot.to_tar() {
                 Ok(tar) => {
                     let bytes = tar.len();
@@ -310,14 +312,8 @@ pub async fn run(
     };
 
     // Write manifest to store (blob-first ordering: core -> snapshot -> manifest).
-    let manifest_key = if let (Some(id), Some(store)) = (&identity, &store) {
-        let key = upload::manifest_object_key(
-            cluster,
-            &id.pod_uid,
-            &id.container_id,
-            args.timestamp,
-            args.host_pid,
-        );
+    let manifest_key = if let Some((_, store, keys)) = target {
+        let key = keys.manifest();
         match serde_json::to_vec_pretty(&manifest) {
             Ok(json) => match upload::put_object(store, &key, json).await {
                 Ok(()) => {

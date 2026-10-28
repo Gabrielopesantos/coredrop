@@ -257,23 +257,20 @@ pub async fn run(
     };
 
     // Step 5: Assemble manifest.
+    let (pod_uid, container_id) = identity
+        .as_ref()
+        .map(|id| (id.pod_uid.clone(), id.container_id.clone()))
+        .unwrap_or_default();
+    let info = container_info.unwrap_or_default();
     let manifest_identity = ManifestIdentity {
-        pod_uid: identity
-            .as_ref()
-            .map(|id| id.pod_uid.clone())
-            .unwrap_or_default(),
-        container_id: identity
-            .as_ref()
-            .map(|id| id.container_id.clone())
-            .unwrap_or_default(),
-        namespace: container_info.as_ref().and_then(|c| c.namespace.clone()),
-        pod_name: container_info.as_ref().and_then(|c| c.pod_name.clone()),
-        container_name: container_info
-            .as_ref()
-            .and_then(|c| c.container_name.clone()),
-        image: container_info.as_ref().and_then(|c| c.image.clone()),
-        image_digest: container_info.as_ref().and_then(|c| c.image_digest.clone()),
-        restart_count: container_info.as_ref().and_then(|c| c.restart_count),
+        pod_uid,
+        container_id,
+        namespace: info.namespace,
+        pod_name: info.pod_name,
+        container_name: info.container_name,
+        image: info.image,
+        image_digest: info.image_digest,
+        restart_count: info.restart_count,
     };
 
     let any_snapshot_truncated = snapshot.files.iter().any(|f| f.truncated);
@@ -295,14 +292,10 @@ pub async fn run(
         identity: manifest_identity,
         core: CoreRef {
             present: uploaded,
-            object_key: if uploaded { core_key.clone() } else { None },
+            object_key: core_key.clone().filter(|_| uploaded),
             sha256: stats.sha256.clone(),
-            size_bytes: if uploaded { Some(stats.bytes) } else { None },
-            stored_bytes: if uploaded {
-                Some(stats.stored_bytes)
-            } else {
-                None
-            },
+            size_bytes: uploaded.then_some(stats.bytes),
+            stored_bytes: uploaded.then_some(stats.stored_bytes),
             truncated: stats.truncated,
             truncated_reason: stats.truncated_reason.clone(),
             skipped_reason: rate_suppressed.then(|| "rate_limit".to_string()),
@@ -352,20 +345,13 @@ pub async fn run(
     // Step 6: report the capture to the daemon for k8s Event emission.
     // Requires namespace + pod name, i.e. only when crictl enrichment
     // succeeded - a cgroup-only identity can't target a pod object.
-    if let (Some(namespace), Some(pod_name)) = (
-        container_info.as_ref().and_then(|c| c.namespace.clone()),
-        container_info.as_ref().and_then(|c| c.pod_name.clone()),
-    ) {
+    let id = &manifest.identity;
+    if let (Some(namespace), Some(pod_name)) = (&id.namespace, &id.pod_name) {
         let payload = CaptureEventPayload {
-            namespace,
-            pod_name,
-            pod_uid: identity
-                .as_ref()
-                .map(|id| id.pod_uid.clone())
-                .unwrap_or_default(),
-            container_name: container_info
-                .as_ref()
-                .and_then(|c| c.container_name.clone()),
+            namespace: namespace.clone(),
+            pod_name: pod_name.clone(),
+            pod_uid: id.pod_uid.clone(),
+            container_name: id.container_name.clone(),
             signal: args.signal,
             signal_name: signal_name(args.signal).map(str::to_string),
             outcome,

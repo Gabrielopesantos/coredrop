@@ -11,7 +11,7 @@
 //! The sysctl paths are injectable so the save -> set -> restore logic is
 //! unit-testable against temp files instead of the real `/proc/sys`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tracing::warn;
@@ -31,8 +31,8 @@ const KERNEL_DEFAULT_PATTERN: &str = "core";
 /// Build the `core_pattern` value routing cores to our handler:
 /// `|<handler> capture %P %s %t %E`.
 #[must_use]
-pub fn build_pattern(handler_path: &str) -> String {
-    format!("|{handler_path} capture %P %s %t %E")
+pub fn build_pattern(handler_path: &Path) -> String {
+    format!("|{} capture %P %s %t %E", handler_path.display())
 }
 
 /// Installs our `core_pattern` + `core_pipe_limit` on construction and
@@ -53,7 +53,7 @@ impl CorePatternGuard {
     /// Fails when the pattern file cannot be read (to save the previous
     /// value) or written. A failed `core_pipe_limit` write only warns.
     pub fn install_at(
-        handler_path: &str,
+        handler_path: &Path,
         pipe_limit: u32,
         pattern_path: PathBuf,
         pipe_limit_path: PathBuf,
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn pattern_pipes_to_the_handler() {
         assert_eq!(
-            build_pattern("/opt/coredrop/bin/coredrop"),
+            build_pattern(Path::new("/opt/coredrop/bin/coredrop")),
             "|/opt/coredrop/bin/coredrop capture %P %s %t %E"
         );
     }
@@ -127,9 +127,13 @@ mod tests {
         std::fs::write(&pipe, "0\n").unwrap();
 
         {
-            let _guard =
-                CorePatternGuard::install_at("/h/coredrop", 16, pattern.clone(), pipe.clone())
-                    .unwrap();
+            let _guard = CorePatternGuard::install_at(
+                Path::new("/h/coredrop"),
+                16,
+                pattern.clone(),
+                pipe.clone(),
+            )
+            .unwrap();
             assert_eq!(
                 std::fs::read_to_string(&pattern).unwrap(),
                 "|/h/coredrop capture %P %s %t %E"
@@ -152,7 +156,7 @@ mod tests {
         // `unwrap_err` would need `CorePatternGuard: Debug`; match instead so
         // the guard type stays free of a derive it has no other use for.
         let result = CorePatternGuard::install_at(
-            "/h/coredrop",
+            Path::new("/h/coredrop"),
             16,
             dir.path().join("missing/core_pattern"),
             pipe.clone(),
@@ -171,10 +175,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pattern = dir.path().join("core_pattern");
         let pipe = dir.path().join("core_pipe_limit");
-        std::fs::write(&pattern, format!("{}\n", build_pattern("/h/coredrop"))).unwrap();
+        std::fs::write(
+            &pattern,
+            format!("{}\n", build_pattern(Path::new("/h/coredrop"))),
+        )
+        .unwrap();
         std::fs::write(&pipe, "128\n").unwrap();
 
-        drop(CorePatternGuard::install_at("/h/coredrop", 16, pattern.clone(), pipe).unwrap());
+        drop(
+            CorePatternGuard::install_at(Path::new("/h/coredrop"), 16, pattern.clone(), pipe)
+                .unwrap(),
+        );
 
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core");
     }

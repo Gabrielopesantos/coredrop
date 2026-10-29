@@ -62,7 +62,7 @@ pub fn base_config(root: &Path) -> HandlerConfig {
     HandlerConfig {
         cluster: "test".into(),
         no_redact: false,
-        proc_root: proc_root(root).to_string_lossy().into_owned(),
+        proc_root: proc_root(root),
         store_url: None,
         store_options: vec![],
         crictl_path: "/bin/false".into(),
@@ -71,7 +71,7 @@ pub fn base_config(root: &Path) -> HandlerConfig {
         max_cores_per_hour: 0,
         upload_deadline_secs: 0,
         crictl_timeout_secs: 0,
-        rate_state_path: root.join("recent.json").to_string_lossy().into_owned(),
+        rate_state_path: root.join("recent.json"),
         event_socket_path: None,
     }
 }

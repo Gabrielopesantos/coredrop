@@ -9,6 +9,7 @@
 
 use std::fmt::Display;
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -65,7 +66,7 @@ pub struct CaptureEventPayload {
 /// Send one capture event datagram to the daemon. Best-effort: any failure is
 /// logged and the capture is unaffected. `socket_path` is `None` when events
 /// are disabled, which skips silently (no log noise on the hot path).
-pub fn send_capture_event(socket_path: Option<&str>, payload: &CaptureEventPayload) {
+pub fn send_capture_event(socket_path: Option<&Path>, payload: &CaptureEventPayload) {
     let Some(socket_path) = socket_path else {
         return;
     };
@@ -88,7 +89,7 @@ pub fn send_capture_event(socket_path: Option<&str>, payload: &CaptureEventPaylo
         return;
     }
     if let Err(e) = socket.send_to(&bytes, socket_path) {
-        warn!(error = %e, socket_path, "sending capture event failed");
+        warn!(error = %e, socket_path = %socket_path.display(), "sending capture event failed");
     }
 }
 
@@ -138,7 +139,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
-        send_capture_event(sock_path.to_str(), &payload());
+        send_capture_event(Some(&sock_path), &payload());
 
         let mut buf = vec![0u8; 64 * 1024];
         let n = listener.recv(&mut buf).unwrap();
@@ -152,6 +153,9 @@ mod tests {
         send_capture_event(None, &payload());
         // Enabled but nothing listening (daemon restarting, socket removed):
         // the send fails, and the capture must be unaffected.
-        send_capture_event(Some("/run/coredrop/no-such-listener.sock"), &payload());
+        send_capture_event(
+            Some(Path::new("/run/coredrop/no-such-listener.sock")),
+            &payload(),
+        );
     }
 }

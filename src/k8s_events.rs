@@ -41,8 +41,8 @@ const EVENT_SOCKET_MODE: u32 = 0o600;
 ///
 /// Fails when the parent dir cannot be created/chmod'd, the bind itself fails,
 /// or the socket's permissions cannot be tightened.
-pub fn bind_socket(path: &str) -> std::io::Result<tokio::net::UnixDatagram> {
-    if let Some(parent) = Path::new(path).parent() {
+pub fn bind_socket(path: &Path) -> std::io::Result<tokio::net::UnixDatagram> {
+    if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
     }
     let _ = std::fs::remove_file(path);
@@ -532,7 +532,7 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let _socket = bind_socket(sock_path.to_str().unwrap()).unwrap();
+            let _socket = bind_socket(&sock_path).unwrap();
         });
         dir
     }

@@ -16,7 +16,7 @@ use common::{SPAWN_LOCK, fake_crictl_script, write_fake_crictl};
 
 fn config_with_crictl(crictl_path: &str) -> HandlerConfig {
     HandlerConfig {
-        crictl_path: crictl_path.to_string(),
+        crictl_path: crictl_path.into(),
         crictl_timeout_secs: 1,
         ..HandlerConfig::default()
     }

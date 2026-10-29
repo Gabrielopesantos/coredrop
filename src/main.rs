@@ -13,7 +13,7 @@
 //!   - health check (`coredrop check`): what the chart's readiness and
 //!     liveness probes exec. Exits non-zero when the capture path has drifted.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -32,11 +32,11 @@ use coredrop::handler::{CaptureArgs, run as run_handler};
 struct DaemonArgs {
     /// Host path the kernel exec's as the `core_pattern` handler.
     #[arg(long, env = "CAPTURE_HANDLER_PATH", default_value = coredrop::DEFAULT_HANDLER_PATH)]
-    handler_path: String,
+    handler_path: PathBuf,
 
     /// hostPath the daemon serializes the handler config to.
     #[arg(long, env = "CAPTURE_CONFIG_PATH", default_value = coredrop::config::DEFAULT_CONFIG_PATH)]
-    config_path: String,
+    config_path: PathBuf,
 
     /// Cluster name - the first path segment of the object key.
     #[arg(long, env = "CAPTURE_CLUSTER", default_value = coredrop::config::DEFAULT_CLUSTER)]
@@ -48,7 +48,7 @@ struct DaemonArgs {
 
     /// `/proc` root (overridable for tests/non-standard layouts).
     #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = coredrop::config::DEFAULT_PROC_ROOT)]
-    proc_root: String,
+    proc_root: PathBuf,
 
     /// Object-store URL for the streamed core (e.g. `s3://crash-artifacts`);
     /// unset disables upload. Store creds come from env (`AWS_*` etc.), not flags.
@@ -57,7 +57,7 @@ struct DaemonArgs {
 
     /// Path to the `crictl` binary for post-drain container enrichment.
     #[arg(long, env = "CRICTL_PATH", default_value = coredrop::config::DEFAULT_CRICTL_PATH)]
-    crictl_path: String,
+    crictl_path: PathBuf,
 
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     #[arg(long, env = "CONTAINER_RUNTIME_ENDPOINT")]
@@ -157,7 +157,8 @@ async fn main() -> Result<()> {
             let capture_args = CaptureArgs::parse(&rest)?;
             // The kernel exec's with a clean environment, so read the daemon-written
             // hostPath config. Without it, the defaults store nothing.
-            let config_path = env_or("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH);
+            let config_path =
+                env_path("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH);
             let config = HandlerConfig::read(&config_path).unwrap_or_default();
             let mut stdin = tokio::io::stdin();
             run_handler(capture_args, &config, &mut stdin, None).await
@@ -165,24 +166,24 @@ async fn main() -> Result<()> {
         // Run by the readiness/liveness probes. Reads the same env the daemon
         // container is configured with; the error is the probe's failure reason.
         Some("check") => coredrop::health::check(
-            &env_or("CAPTURE_HANDLER_PATH", coredrop::DEFAULT_HANDLER_PATH),
-            &env_or("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH),
-            coredrop::core_pattern::CORE_PATTERN_PATH,
+            &env_path("CAPTURE_HANDLER_PATH", coredrop::DEFAULT_HANDLER_PATH),
+            &env_path("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH),
+            Path::new(coredrop::core_pattern::CORE_PATTERN_PATH),
         ),
         _ => run_daemon(DaemonArgs::parse()).await,
     }
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+fn env_path(key: &str, default: &str) -> PathBuf {
+    std::env::var_os(key).map_or_else(|| PathBuf::from(default), PathBuf::from)
 }
 
 /// Run the daemon: wire the kernel to the handler, then hold the restore guard
 /// until shutdown.
 async fn run_daemon(args: DaemonArgs) -> Result<()> {
     info!(
-        handler = %args.handler_path,
-        config = %args.config_path,
+        handler = %args.handler_path.display(),
+        config = %args.config_path.display(),
         cluster = %args.cluster,
         "coredrop starting"
     );
@@ -225,12 +226,13 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         }
         Some(path) => match coredrop::k8s_events::bind_socket(path) {
             Ok(socket) => {
-                info!(path = %path, "capture event socket bound");
+                info!(path = %path.display(), "capture event socket bound");
                 Some(socket)
             }
             Err(e) => {
-                error!(error = %e, path = %path, "failed to bind capture event socket; exiting for restart");
-                return Err(e).with_context(|| format!("binding capture event socket {path}"));
+                error!(error = %e, path = %path.display(), "failed to bind capture event socket; exiting for restart");
+                return Err(e)
+                    .with_context(|| format!("binding capture event socket {}", path.display()));
             }
         },
     };
@@ -238,7 +240,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     let config_path = &args.config_path;
 
     if let Err(e) = config.write(config_path) {
-        error!(error = %e, path = %config_path, "failed to write handler config; exiting for restart");
+        error!(error = %e, path = %config_path.display(), "failed to write handler config; exiting for restart");
         return Err(e);
     }
 
@@ -250,8 +252,8 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     ) {
         Ok(g) => {
             info!(
-                handler = %args.handler_path,
-                config = %config_path,
+                handler = %args.handler_path.display(),
+                config = %config_path.display(),
                 "core_pattern installed - capture path active"
             );
             g
@@ -307,7 +309,7 @@ mod tests {
     fn args(config_path: &Path, pattern: &Path, pipe: &Path) -> DaemonArgs {
         DaemonArgs {
             handler_path: "/opt/coredrop/bin/coredrop".into(),
-            config_path: config_path.to_string_lossy().into_owned(),
+            config_path: config_path.to_path_buf(),
             cluster: "test".into(),
             no_redact: false,
             proc_root: "/proc".into(),

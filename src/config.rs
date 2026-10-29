@@ -7,7 +7,7 @@
 
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -52,33 +52,31 @@ pub const DEFAULT_UPLOAD_DEADLINE_SECS: u64 = 300;
 /// Default timeout for `crictl inspect` in the handler.
 pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
 
-fn default_rate_state_path() -> String {
-    "/run/coredrop/recent.json".to_string()
+fn default_rate_state_path() -> PathBuf {
+    PathBuf::from("/run/coredrop/recent.json")
 }
 
 /// Rate-limit state file derived from the handler-config path: a `recent.json`
 /// sibling on the same hostPath, so no extra flag or mount is needed.
-pub fn rate_state_path_for(config_path: &str) -> String {
-    Path::new(config_path)
+#[must_use]
+pub fn rate_state_path_for(config_path: &Path) -> PathBuf {
+    config_path
         .parent()
-        .map_or_else(default_rate_state_path, |p| {
-            p.join("recent.json").to_string_lossy().into_owned()
-        })
+        .map_or_else(default_rate_state_path, |p| p.join("recent.json"))
 }
 
-fn default_event_socket_path() -> String {
-    "/run/coredrop/events.sock".to_string()
+fn default_event_socket_path() -> PathBuf {
+    PathBuf::from("/run/coredrop/events.sock")
 }
 
 /// Capture-event unix datagram socket, derived from the handler-config path
 /// the same way [`rate_state_path_for`] derives the rate-limit state file: an
 /// `events.sock` sibling on the same hostPath.
-pub fn event_socket_path_for(config_path: &str) -> String {
-    Path::new(config_path)
+#[must_use]
+pub fn event_socket_path_for(config_path: &Path) -> PathBuf {
+    config_path
         .parent()
-        .map_or_else(default_event_socket_path, |p| {
-            p.join("events.sock").to_string_lossy().into_owned()
-        })
+        .map_or_else(default_event_socket_path, |p| p.join("events.sock"))
 }
 
 /// Everything the kernel-exec'd handler needs that env can't deliver. The
@@ -90,13 +88,13 @@ pub struct HandlerConfig {
     /// Pass `environ` and `cmdline` through un-redacted.
     pub no_redact: bool,
     /// `/proc` root (overridable for tests/non-standard layouts).
-    pub proc_root: String,
+    pub proc_root: PathBuf,
     /// Object-store URL (e.g. `s3://crash-artifacts`); `None` disables upload.
     pub store_url: Option<String>,
     /// `object_store` config options (the `AWS_*`/cloud keys) forwarded verbatim.
     pub store_options: Vec<(String, String)>,
     /// Path to the `crictl` binary for post-drain container enrichment.
-    pub crictl_path: String,
+    pub crictl_path: PathBuf,
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     /// `None` lets crictl use its own default/`CONTAINER_RUNTIME_ENDPOINT`.
     pub cri_runtime_endpoint: Option<String>,
@@ -116,10 +114,10 @@ pub struct HandlerConfig {
     /// handler's `core_pipe_limit` slot forever.
     pub crictl_timeout_secs: u64,
     /// Rate-limit state file, sibling of the handler config on the hostPath.
-    pub rate_state_path: String,
+    pub rate_state_path: PathBuf,
     /// Capture-event unix datagram socket the daemon listens on, sibling of
     /// the handler config on the hostPath. `None` when events are disabled.
-    pub event_socket_path: Option<String>,
+    pub event_socket_path: Option<PathBuf>,
 }
 
 /// Hand-written so `store_options` values (object-store credentials) never
@@ -169,10 +167,10 @@ impl Default for HandlerConfig {
         Self {
             cluster: DEFAULT_CLUSTER.to_string(),
             no_redact: false,
-            proc_root: DEFAULT_PROC_ROOT.to_string(),
+            proc_root: PathBuf::from(DEFAULT_PROC_ROOT),
             store_url: None,
             store_options: Vec::new(),
-            crictl_path: DEFAULT_CRICTL_PATH.to_string(),
+            crictl_path: PathBuf::from(DEFAULT_CRICTL_PATH),
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
             max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
@@ -188,11 +186,11 @@ impl HandlerConfig {
     /// Validate that paths are absolute and the store URL is a supported scheme.
     /// Called by [`Self::read`] before trusting a daemon-written config file.
     fn validate(&self) -> Result<()> {
-        let must_be_absolute = |path: &str, label: &str| -> Result<()> {
-            if Path::new(path).is_absolute() {
+        let must_be_absolute = |path: &Path, label: &str| -> Result<()> {
+            if path.is_absolute() {
                 Ok(())
             } else {
-                bail!("{label} must be absolute: {path}")
+                bail!("{label} must be absolute: {}", path.display())
             }
         };
 
@@ -221,23 +219,24 @@ impl HandlerConfig {
     /// the handler then uses [`Self::default`], which stores nothing. The
     /// kernel runs the handler with an empty environment, so there is no env
     /// to fall back to.
-    pub fn read(path: &str) -> Option<Self> {
+    pub fn read(path: impl AsRef<Path>) -> Option<Self> {
+        let path = path.as_ref();
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                tracing::warn!(error = %e, path, "handler config not readable; using defaults, nothing is stored");
+                tracing::warn!(error = %e, path = %path.display(), "handler config not readable; using defaults, nothing is stored");
                 return None;
             }
         };
         let cfg: Self = match serde_json::from_slice(&bytes) {
             Ok(cfg) => cfg,
             Err(e) => {
-                tracing::warn!(error = %e, path, "handler config present but unparseable; ignoring");
+                tracing::warn!(error = %e, path = %path.display(), "handler config present but unparseable; ignoring");
                 return None;
             }
         };
         if let Err(e) = cfg.validate() {
-            tracing::warn!(error = %e, path, "handler config failed validation; ignoring");
+            tracing::warn!(error = %e, path = %path.display(), "handler config failed validation; ignoring");
             return None;
         }
         Some(cfg)
@@ -254,8 +253,9 @@ impl HandlerConfig {
     ///
     /// Fails when the parent dir cannot be created/chmod'd, or the file
     /// cannot be created/written/chmod'd.
-    pub fn write(&self, path: &str) -> Result<()> {
-        if let Some(parent) = Path::new(path).parent() {
+    pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
             ensure_private_dir(parent)
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
         }
@@ -267,22 +267,25 @@ impl HandlerConfig {
         // core. `create_new` (`O_EXCL`) also means the file is always a new
         // inode, so `mode(0o600)` always applies, and a planted file or
         // symlink at either path is replaced, never written through.
-        let tmp = format!("{path}.tmp");
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
         match std::fs::remove_file(&tmp) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing stale {tmp}")),
+            Err(e) => return Err(e).with_context(|| format!("removing stale {}", tmp.display())),
         }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&tmp)
-            .with_context(|| format!("creating {tmp}"))?;
+            .with_context(|| format!("creating {}", tmp.display()))?;
         file.write_all(&json)
             .and_then(|()| file.sync_all())
-            .with_context(|| format!("writing {tmp}"))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("renaming {tmp} to {path}"))?;
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
         Ok(())
     }
 
@@ -304,13 +307,9 @@ mod tests {
 
     /// A config path inside a fresh temp dir. The `TempDir` is returned so the
     /// caller keeps it alive; dropping it removes the tree even on panic.
-    fn tmp_config() -> (TempDir, String) {
+    fn tmp_config() -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();
-        let path = dir
-            .path()
-            .join("handler.json")
-            .to_string_lossy()
-            .into_owned();
+        let path = dir.path().join("handler.json");
         (dir, path)
     }
 
@@ -363,9 +362,7 @@ mod tests {
         std::fs::write(&path, b"{}").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        HandlerConfig::default()
-            .write(&path.to_string_lossy())
-            .unwrap();
+        HandlerConfig::default().write(&path).unwrap();
 
         let file_mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(file_mode, 0o600, "existing config file should become 0600");
@@ -380,7 +377,8 @@ mod tests {
         let target = dir.path().join("elsewhere");
         std::fs::write(&target, b"untouched").unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
-        std::fs::write(format!("{path}.tmp"), b"left by a killed daemon").unwrap();
+        let tmp = dir.path().join("handler.json.tmp");
+        std::fs::write(&tmp, b"left by a killed daemon").unwrap();
 
         let cfg = HandlerConfig::default();
         cfg.write(&path).unwrap();
@@ -392,10 +390,7 @@ mod tests {
         );
         assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
         assert_eq!(HandlerConfig::read(&path), Some(cfg));
-        assert!(
-            !Path::new(&format!("{path}.tmp")).exists(),
-            "temp file must be renamed away"
-        );
+        assert!(!tmp.exists(), "temp file must be renamed away");
     }
 
     #[test]
@@ -438,17 +433,23 @@ mod tests {
     #[test]
     fn sibling_paths_are_derived_from_the_config_path() {
         assert_eq!(
-            event_socket_path_for("/run/coredrop/handler.json"),
-            "/run/coredrop/events.sock"
+            event_socket_path_for(Path::new("/run/coredrop/handler.json")),
+            Path::new("/run/coredrop/events.sock")
         );
         assert_eq!(
-            rate_state_path_for("/run/coredrop/handler.json"),
-            "/run/coredrop/recent.json"
+            rate_state_path_for(Path::new("/run/coredrop/handler.json")),
+            Path::new("/run/coredrop/recent.json")
         );
         // A parentless path falls back to the defaults rather than producing a
         // relative sibling `validate` would then reject.
-        assert_eq!(event_socket_path_for(""), "/run/coredrop/events.sock");
-        assert_eq!(rate_state_path_for(""), "/run/coredrop/recent.json");
+        assert_eq!(
+            event_socket_path_for(Path::new("")),
+            Path::new("/run/coredrop/events.sock")
+        );
+        assert_eq!(
+            rate_state_path_for(Path::new("")),
+            Path::new("/run/coredrop/recent.json")
+        );
     }
 
     #[test]

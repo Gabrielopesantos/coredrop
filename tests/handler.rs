@@ -146,9 +146,9 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
 
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut config = base_config(tmp.path());
-    config.crictl_path = crictl.to_string_lossy().into_owned();
+    config.crictl_path = crictl;
     config.crictl_timeout_secs = 10;
-    config.event_socket_path = Some(sock_path.to_string_lossy().into_owned());
+    config.event_socket_path = Some(sock_path);
 
     let mut core_in: &[u8] = b"core payload for the enriched path";
     run(
@@ -225,9 +225,9 @@ async fn run_reports_non_upload_outcomes_on_the_events_socket() {
 
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut config = base_config(tmp.path());
-    config.crictl_path = crictl.to_string_lossy().into_owned();
+    config.crictl_path = crictl;
     config.crictl_timeout_secs = 10;
-    config.event_socket_path = Some(sock_path.to_string_lossy().into_owned());
+    config.event_socket_path = Some(sock_path);
     config.max_cores_per_hour = 1;
 
     // The budget is 1. The first crash uploads. The handler suppresses the

@@ -85,13 +85,13 @@ pub async fn inspect(container_id: &str, config: &HandlerConfig) -> Option<Conta
     let output = match run_command(&mut cmd, timeout_dur).await {
         Ok(o) => o,
         Err(RunError::Io(e)) => {
-            warn!(error = %e, container_id, crictl = %config.crictl_path, "crictl inspect failed; identity will be cgroup-only");
+            warn!(error = %e, container_id, crictl = %config.crictl_path.display(), "crictl inspect failed; identity will be cgroup-only");
             return None;
         }
         Err(RunError::Timeout) => {
             warn!(
                 container_id,
-                crictl = %config.crictl_path,
+                crictl = %config.crictl_path.display(),
                 timeout_secs = config.crictl_timeout_secs,
                 "crictl inspect timed out; identity will be cgroup-only"
             );

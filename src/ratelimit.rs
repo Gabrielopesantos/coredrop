@@ -85,40 +85,52 @@ impl RateLimiter {
     }
 
     fn locked_refund(&self, scope: &str, recorded_at: i64) -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.state_path)?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
-
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let mut state: RateState = serde_json::from_slice(&bytes).unwrap_or_default();
-
-        if let Some(times) = state.events.get_mut(scope) {
-            if let Some(pos) = times.iter().rposition(|t| *t == recorded_at) {
-                times.remove(pos);
+        self.with_locked_state(false, |state| {
+            if let Some(times) = state.events.get_mut(scope) {
+                if let Some(pos) = times.iter().rposition(|t| *t == recorded_at) {
+                    times.remove(pos);
+                }
+                if times.is_empty() {
+                    state.events.remove(scope);
+                }
             }
-            if times.is_empty() {
-                state.events.remove(scope);
-            }
-        }
-
-        let json = serde_json::to_vec(&state)?;
-        file.seek(std::io::SeekFrom::Start(0))?;
-        file.set_len(0)?;
-        file.write_all(&json)?;
-        Ok(())
+        })
     }
 
     fn locked_check_and_record(&self, scope: &str, now: i64) -> std::io::Result<RateDecision> {
-        if let Some(parent) = self.state_path.parent() {
+        self.with_locked_state(true, |state| {
+            let cutoff = now - RATE_WINDOW_SECS;
+            state.events.retain(|_, times| {
+                times.retain(|t| *t > cutoff);
+                !times.is_empty()
+            });
+
+            let recent =
+                u32::try_from(state.events.get(scope).map_or(0, Vec::len)).unwrap_or(u32::MAX);
+            if recent >= self.max_per_hour {
+                RateDecision::Suppressed { recent }
+            } else {
+                state.events.entry(scope.to_string()).or_default().push(now);
+                RateDecision::Allowed
+            }
+        })
+    }
+
+    /// Open the state file under an exclusive `flock`, let `update` change the
+    /// parsed state, and write it back. `create` makes the file (and a 0700
+    /// parent dir) when missing; without it a missing file is an error.
+    fn with_locked_state<T>(
+        &self,
+        create: bool,
+        update: impl FnOnce(&mut RateState) -> T,
+    ) -> std::io::Result<T> {
+        if create && let Some(parent) = self.state_path.parent() {
             ensure_private_dir(parent)?;
         }
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .mode(0o600)
             .open(&self.state_path)?;
@@ -134,20 +146,7 @@ impl RateLimiter {
         file.read_to_end(&mut bytes)?;
         // Corrupt state self-heals to empty rather than blocking captures.
         let mut state: RateState = serde_json::from_slice(&bytes).unwrap_or_default();
-
-        let cutoff = now - RATE_WINDOW_SECS;
-        state.events.retain(|_, times| {
-            times.retain(|t| *t > cutoff);
-            !times.is_empty()
-        });
-
-        let recent = u32::try_from(state.events.get(scope).map_or(0, Vec::len)).unwrap_or(u32::MAX);
-        let decision = if recent >= self.max_per_hour {
-            RateDecision::Suppressed { recent }
-        } else {
-            state.events.entry(scope.to_string()).or_default().push(now);
-            RateDecision::Allowed
-        };
+        let result = update(&mut state);
 
         // Rewrite in place - never temp-file + rename, which would swap the
         // inode out from under blocked flock waiters.
@@ -156,7 +155,7 @@ impl RateLimiter {
         file.set_len(0)?;
         file.write_all(&json)?;
         // flock released on drop (fd close).
-        Ok(decision)
+        Ok(result)
     }
 }
 

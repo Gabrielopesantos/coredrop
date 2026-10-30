@@ -73,7 +73,7 @@ Handler flow, ordered by time-criticality:
 
 Objects land at:
 
-```
+```sh
 {cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-core.zst
 {cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-procsnapshot.tar
 {cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-manifest.json
@@ -137,21 +137,21 @@ predictable key, so any object-store CLI works. Given a manifest key (from a
 k8s Event's message, or listing the bucket) or its
 `{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}` prefix:
 
-**S3/S3-compatible (MinIO, etc.)**
+### S3/S3-compatible (MinIO, etc.)
 
 ```sh
 aws s3 cp s3://crash-artifacts/<prefix>-manifest.json - | jq .
 aws s3 cp s3://crash-artifacts/<prefix>-core.zst core.zst && zstd -d core.zst
 ```
 
-**GCS**
+### GCS
 
 ```sh
 gsutil cat gs://crash-artifacts/<prefix>-manifest.json | jq .
 gsutil cp gs://crash-artifacts/<prefix>-core.zst core.zst && zstd -d core.zst
 ```
 
-**Azure**
+### Azure
 
 ```sh
 az storage blob download --container-name crash-artifacts \

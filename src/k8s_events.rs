@@ -126,6 +126,9 @@ const MAX_AGGREGATION_KEYS: usize = 10_000;
 /// capture events arrive. Quiet daemons must not hold stale entries forever.
 const AGGREGATION_SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 
+/// Pause after a failed `recv` on the capture-event socket.
+const RECV_ERROR_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Maximum length of a namespace, which Kubernetes requires to be a DNS-1123
 /// label.
 const MAX_NAMESPACE_LEN: usize = 63;
@@ -379,7 +382,10 @@ pub async fn run_listener(socket: tokio::net::UnixDatagram, node: String) {
                 let n = match n {
                     Ok(n) => n,
                     Err(e) => {
-                        warn!(error = %e, "capture event socket recv failed");
+                        // A persistent error would otherwise spin this loop
+                        // and log on every pass.
+                        warn!(error = %e, "capture event socket recv failed; retrying in 1s");
+                        tokio::time::sleep(RECV_ERROR_BACKOFF).await;
                         continue;
                     }
                 };

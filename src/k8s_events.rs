@@ -52,15 +52,45 @@ pub fn bind_socket(path: &Path) -> std::io::Result<tokio::net::UnixDatagram> {
     tokio::net::UnixDatagram::from_std(std_socket)
 }
 
-/// Map a capture outcome to the k8s Event `reason` it produces. Outcomes that
-/// never reach this point (`skipped-non-k8s`, `failed`) or are otherwise
-/// unrecognized yield `None` - the caller drops the payload.
-fn k8s_reason(outcome: Outcome) -> Option<&'static str> {
-    match outcome {
-        Outcome::Uploaded => Some("CoreDumped"),
-        Outcome::SuppressedRateLimit => Some("CoreDumpSuppressed"),
-        Outcome::NoStoreDiscard => Some("CoreDiscardedNoStore"),
-        _ => None,
+/// The k8s Event `reason` a capture produces.
+// Variant names match the `reason` strings users filter on.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Reason {
+    CoreDumped,
+    CoreDumpSuppressed,
+    CoreDiscardedNoStore,
+}
+
+impl Reason {
+    /// Map a capture outcome to its Event reason. Outcomes that never reach
+    /// this point (`skipped-non-k8s`, `failed`) yield `None` - the caller
+    /// drops the payload.
+    fn from_outcome(outcome: Outcome) -> Option<Self> {
+        match outcome {
+            Outcome::Uploaded => Some(Self::CoreDumped),
+            Outcome::SuppressedRateLimit => Some(Self::CoreDumpSuppressed),
+            Outcome::NoStoreDiscard => Some(Self::CoreDiscardedNoStore),
+            Outcome::SkippedNonK8s | Outcome::Failed => None,
+        }
+    }
+
+    /// The `reason` field value.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CoreDumped => "CoreDumped",
+            Self::CoreDumpSuppressed => "CoreDumpSuppressed",
+            Self::CoreDiscardedNoStore => "CoreDiscardedNoStore",
+        }
+    }
+
+    /// Lowercase form for Event object names, which must be DNS subdomains.
+    fn slug(self) -> &'static str {
+        match self {
+            Self::CoreDumped => "coredumped",
+            Self::CoreDumpSuppressed => "coredumpsuppressed",
+            Self::CoreDiscardedNoStore => "corediscardednostore",
+        }
     }
 }
 
@@ -70,7 +100,7 @@ fn k8s_reason(outcome: Outcome) -> Option<&'static str> {
 struct AggKey {
     namespace: String,
     pod_uid: String,
-    reason: &'static str,
+    reason: Reason,
 }
 
 struct AggEntry {
@@ -375,7 +405,7 @@ async fn handle_payload(
     node: &str,
     payload: &CaptureEventPayload,
 ) {
-    let Some(reason) = k8s_reason(payload.outcome) else {
+    let Some(reason) = Reason::from_outcome(payload.outcome) else {
         debug!(outcome = %payload.outcome, "capture outcome has no k8s Event mapping; ignoring");
         return;
     };
@@ -423,16 +453,11 @@ async fn handle_payload(
 /// DNS-1123-subdomain-safe Event name: pod UID is already a lowercase UUID,
 /// the reason lowercased has no invalid characters, and the timestamp keeps
 /// re-created (post-TTL-expiry) entries for the same pod+reason unique.
-fn event_name(pod_uid: &str, reason: &str, timestamp: i64) -> String {
-    format!("coredrop-{pod_uid}-{}-{timestamp}", reason.to_lowercase())
+fn event_name(pod_uid: &str, reason: Reason, timestamp: i64) -> String {
+    format!("coredrop-{pod_uid}-{}-{timestamp}", reason.slug())
 }
 
-fn event_body(
-    node: &str,
-    name: &str,
-    reason: &'static str,
-    payload: &CaptureEventPayload,
-) -> Value {
+fn event_body(node: &str, name: &str, reason: Reason, payload: &CaptureEventPayload) -> Value {
     serde_json::json!({
         "apiVersion": "events.k8s.io/v1",
         "kind": "Event",
@@ -444,7 +469,7 @@ fn event_body(
         "reportingController": "coredrop",
         "reportingInstance": node,
         "action": "CoreCaptured",
-        "reason": reason,
+        "reason": reason.as_str(),
         "regarding": {
             "kind": "Pod",
             "apiVersion": "v1",
@@ -512,7 +537,7 @@ mod tests {
         }
     }
 
-    fn agg_key(pod_uid: &str, reason: &'static str) -> AggKey {
+    fn agg_key(pod_uid: &str, reason: Reason) -> AggKey {
         AggKey {
             namespace: "default".into(),
             pod_uid: pod_uid.into(),
@@ -538,26 +563,28 @@ mod tests {
     }
 
     #[test]
-    fn k8s_reason_maps_only_reportable_outcomes() {
-        assert_eq!(k8s_reason(Outcome::Uploaded), Some("CoreDumped"));
-        assert_eq!(
-            k8s_reason(Outcome::SuppressedRateLimit),
-            Some("CoreDumpSuppressed")
-        );
-        assert_eq!(
-            k8s_reason(Outcome::NoStoreDiscard),
-            Some("CoreDiscardedNoStore")
-        );
+    fn reason_maps_only_reportable_outcomes() {
+        let cases = [
+            (Outcome::Uploaded, "CoreDumped"),
+            (Outcome::SuppressedRateLimit, "CoreDumpSuppressed"),
+            (Outcome::NoStoreDiscard, "CoreDiscardedNoStore"),
+        ];
+        for (outcome, reason) in cases {
+            let got = Reason::from_outcome(outcome).unwrap();
+            assert_eq!(got.as_str(), reason);
+            // The name slug is the reason lowercased.
+            assert_eq!(got.slug(), reason.to_lowercase());
+        }
         // These two never reach the listener: `skipped-non-k8s` has no pod to
         // target, and `failed` returns before the event is sent.
-        assert_eq!(k8s_reason(Outcome::SkippedNonK8s), None);
-        assert_eq!(k8s_reason(Outcome::Failed), None);
+        assert_eq!(Reason::from_outcome(Outcome::SkippedNonK8s), None);
+        assert_eq!(Reason::from_outcome(Outcome::Failed), None);
     }
 
     #[test]
     fn aggregator_bumps_count_for_repeats_within_ttl() {
         let mut agg = Aggregator::default();
-        let key = agg_key("abc-123", "CoreDumped");
+        let key = agg_key("abc-123", Reason::CoreDumped);
         let t0 = Instant::now();
 
         let first = agg.record(key.clone(), t0, || "ev-1".to_string()).unwrap();
@@ -590,17 +617,18 @@ mod tests {
         // Different pod, and same pod with a different reason: both are their
         // own Event series.
         assert!(
-            agg.record(agg_key("pod-a", "CoreDumped"), t0, || "a".into())
+            agg.record(agg_key("pod-a", Reason::CoreDumped), t0, || "a".into())
                 .unwrap()
                 .is_new
         );
         assert!(
-            agg.record(agg_key("pod-b", "CoreDumped"), t0, || "b".into())
+            agg.record(agg_key("pod-b", Reason::CoreDumped), t0, || "b".into())
                 .unwrap()
                 .is_new
         );
         assert!(
-            agg.record(agg_key("pod-a", "CoreDumpSuppressed"), t0, || "c".into())
+            agg.record(agg_key("pod-a", Reason::CoreDumpSuppressed), t0, || "c"
+                .into())
                 .unwrap()
                 .is_new
         );
@@ -609,7 +637,7 @@ mod tests {
     #[test]
     fn aggregator_re_creates_after_ttl_expiry() {
         let mut agg = Aggregator::default();
-        let key = agg_key("abc-123", "CoreDumped");
+        let key = agg_key("abc-123", Reason::CoreDumped);
         let t0 = Instant::now();
         assert!(
             agg.record(key.clone(), t0, || "ev-1".to_string())
@@ -631,7 +659,7 @@ mod tests {
 
         for i in 0..MAX_AGGREGATION_KEYS {
             let recorded = agg
-                .record(agg_key(&format!("pod-{i}"), "CoreDumped"), t0, || {
+                .record(agg_key(&format!("pod-{i}"), Reason::CoreDumped), t0, || {
                     format!("ev-{i}")
                 })
                 .unwrap();
@@ -640,14 +668,15 @@ mod tests {
         assert_eq!(agg.entries.len(), MAX_AGGREGATION_KEYS);
 
         assert!(
-            agg.record(agg_key("overflow", "CoreDumped"), t0, || "overflow".into())
+            agg.record(agg_key("overflow", Reason::CoreDumped), t0, || "overflow"
+                .into())
                 .is_none()
         );
         assert_eq!(agg.entries.len(), MAX_AGGREGATION_KEYS);
 
         // Repeating an existing key still bumps its count.
         let recorded = agg
-            .record(agg_key("pod-0", "CoreDumped"), t0, || {
+            .record(agg_key("pod-0", Reason::CoreDumped), t0, || {
                 "should-not-run".into()
             })
             .unwrap();
@@ -660,7 +689,7 @@ mod tests {
         // The sweep exists for quiet daemons: without it, entries only expire
         // when a new capture happens to call `record`.
         let mut agg = Aggregator::default();
-        let key = agg_key("abc-123", "CoreDumped");
+        let key = agg_key("abc-123", Reason::CoreDumped);
         let t0 = Instant::now();
         agg.record(key.clone(), t0, || "ev-1".into()).unwrap();
         assert_eq!(agg.entries.len(), 1);
@@ -683,7 +712,7 @@ mod tests {
 
     #[test]
     fn event_name_is_dns_subdomain_safe() {
-        let name = event_name("abc-123-def", "CoreDumped", 1_749_600_000);
+        let name = event_name("abc-123-def", Reason::CoreDumped, 1_749_600_000);
         assert_eq!(name, "coredrop-abc-123-def-coredumped-1749600000");
         assert!(
             name.chars()
@@ -696,8 +725,8 @@ mod tests {
     #[test]
     fn event_body_targets_the_pod_and_carries_a_decodable_event_time() {
         let payload = payload("default", "abc-123");
-        let name = event_name(&payload.pod_uid, "CoreDumped", payload.timestamp);
-        let body = event_body("node-a", &name, "CoreDumped", &payload);
+        let name = event_name(&payload.pod_uid, Reason::CoreDumped, payload.timestamp);
+        let body = event_body("node-a", &name, Reason::CoreDumped, &payload);
 
         assert_eq!(body["apiVersion"], "events.k8s.io/v1");
         assert_eq!(body["kind"], "Event");

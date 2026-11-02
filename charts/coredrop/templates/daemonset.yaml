@@ -23,8 +23,6 @@ spec:
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
-      # Always on, not a chart value. See the chart README, "Why privileged + hostPID".
-      hostPID: true
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -40,6 +38,15 @@ spec:
         - name: install-handler
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Root writes into a root-owned hostPath directory: no capability needed.
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           command:
             - sh
             - -c
@@ -68,6 +75,11 @@ spec:
               value: "{{ .Values.corePattern.hostRunDir }}/handler.json"
             - name: CAPTURE_PIPE_LIMIT
               value: {{ .Values.corePattern.pipeLimit | quote }}
+            # The node's sysctl files, bind-mounted writable (see volumeMounts).
+            - name: CAPTURE_CORE_PATTERN_PATH
+              value: "/host/sysctl/core_pattern"
+            - name: CAPTURE_CORE_PIPE_LIMIT_PATH
+              value: "/host/sysctl/core_pipe_limit"
             # capture: what happens once the handler captures a crash.
             - name: CAPTURE_CLUSTER
               value: {{ .Values.capture.cluster | quote }}
@@ -128,6 +140,13 @@ spec:
             # install dir (the handler reads the config path from here).
             - name: host-run
               mountPath: {{ .Values.corePattern.hostRunDir }}
+            # Only these two sysctls are writable. The container's own /proc/sys
+            # stays read-only. The mount point is outside /proc: the runtime
+            # refuses most mounts under it.
+            - name: host-core-pattern
+              mountPath: /host/sysctl/core_pattern
+            - name: host-core-pipe-limit
+              mountPath: /host/sysctl/core_pipe_limit
             {{- if $criUnixSocket }}
             # CRI socket for crictl enrichment (post-drain, best-effort).
             - name: cri-socket
@@ -143,6 +162,14 @@ spec:
           hostPath:
             path: {{ .Values.corePattern.hostRunDir }}
             type: DirectoryOrCreate
+        - name: host-core-pattern
+          hostPath:
+            path: /proc/sys/kernel/core_pattern
+            type: File
+        - name: host-core-pipe-limit
+          hostPath:
+            path: /proc/sys/kernel/core_pipe_limit
+            type: File
         {{- if $criUnixSocket }}
         - name: cri-socket
           hostPath:

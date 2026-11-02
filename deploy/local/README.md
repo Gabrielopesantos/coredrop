@@ -6,9 +6,9 @@ crash-looping demo workload, and a smoke test that asserts real captures land
 in the bucket.
 
 The stack uses a VM, not kind or minikube in docker. The VM kernel is a real
-node boundary with kubelet running directly on it, so `hostPID`, the
-host-global `core_pattern` sysctl, and the kernel's init-namespace handler
-invocation all line up in the same namespace. The capture path needs this,
+node boundary with kubelet running directly on it, so the host-global
+`core_pattern` sysctl and the kernel's init-namespace handler invocation
+line up in the same namespace. The capture path needs this,
 and a container cannot provide it.
 
 ## Prerequisites

@@ -180,8 +180,9 @@ helm install coredrop charts/coredrop -n coredrop-system --create-namespace \
   --set capture.objectStore.url=s3://crash-artifacts
 ```
 
-The DaemonSet needs `privileged: true` and `hostPID: true`: the handler is
-kernel-exec'd in host namespaces and the daemon writes node-global sysctls.
+The DaemonSet runs as root with all capabilities dropped. The daemon writes
+the node-global `core_pattern` and `core_pipe_limit` sysctls through two
+bind-mounted sysctl files. See the chart README, "Pod privileges".
 
 ## Configuration
 

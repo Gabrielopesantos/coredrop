@@ -105,7 +105,6 @@ spec:
         {{- include "coredrop.selectorLabels" . | nindent 8 }}
         coredrop.io/cleanup: "true"
     spec:
-      hostPID: true
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -119,7 +118,13 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            privileged: true
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           command:
             - sh
             - -c
@@ -144,10 +149,10 @@ spec:
               # For a daemon killed without a clean shutdown: if core_pattern still
               # points at our handler, reset it to the kernel default. The original
               # value is unknown at this point.
-              pattern=$(cat /proc/sys/kernel/core_pattern)
+              pattern=$(cat /host/sysctl/core_pattern)
               case "$pattern" in
                 *"{{ $binDir }}/coredrop"*)
-                  printf 'core' > /proc/sys/kernel/core_pattern
+                  printf 'core' > /host/sysctl/core_pattern
                   ;;
               esac
 
@@ -162,6 +167,9 @@ spec:
               mountPath: /host/bin-parent
             - name: host-run-parent
               mountPath: /host/run-parent
+            # The node's core_pattern sysctl, writable; /proc/sys stays read-only.
+            - name: host-core-pattern
+              mountPath: /host/sysctl/core_pattern
       volumes:
         - name: host-bin-parent
           hostPath:
@@ -171,4 +179,8 @@ spec:
           hostPath:
             path: {{ dir $runDir }}
             type: DirectoryOrCreate
+        - name: host-core-pattern
+          hostPath:
+            path: /proc/sys/kernel/core_pattern
+            type: File
 {{- end -}}

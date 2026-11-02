@@ -17,9 +17,19 @@ serviceAccount:
   # -- Annotations on the daemon's ServiceAccount (e.g. cloud workload identity).
   annotations: {}
 
+# The daemon writes core_pattern and core_pipe_limit through two bind-mounted
+# sysctl files, so it needs no capabilities. Root is still required: the
+# kernel allows a sysctl write only from uid 0 in the host user namespace.
+# SELinux nodes may also need `seLinuxOptions: {type: spc_t}`.
+# -- Daemon container securityContext.
 securityContext:
-  # -- Run the daemon privileged (required to write node-global sysctls).
-  privileged: true
+  runAsUser: 0
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
 
 # How the daemon wires itself into the kernel and host: installs the handler
 # binary to a hostPath, points core_pattern at it, and raises core_pipe_limit

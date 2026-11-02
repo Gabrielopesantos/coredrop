@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Single-node k3s inside a lima Linux VM - the one environment coredrop's live
 # smoke test uses. The VM kernel is a real node boundary (kubelet runs directly
-# on it), so hostPID, the host-global core_pattern, and the kernel's
-# init-namespace coredump-handler invocation all line up in the SAME namespace.
+# on it), so the host-global core_pattern and the kernel's init-namespace
+# coredump-handler invocation line up in the SAME namespace.
 # That is what the capture path needs, and it also avoids this host's
 # rootless-podman/no-docker-daemon constraints.
 #

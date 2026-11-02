@@ -95,7 +95,7 @@ spec:
         # Nothing owns the worker DaemonSet: kubectl applies it after the release
         # is gone. If an earlier uninstall's Job died before its `delete` step,
         # that DaemonSet still runs. Remove it first. Otherwise `rollout status`
-        # sees the stale generation, and the privileged worker can wipe a newly
+        # sees the stale generation, and the stale worker can wipe a newly
         # installed handler.
         - name: reap-stale
           image: "{{ .Values.cleanup.image }}"

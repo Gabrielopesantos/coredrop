@@ -1,6 +1,6 @@
 # {{ template "chart.name" . }} Helm chart
 
-Deploys the coredrop DaemonSet: a privileged, `hostPID` pod per node that
+Deploys the coredrop DaemonSet: a root pod per node, with no capabilities, that
 installs the kernel `core_pattern` handler and streams captured cores,
 `/proc` snapshots, and manifests to an object store.
 
@@ -194,15 +194,36 @@ healthy. A failed probe restarts the pod, and at startup the daemon reinstalls
 `core_pattern` and rewrites the config. In-flight captures are separate
 kernel-exec'd processes and survive the restart.
 
-## Why privileged + hostPID
+## Pod privileges
 
-The daemon writes node-global sysctls (`core_pattern`, `core_pipe_limit`) and
-installs the handler binary on a hostPath. The kernel exec's the handler in
-the host PID/mount/network namespaces, so the handler's config and the
-rate-limit state also live on a hostPath (`corePattern.hostRunDir`) - env vars on
-the pod never reach the kernel-exec'd handler. Note the handler runs in the
-host network namespace: the object-store endpoint must be resolvable and
-reachable from the node itself (cluster DNS names won't resolve there).
+The pods run as root with all capabilities dropped. `install-handler` copies
+the binary to `corePattern.hostBinDir`. The daemon writes `handler.json`,
+binds `events.sock` in `corePattern.hostRunDir`, and writes two node-global
+sysctls:
+
+```
+node                                     daemon container
+/proc/sys/kernel/core_pattern     --->   /host/sysctl/core_pattern     (rw bind)
+/proc/sys/kernel/core_pipe_limit  --->   /host/sysctl/core_pipe_limit  (rw bind)
+                                         /proc/sys                     (read-only)
+```
+
+A sysctl has one value for the whole node, so a write through the bind
+mount changes it on the node. The kernel accepts the write from uid 0 in the
+host user namespace with no capability. Do not set `hostUsers: false`: a user
+namespace makes the write fail. On SELinux nodes, the container type may also
+need `securityContext.seLinuxOptions.type: spc_t`.
+
+This is defense in depth, not a security boundary. A process that can write
+`core_pattern` can make the kernel run any program as root on the node. The
+hostPath volumes also put the namespace at the Pod Security `privileged`
+level.
+
+The kernel-exec'd handler does not see env vars on the pod, so its config
+and the rate-limit state live on a hostPath (`corePattern.hostRunDir`). The
+handler runs in the host network namespace: the object-store endpoint must
+be resolvable and reachable from the node itself (cluster DNS names do not
+resolve there).
 
 Uninstalling the release stops the daemon, which restores the node's original
 `core_pattern` on shutdown.
@@ -236,7 +257,7 @@ container name, image, or restart count.
 The daemon does not remove its node-local files on shutdown - a shutdown is
 usually a restart, upgrade or node drain, not an uninstall. Removing them is
 instead a `post-delete` hook (`cleanup.enabled`, on by default): a Job that
-applies a short-lived privileged DaemonSet, waits for it to roll out on every
+applies a short-lived DaemonSet, waits for it to roll out on every
 node, then deletes it. On each node that worker removes the handler binary,
 `handler.json`, `events.sock` and `recent.json`, then the
 `corePattern.hostBinDir` and `corePattern.hostRunDir` directories themselves.
@@ -252,7 +273,7 @@ Two details:
 - Nothing owns that worker DaemonSet: `kubectl` creates it after the release is
   already deleted. If the hook fails partway (its deadline is 180s), the worker
   can be left running. The next `helm uninstall` reaps it before starting, but
-  if you reinstall in between, delete it first - it is privileged and will wipe
+  if you reinstall in between, delete it first - it will wipe
   the handler you just installed:
 
   ```console

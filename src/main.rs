@@ -13,7 +13,7 @@
 //!   - health check (`coredrop check`): what the chart's readiness and
 //!     liveness probes exec. Exits non-zero when the capture path has drifted.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -100,15 +100,15 @@ struct DaemonArgs {
     #[arg(long, env = "NODE_NAME")]
     node_name: Option<String>,
 
-    /// Kernel sysctl the handler is installed into. Not a flag or env knob -
-    /// an internal seam so tests can drive `run_daemon` against temp files
-    /// instead of the real `/proc/sys`.
-    #[arg(skip = PathBuf::from(coredrop::core_pattern::CORE_PATTERN_PATH))]
+    /// File the `core_pattern` sysctl is written through. The chart points it
+    /// at a writable bind mount of the node's sysctl file, because the
+    /// container's own `/proc/sys` is read-only.
+    #[arg(long, env = "CAPTURE_CORE_PATTERN_PATH", default_value = coredrop::core_pattern::CORE_PATTERN_PATH)]
     core_pattern_path: PathBuf,
 
-    /// Kernel sysctl bounding concurrently-held dumps. Same test seam as
-    /// `core_pattern_path`.
-    #[arg(skip = PathBuf::from(coredrop::core_pattern::CORE_PIPE_LIMIT_PATH))]
+    /// File the `core_pipe_limit` sysctl is written through. Same bind mount
+    /// approach as `core_pattern_path`.
+    #[arg(long, env = "CAPTURE_CORE_PIPE_LIMIT_PATH", default_value = coredrop::core_pattern::CORE_PIPE_LIMIT_PATH)]
     core_pipe_limit_path: PathBuf,
 }
 
@@ -168,7 +168,10 @@ async fn main() -> Result<()> {
         Some("check") => coredrop::health::check(
             &env_path("CAPTURE_HANDLER_PATH", coredrop::DEFAULT_HANDLER_PATH),
             &env_path("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH),
-            Path::new(coredrop::core_pattern::CORE_PATTERN_PATH),
+            &env_path(
+                "CAPTURE_CORE_PATTERN_PATH",
+                coredrop::core_pattern::CORE_PATTERN_PATH,
+            ),
         ),
         _ => run_daemon(DaemonArgs::parse()).await,
     }

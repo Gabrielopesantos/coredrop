@@ -15,6 +15,7 @@ use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -286,12 +287,12 @@ impl EventClient {
     /// is set. Each segment is percent-encoded, so a `/` or `?` in a value
     /// cannot change the path. `.` and `..` segments are dropped by `url`;
     /// `handle_payload` rejects those before any request.
-    fn events_url(&self, namespace: &str, name: Option<&str>) -> Result<reqwest::Url, String> {
+    fn events_url(&self, namespace: &str, name: Option<&str>) -> Result<reqwest::Url> {
         let mut url = self.events_base.clone();
         {
             let mut segments = url
                 .path_segments_mut()
-                .map_err(|()| format!("{} cannot be a base URL", self.events_base))?;
+                .map_err(|()| anyhow!("{} cannot be a base URL", self.events_base))?;
             segments.extend([namespace, "events"]);
             if let Some(name) = name {
                 segments.push(name);
@@ -300,7 +301,7 @@ impl EventClient {
         Ok(url)
     }
 
-    async fn create_event(&self, namespace: &str, body: &Value) -> Result<(), String> {
+    async fn create_event(&self, namespace: &str, body: &Value) -> Result<()> {
         let url = self.events_url(namespace, None)?;
         let resp = self
             .http
@@ -309,7 +310,7 @@ impl EventClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .context("create event")?;
         api_result(resp, "create event").await
     }
 
@@ -318,7 +319,7 @@ impl EventClient {
         namespace: &str,
         name: &str,
         body: &Value,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let url = self.events_url(namespace, Some(name))?;
         let resp = self
             .http
@@ -328,7 +329,7 @@ impl EventClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .context("patch event series")?;
         api_result(resp, "patch event series").await
     }
 }
@@ -350,14 +351,14 @@ impl EventClient {
 /// Turn a non-2xx response into an `Err` carrying the API server's response
 /// body - the status code alone ("HTTP 400") gives no way to tell a bad
 /// request body from an RBAC/admission rejection.
-async fn api_result(resp: reqwest::Response, what: &str) -> Result<(), String> {
+async fn api_result(resp: reqwest::Response, what: &str) -> Result<()> {
     let status = resp.status();
     if status.is_success() {
         return Ok(());
     }
     let body = resp.text().await.unwrap_or_default();
     let body = body.chars().take(500).collect::<String>();
-    Err(format!("{what}: HTTP {status}: {body}"))
+    Err(anyhow!("{what}: HTTP {status}: {body}"))
 }
 
 /// Listen for capture-event datagrams until the socket is closed: log each

@@ -1,11 +1,13 @@
 //! Daemon side: listener for [`crate::events::CaptureEventPayload`] datagrams
-//! plus a minimal k8s Event client, so `kubectl describe pod`/
-//! `kubectl get events` can surface a capture.
+//! plus a minimal k8s Event client. The listener logs one `capture complete`
+//! line per capture, so `kubectl logs` shows every capture, and posts a k8s
+//! Event for the ones that target a pod, so `kubectl describe pod`/
+//! `kubectl get events` can surface them.
 //!
 //! The handler sends the payload (see [`crate::events`]); this module owns
-//! everything downstream of that socket - aggregation and the API calls -
-//! which needs the projected `ServiceAccount` token and only ever runs in the
-//! long-lived daemon.
+//! everything downstream of that socket - logging, aggregation and the API
+//! calls - which needs the projected `ServiceAccount` token and only ever runs
+//! in the long-lived daemon.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -14,7 +16,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::cgroup::is_pod_uid;
 use crate::config::ensure_private_dir;
@@ -358,19 +360,26 @@ async fn api_result(resp: reqwest::Response, what: &str) -> Result<(), String> {
     Err(format!("{what}: HTTP {status}: {body}"))
 }
 
-/// Listen for capture-event datagrams and post/patch k8s Events until the
-/// socket is closed. Every failure path is best-effort: logged and swallowed,
-/// never propagated - a broken API server must never crash the daemon.
+/// Listen for capture-event datagrams until the socket is closed: log each
+/// capture, and post/patch k8s Events when `post_events` is set. Every failure
+/// path is best-effort: logged and swallowed, never propagated - a broken API
+/// server must never crash the daemon.
 ///
 /// Even when no events arrive, the aggregator is swept periodically so stale
 /// entries do not accumulate indefinitely.
-pub async fn run_listener(socket: tokio::net::UnixDatagram, node: String) {
-    let client = EventClient::from_env();
-    if client.is_none() {
-        warn!(
-            "kubernetes API client unavailable (no in-cluster ServiceAccount/API server found); capture events will be dropped"
-        );
-    }
+pub async fn run_listener(socket: tokio::net::UnixDatagram, node: String, post_events: bool) {
+    let client = if post_events {
+        let client = EventClient::from_env();
+        if client.is_none() {
+            warn!(
+                "kubernetes API client unavailable (no in-cluster ServiceAccount/API server found); captures are logged but no k8s Events are posted"
+            );
+        }
+        client
+    } else {
+        info!("k8s Event emission disabled (--no-events); captures are still logged");
+        None
+    };
     let mut aggregator = Aggregator::default();
     let mut buf = vec![0u8; 64 * 1024];
     let mut sweep_interval = tokio::time::interval(AGGREGATION_SWEEP_INTERVAL);
@@ -396,6 +405,7 @@ pub async fn run_listener(socket: tokio::net::UnixDatagram, node: String) {
                         continue;
                     }
                 };
+                log_capture(&payload);
                 handle_payload(client.as_ref(), &mut aggregator, &node, &payload).await;
             }
             _ = sweep_interval.tick() => {
@@ -403,6 +413,44 @@ pub async fn run_listener(socket: tokio::net::UnixDatagram, node: String) {
             }
         }
     }
+}
+
+/// The daemon's copy of the handler's `capture complete` line. The kernel
+/// gives the handler no stdout, so this is the one operators see.
+fn log_capture(p: &CaptureEventPayload) {
+    let none = "<none>";
+    macro_rules! line {
+        ($level:ident) => {
+            $level!(
+                outcome = p.outcome.as_str(),
+                namespace = p.namespace.as_deref().unwrap_or(none),
+                pod = p.pod_name.as_deref().unwrap_or(none),
+                container = p.container_name.as_deref().unwrap_or(none),
+                pod_uid = p.pod_uid.as_deref().unwrap_or(none),
+                host_pid = p.host_pid,
+                exe = %p.exe,
+                signal = p.signal_name.clone().unwrap_or_else(|| p.signal.to_string()),
+                manifest_key = p.manifest_key.as_deref().unwrap_or(none),
+                core_bytes = p.core_bytes,
+                stored_bytes = p.stored_bytes.unwrap_or(0),
+                truncated = p.truncated,
+                error = p.error.as_deref().unwrap_or(""),
+                "capture complete"
+            )
+        };
+    }
+    if p.outcome == Outcome::Failed {
+        line!(warn);
+    } else {
+        line!(info);
+    }
+}
+
+/// The pod a k8s Event is posted on.
+struct EventTarget<'a> {
+    namespace: &'a str,
+    pod_name: &'a str,
+    pod_uid: &'a str,
 }
 
 async fn handle_payload(
@@ -418,41 +466,55 @@ async fn handle_payload(
     let Some(client) = client else {
         return;
     };
+    // An Event targets a pod object, so it needs the crictl-enriched identity.
+    let (Some(namespace), Some(pod_name), Some(pod_uid)) = (
+        payload.namespace.as_deref(),
+        payload.pod_name.as_deref(),
+        payload.pod_uid.as_deref(),
+    ) else {
+        debug!("capture has no namespace/pod identity; no k8s Event to post");
+        return;
+    };
+    let target = EventTarget {
+        namespace,
+        pod_name,
+        pod_uid,
+    };
 
     // Both values go into request URLs unencoded, so check their characters,
     // not only their length.
-    if !is_dns1123_label(&payload.namespace) || !is_pod_uid(&payload.pod_uid) {
+    if !is_dns1123_label(namespace) || !is_pod_uid(pod_uid) {
         warn!(
-            namespace = %payload.namespace,
-            pod_uid = %payload.pod_uid,
+            namespace = %namespace,
+            pod_uid = %pod_uid,
             "capture event payload has an invalid namespace/pod_uid; dropping"
         );
         return;
     }
 
     let key = AggKey {
-        namespace: payload.namespace.clone(),
-        pod_uid: payload.pod_uid.clone(),
+        namespace: namespace.to_string(),
+        pod_uid: pod_uid.to_string(),
         reason,
     };
     let Some(recorded) = aggregator.record(key, Instant::now(), || {
-        event_name(&payload.pod_uid, reason, payload.timestamp)
+        event_name(pod_uid, reason, payload.timestamp)
     }) else {
         return;
     };
     let last_observed = rfc3339_micro(payload.timestamp);
 
     let result = if recorded.is_new {
-        let body = event_body(node, &recorded.event_name, reason, payload);
-        client.create_event(&payload.namespace, &body).await
+        let body = event_body(node, &recorded.event_name, reason, &target, payload);
+        client.create_event(namespace, &body).await
     } else {
         let body = series_patch(recorded.count, &last_observed);
         client
-            .patch_event_series(&payload.namespace, &recorded.event_name, &body)
+            .patch_event_series(namespace, &recorded.event_name, &body)
             .await
     };
     if let Err(e) = result {
-        warn!(error = %e, event = %recorded.event_name, namespace = %payload.namespace, "posting kubernetes event failed");
+        warn!(error = %e, event = %recorded.event_name, namespace = %namespace, "posting kubernetes event failed");
     }
 }
 
@@ -463,13 +525,19 @@ fn event_name(pod_uid: &str, reason: Reason, timestamp: i64) -> String {
     format!("coredrop-{pod_uid}-{}-{timestamp}", reason.slug())
 }
 
-fn event_body(node: &str, name: &str, reason: Reason, payload: &CaptureEventPayload) -> Value {
+fn event_body(
+    node: &str,
+    name: &str,
+    reason: Reason,
+    target: &EventTarget<'_>,
+    payload: &CaptureEventPayload,
+) -> Value {
     serde_json::json!({
         "apiVersion": "events.k8s.io/v1",
         "kind": "Event",
         "metadata": {
             "name": name,
-            "namespace": payload.namespace,
+            "namespace": target.namespace,
         },
         "eventTime": rfc3339_micro(payload.timestamp),
         "reportingController": "coredrop",
@@ -479,9 +547,9 @@ fn event_body(node: &str, name: &str, reason: Reason, payload: &CaptureEventPayl
         "regarding": {
             "kind": "Pod",
             "apiVersion": "v1",
-            "namespace": payload.namespace,
-            "name": payload.pod_name,
-            "uid": payload.pod_uid,
+            "namespace": target.namespace,
+            "name": target.pod_name,
+            "uid": target.pod_uid,
         },
         "note": note(payload),
         "type": "Warning",
@@ -530,15 +598,21 @@ mod tests {
 
     fn payload(namespace: &str, pod_uid: &str) -> CaptureEventPayload {
         CaptureEventPayload {
-            namespace: namespace.into(),
-            pod_name: "my-pod".into(),
-            pod_uid: pod_uid.into(),
+            namespace: Some(namespace.into()),
+            pod_name: Some("my-pod".into()),
+            pod_uid: Some(pod_uid.into()),
+            container_id: Some("def456".into()),
             container_name: Some("app".into()),
+            host_pid: 4242,
+            exe: "server".into(),
             signal: 11,
             signal_name: Some("SIGSEGV".into()),
             outcome: Outcome::Uploaded,
             manifest_key: Some("local/abc-123/def456/1234567890-manifest.json".into()),
+            core_bytes: 4096,
             stored_bytes: Some(1024),
+            truncated: false,
+            error: None,
             timestamp: 1_749_600_000,
         }
     }
@@ -731,8 +805,13 @@ mod tests {
     #[test]
     fn event_body_targets_the_pod_and_carries_a_decodable_event_time() {
         let payload = payload("default", "abc-123");
-        let name = event_name(&payload.pod_uid, Reason::CoreDumped, payload.timestamp);
-        let body = event_body("node-a", &name, Reason::CoreDumped, &payload);
+        let target = EventTarget {
+            namespace: "default",
+            pod_name: "my-pod",
+            pod_uid: "abc-123",
+        };
+        let name = event_name(target.pod_uid, Reason::CoreDumped, payload.timestamp);
+        let body = event_body("node-a", &name, Reason::CoreDumped, &target, &payload);
 
         assert_eq!(body["apiVersion"], "events.k8s.io/v1");
         assert_eq!(body["kind"], "Event");
@@ -858,6 +937,30 @@ mod tests {
         )
         .await;
         assert_eq!(agg.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_payload_skips_a_capture_without_pod_identity() {
+        // cgroup-only identity (crictl failed) or a host process: there is no
+        // pod object to target, so nothing is recorded or posted.
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", "test".into());
+        let mut agg = Aggregator::default();
+        let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+        let mut no_namespace = payload("default", uid);
+        no_namespace.namespace = None;
+        let mut no_pod_name = payload("default", uid);
+        no_pod_name.pod_name = None;
+        let mut no_pod_uid = payload("default", uid);
+        no_pod_uid.pod_uid = None;
+        for p in [no_namespace, no_pod_name, no_pod_uid] {
+            handle_payload(Some(&client), &mut agg, "test-node", &p).await;
+        }
+        assert!(agg.entries.is_empty());
     }
 
     /// Self-signed P-256 test CAs (`CN=test-ca-1`, `CN=test-ca-2`).

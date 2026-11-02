@@ -84,7 +84,8 @@ struct DaemonArgs {
     crictl_timeout_secs: u64,
 
     /// Disable k8s Event emission on capture (`kubectl describe pod`/
-    /// `kubectl get events` surfacing). Events are on by default.
+    /// `kubectl get events` surfacing). Events are on by default. Captures are
+    /// still logged by the daemon either way.
     #[arg(long, env = "CAPTURE_NO_EVENTS")]
     no_events: bool,
 
@@ -128,8 +129,7 @@ impl DaemonArgs {
             upload_deadline_secs: self.upload_deadline_secs,
             crictl_timeout_secs: self.crictl_timeout_secs,
             rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
-            event_socket_path: (!self.no_events)
-                .then(|| coredrop::config::event_socket_path_for(&self.config_path)),
+            event_socket_path: Some(coredrop::config::event_socket_path_for(&self.config_path)),
         }
     }
 }
@@ -220,24 +220,20 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
 
     // Bind the capture-event socket before writing the config, so the handler
     // only ever gets a path the daemon is listening on rather than one
-    // it would send datagrams into the void. `event_socket_path` is `Some`
-    // exactly when events are enabled.
-    let events_socket = match &config.event_socket_path {
-        None => {
-            info!("capture events disabled (--no-events)");
-            None
+    // it would send datagrams into the void. It is bound even with
+    // --no-events: the daemon logs every capture it receives there.
+    let socket_path = coredrop::config::event_socket_path_for(&args.config_path);
+    let events_socket = match coredrop::k8s_events::bind_socket(&socket_path) {
+        Ok(socket) => {
+            info!(path = %socket_path.display(), "capture event socket bound");
+            socket
         }
-        Some(path) => match coredrop::k8s_events::bind_socket(path) {
-            Ok(socket) => {
-                info!(path = %path.display(), "capture event socket bound");
-                Some(socket)
-            }
-            Err(e) => {
-                error!(error = %e, path = %path.display(), "failed to bind capture event socket; exiting for restart");
-                return Err(e)
-                    .with_context(|| format!("binding capture event socket {}", path.display()));
-            }
-        },
+        Err(e) => {
+            error!(error = %e, path = %socket_path.display(), "failed to bind capture event socket; exiting for restart");
+            return Err(e).with_context(|| {
+                format!("binding capture event socket {}", socket_path.display())
+            });
+        }
     };
 
     let config_path = &args.config_path;
@@ -267,14 +263,16 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         }
     };
 
-    if let Some(socket) = events_socket {
-        let node = args
-            .node_name
-            .clone()
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(coredrop::handler::node_hostname);
-        tokio::spawn(coredrop::k8s_events::run_listener(socket, node));
-    }
+    let node = args
+        .node_name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(coredrop::handler::node_hostname);
+    tokio::spawn(coredrop::k8s_events::run_listener(
+        events_socket,
+        node,
+        !args.no_events,
+    ));
 
     shutdown_signal().await?;
     info!("shutdown signal received");
@@ -308,7 +306,7 @@ mod tests {
     use super::*;
 
     /// Daemon args that touch nothing real: temp sysctl paths, no store, no
-    /// events. Each test overrides the one field whose failure it exercises.
+    /// k8s Events. Each test overrides the one field whose failure it exercises.
     fn args(config_path: &Path, pattern: &Path, pipe: &Path) -> DaemonArgs {
         DaemonArgs {
             handler_path: "/opt/coredrop/bin/coredrop".into(),
@@ -345,14 +343,15 @@ mod tests {
     async fn errors_when_config_write_fails() {
         let dir = TempDir::new().unwrap();
         let (pattern, pipe) = sysctls(dir.path());
-        // Parent of the config path is a regular file, so the dir cannot be made.
-        let blocker = dir.path().join("blocker");
-        std::fs::write(&blocker, "not a directory").unwrap();
+        // The config path is a directory, so the file cannot be written. The
+        // socket bind before it still succeeds in the same parent dir.
+        let config_path = dir.path().join("run").join("handler.json");
+        std::fs::create_dir_all(&config_path).unwrap();
 
-        let err = run_daemon(args(&blocker.join("handler.json"), &pattern, &pipe))
+        let err = run_daemon(args(&config_path, &pattern, &pipe))
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("config dir"), "{err:#}");
+        assert!(format!("{err:#}").contains("handler.json"), "{err:#}");
 
         // The sysctls must not have been touched - install runs after the write.
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
@@ -375,6 +374,9 @@ mod tests {
         assert!(format!("{err:#}").contains("core_pattern"), "{err:#}");
         // The config write ran first and succeeded, so the install is what failed.
         assert!(dir.path().join("run").join("handler.json").exists());
+        // The socket is bound even with k8s Events off: the daemon logs every
+        // capture it receives there.
+        assert!(dir.path().join("run").join("events.sock").exists());
     }
 
     #[tokio::test]
@@ -386,10 +388,9 @@ mod tests {
         let (pattern, pipe) = sysctls(dir.path());
         let run_dir = dir.path().join("d".repeat(120));
 
-        let mut a = args(&run_dir.join("handler.json"), &pattern, &pipe);
-        a.no_events = false;
-
-        let err = run_daemon(a).await.unwrap_err();
+        let err = run_daemon(args(&run_dir.join("handler.json"), &pattern, &pipe))
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("capture event socket"),
             "{err:#}"

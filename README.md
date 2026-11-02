@@ -100,12 +100,26 @@ Objects land at:
   runs a post-delete hook that removes the binary, the runtime files and the
   hostPath directories themselves.
 
-## Events
+## Capture log and Events
 
-Node logs and bucket listing are the only crash-discovery paths otherwise
-available, but most people debugging a pod start at `kubectl`. coredrop also
-reports each capture as a Kubernetes Event on the crashing pod, so
-`kubectl describe pod`/`kubectl get events` surfaces the crash directly:
+The kernel gives the handler no stdout, so the handler reports every capture
+to the daemon over a unix datagram socket (`/run/coredrop/events.sock` by
+default). The daemon logs one `capture complete` line per capture, failures
+and non-pod crashes included:
+
+```sh
+$ kubectl -n <namespace> logs ds/coredrop | grep 'capture complete'
+INFO coredrop::k8s_events: capture complete outcome="uploaded" namespace="default" pod="my-app-7f8b9c" container="app" ... manifest_key="local/<podUID>/<containerID>/1717000000-4242-manifest.json"
+WARN coredrop::k8s_events: capture complete outcome="failed" ... error="draining core stream: ..."
+```
+
+A crash the handler never sees, for example because the handler binary is
+missing, shows up only in the node's kernel log (`dmesg`: `coredump: ...
+pipe failed`).
+
+Most people debugging a pod start at `kubectl`, so coredrop also reports each
+capture as a Kubernetes Event on the crashing pod.
+`kubectl describe pod`/`kubectl get events` then surfaces the crash directly:
 
 ```sh
 $ kubectl get events --field-selector reason=CoreDumped
@@ -119,16 +133,15 @@ LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
 | Rate-limit budget exhausted | `CoreDumpSuppressed` |
 | No object store configured | `CoreDiscardedNoStore` |
 
-The kernel-exec'd handler reports the capture to the daemon over a unix
-datagram socket (`/run/coredrop/events.sock` by default); only the daemon
-touches the API server, so the ServiceAccount token never reaches the
-handler. A crash-looping pod bumps one Event's `series.count` instead of
+Only the daemon touches the API server, so the ServiceAccount token never
+reaches the handler. A crash-looping pod bumps one Event's `series.count` instead of
 creating a new object per crash. Events require crictl-enriched identity
 (namespace + pod name) - a cgroup-only identity has no pod object to target
 and is skipped.
 
-Disable with `--no-events`/`CAPTURE_NO_EVENTS`, or the chart's
-`events.enabled: false` (also skips rendering the events RBAC).
+Disable Events with `--no-events`/`CAPTURE_NO_EVENTS`, or the chart's
+`events.enabled: false` (also skips rendering the events RBAC). The capture
+log stays on.
 
 ## Retrieving artifacts
 
@@ -200,7 +213,7 @@ The main ones:
 | `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
 | `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
-| `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture |
+| `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture; captures are still logged |
 
 Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
 `AZURE_STORAGE_ACCESS_KEY`, ...) are read from the environment only - never

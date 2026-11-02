@@ -61,7 +61,7 @@ The daemon logs a warning at startup when it is configured with one.
 `ClusterRoleBinding` granting `create`/`patch` on `events` in the
 `events.k8s.io` API group, bound to the DaemonSet's `ServiceAccount`. It's
 cluster-scoped because a crash can happen in any namespace the node hosts
-pods for - see the main [README](../../README.md#events) for what gets
+pods for - see the main [README](../../README.md#capture-log-and-events) for what gets
 posted. Set `events.enabled: false` to skip both the RBAC objects and the
 daemon's socket listener; the handler then skips the report with no error.
 

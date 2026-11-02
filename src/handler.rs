@@ -12,9 +12,10 @@
 //!    for human-readable identity (namespace, pod name, container name, image,
 //!    restart count). Failure degrades to cgroup-only identity.
 //! 5. Manifest write - assemble and PUT the JSON sidecar next to the core.
-//! 6. Capture event - fire-and-forget datagram to the daemon, which posts a
-//!    k8s Event on the crashing pod. Best-effort; requires crictl-enriched
-//!    identity (namespace + pod name).
+//! 6. Capture event - fire-and-forget datagram to the daemon for every
+//!    outcome, failures included. The daemon logs it (the handler itself has
+//!    no stdout) and, with crictl-enriched identity (namespace + pod name),
+//!    posts a k8s Event on the crashing pod. Best-effort.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -23,7 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use object_store::ObjectStore;
 use tokio::io::AsyncRead;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::backend::{CaptureBackend, DiscardBackend};
 use crate::cgroup::{self, CgroupIdentity};
@@ -204,11 +205,15 @@ pub async fn run(
             if rate_recorded && let Some((id, _, _)) = target {
                 limiter.refund(&id.pod_uid, args.timestamp);
             }
-            info!(
-                outcome = Outcome::Failed.as_str(),
-                host_pid = args.host_pid,
-                error = %e,
-                "capture complete"
+            // crictl has not run yet, so only the cgroup identity is known.
+            report(
+                config,
+                &CaptureEventPayload {
+                    pod_uid: identity.as_ref().map(|id| id.pod_uid.clone()),
+                    container_id: identity.as_ref().map(|id| id.container_id.clone()),
+                    error: Some(format!("{e:#}")),
+                    ..base_payload(&args, Outcome::Failed)
+                },
             );
             return Err(e);
         }
@@ -328,8 +333,6 @@ pub async fn run(
         None
     };
 
-    // One summary line per capture, on every path - the log
-    // interface operators alert on.
     let outcome = if identity.is_none() {
         Outcome::SkippedNonK8s
     } else if rate_suppressed {
@@ -342,43 +345,65 @@ pub async fn run(
         Outcome::Failed
     };
 
-    // Step 6: report the capture to the daemon for k8s Event emission.
-    // Requires namespace + pod name, i.e. only when crictl enrichment
-    // succeeded - a cgroup-only identity can't target a pod object.
+    // Step 6: report the capture to the daemon, which logs it and, when
+    // crictl resolved namespace + pod name, posts a k8s Event.
     let id = &manifest.identity;
-    if let (Some(namespace), Some(pod_name)) = (&id.namespace, &id.pod_name) {
-        let payload = CaptureEventPayload {
-            namespace: namespace.clone(),
-            pod_name: pod_name.clone(),
-            pod_uid: id.pod_uid.clone(),
+    report(
+        config,
+        &CaptureEventPayload {
+            namespace: id.namespace.clone(),
+            pod_name: id.pod_name.clone(),
+            pod_uid: identity.as_ref().map(|i| i.pod_uid.clone()),
+            container_id: identity.as_ref().map(|i| i.container_id.clone()),
             container_name: id.container_name.clone(),
-            signal: args.signal,
-            signal_name: signal_name(args.signal).map(str::to_string),
-            outcome,
-            manifest_key: manifest_key.clone(),
+            manifest_key,
+            core_bytes: stats.bytes,
             stored_bytes: uploaded.then_some(stats.stored_bytes),
-            timestamp: args.timestamp,
-        };
-        events::send_capture_event(config.event_socket_path.as_deref(), &payload);
-    } else {
-        debug!(
-            "no namespace/pod name resolved (crictl enrichment unavailable); skipping capture event"
-        );
-    }
-
-    info!(
-        outcome = outcome.as_str(),
-        host_pid = args.host_pid,
-        container_id = identity
-            .as_ref()
-            .map_or("<none>", |id| id.container_id.as_str()),
-        core_key = core_key.as_deref().unwrap_or("<none>"),
-        core_bytes = stats.bytes,
-        truncated = stats.truncated,
-        "capture complete"
+            truncated: stats.truncated,
+            ..base_payload(&args, outcome)
+        },
     );
 
     Ok(())
+}
+
+/// The payload fields every capture has, whatever its outcome.
+fn base_payload(args: &CaptureArgs, outcome: Outcome) -> CaptureEventPayload {
+    CaptureEventPayload {
+        namespace: None,
+        pod_name: None,
+        pod_uid: None,
+        container_id: None,
+        container_name: None,
+        host_pid: args.host_pid,
+        exe: args.exe.clone(),
+        signal: args.signal,
+        signal_name: signal_name(args.signal).map(str::to_string),
+        outcome,
+        manifest_key: None,
+        core_bytes: 0,
+        stored_bytes: None,
+        truncated: false,
+        error: None,
+        timestamp: args.timestamp,
+    }
+}
+
+/// One summary line per capture, on every path, then the same summary to the
+/// daemon. The kernel gives the handler no stdout, so the daemon's copy of
+/// this line is the one operators see and alert on.
+fn report(config: &HandlerConfig, payload: &CaptureEventPayload) {
+    info!(
+        outcome = payload.outcome.as_str(),
+        host_pid = payload.host_pid,
+        container_id = payload.container_id.as_deref().unwrap_or("<none>"),
+        manifest_key = payload.manifest_key.as_deref().unwrap_or("<none>"),
+        core_bytes = payload.core_bytes,
+        truncated = payload.truncated,
+        error = payload.error.as_deref().unwrap_or(""),
+        "capture complete"
+    );
+    events::send_capture_event(config.event_socket_path.as_deref(), payload);
 }
 
 /// The UTS hostname: the node name for the handler, which the kernel runs in

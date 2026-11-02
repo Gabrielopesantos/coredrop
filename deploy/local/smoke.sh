@@ -332,6 +332,20 @@ else
   warn "  no CoreDumpSuppressed k8s Event appeared in $DEMO_NAMESPACE within ${SMOKE_TIMEOUT}s"; fail=1
 fi
 
+# --- 9. the daemon logs every capture ----------------------------------------
+# The kernel gives the handler no stdout. The handler reports each capture over
+# events.sock, and the daemon logs one `capture complete` line for it.
+log "checking the daemon log for this pod's captures"
+daemon_log="$(kubectl -n "$NAMESPACE" logs "$daemon_pod" -c coredrop 2>/dev/null \
+  | sed 's/\x1b\[[0-9;]*m//g' | grep -F 'capture complete' | grep -F "$crash_pod" || true)"
+for outcome in uploaded suppressed-rate-limit; do
+  if printf '%s\n' "$daemon_log" | grep -q "outcome=\"\?$outcome\"\?[ ]"; then
+    log "  daemon logged a capture: outcome=$outcome pod=$crash_pod"
+  else
+    warn "  no 'capture complete outcome=$outcome' line for $crash_pod in $daemon_pod's log"; fail=1
+  fi
+done
+
 if [ "$fail" -ne 0 ]; then
   die "smoke test FAILED"
 fi

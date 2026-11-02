@@ -44,6 +44,8 @@ coredrop installed.
    with `core.skipped_reason=rate_limit` and no core object.
 7. The crash pod has a `CoreDumped` Event, and a `CoreDumpSuppressed` Event
    whose `series.count` grows.
+8. The daemon log has a `capture complete` line for the crash pod with
+   outcome `uploaded`, and one with `suppressed-rate-limit`.
 
 ## What the lifecycle test asserts
 

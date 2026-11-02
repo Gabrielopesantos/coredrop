@@ -116,7 +116,8 @@ pub struct HandlerConfig {
     /// Rate-limit state file, sibling of the handler config on the hostPath.
     pub rate_state_path: PathBuf,
     /// Capture-event unix datagram socket the daemon listens on, sibling of
-    /// the handler config on the hostPath. `None` when events are disabled.
+    /// the handler config on the hostPath. The daemon always sets it; `None`
+    /// (tests, a hand-written config) means the handler reports nothing.
     pub event_socket_path: Option<PathBuf>,
 }
 

@@ -3,6 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use object_store::ObjectStore;
@@ -187,9 +188,12 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
         .recv(&mut buf)
         .expect("handler must report the capture on the events socket");
     let event: CaptureEventPayload = serde_json::from_slice(&buf[..n]).unwrap();
-    assert_eq!(event.namespace, "production");
-    assert_eq!(event.pod_name, "nginx-abc123");
-    assert_eq!(event.pod_uid, POD_UID);
+    assert_eq!(event.namespace.as_deref(), Some("production"));
+    assert_eq!(event.pod_name.as_deref(), Some("nginx-abc123"));
+    assert_eq!(event.pod_uid.as_deref(), Some(POD_UID));
+    assert_eq!(event.container_id.as_deref(), Some(CONTAINER_ID));
+    assert_eq!(event.host_pid, pid);
+    assert!(event.error.is_none());
     assert_eq!(event.container_name.as_deref(), Some("mycontainer"));
     assert_eq!(event.outcome, Outcome::Uploaded);
     assert_eq!(event.signal_name.as_deref(), Some("SIGSEGV"));
@@ -606,6 +610,93 @@ async fn run_non_kubernetes_cgroup_skips_uploads() {
     assert!(
         result.objects.is_empty(),
         "no objects should be written without a k8s cgroup"
+    );
+}
+
+/// Bind a capture-event listener in `root` and return it with its path.
+fn bind_events_listener(root: &Path) -> (std::os::unix::net::UnixDatagram, PathBuf) {
+    let sock_path = root.join("events.sock");
+    let listener = std::os::unix::net::UnixDatagram::bind(&sock_path).unwrap();
+    listener
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    (listener, sock_path)
+}
+
+fn recv_event(listener: &std::os::unix::net::UnixDatagram) -> CaptureEventPayload {
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = listener
+        .recv(&mut buf)
+        .expect("the capture must be reported on the events socket");
+    serde_json::from_slice(&buf[..n]).unwrap()
+}
+
+/// A host process crash has no kubernetes identity. It is still reported, so
+/// the daemon can log it, even though no k8s Event can target it.
+#[tokio::test]
+async fn run_non_kubernetes_cgroup_reports_skipped() {
+    let pid = 201;
+
+    let tmp = TempDir::new().unwrap();
+    let pid_dir = proc_root(tmp.path()).join(pid.to_string());
+    std::fs::create_dir_all(&pid_dir).unwrap();
+    std::fs::write(pid_dir.join("cgroup"), "0::/system.slice/sshd.service\n").unwrap();
+    let (listener, sock_path) = bind_events_listener(tmp.path());
+
+    let mut config = base_config(tmp.path());
+    config.event_socket_path = Some(sock_path);
+
+    let mut core_in: &[u8] = b"core bytes";
+    run(capture_args(pid, 9, 2_000_000), &config, &mut core_in, None)
+        .await
+        .unwrap();
+
+    let event = recv_event(&listener);
+    assert_eq!(event.outcome, Outcome::SkippedNonK8s);
+    assert_eq!(event.host_pid, pid);
+    assert!(event.pod_uid.is_none());
+    assert!(event.namespace.is_none());
+    assert_eq!(event.core_bytes, b"core bytes".len() as u64);
+}
+
+/// A failed drain returns early, before crictl and the manifest. It is still
+/// reported, with the cgroup identity and the error.
+#[tokio::test]
+async fn run_failed_drain_reports_failed_with_error() {
+    let pid = 4249;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let (listener, sock_path) = bind_events_listener(tmp.path());
+
+    let mut config = base_config(tmp.path());
+    config.event_socket_path = Some(sock_path);
+
+    let failing: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let mut core_in: &[u8] = b"core payload";
+    assert!(
+        run(
+            capture_args(pid, 11, TS),
+            &config,
+            &mut core_in,
+            Some(failing)
+        )
+        .await
+        .is_err()
+    );
+
+    let event = recv_event(&listener);
+    assert_eq!(event.outcome, Outcome::Failed);
+    assert_eq!(event.pod_uid.as_deref(), Some(POD_UID));
+    assert_eq!(event.container_id.as_deref(), Some(CONTAINER_ID));
+    assert!(event.namespace.is_none(), "crictl has not run on this path");
+    assert!(
+        event
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("draining core stream")),
+        "{:?}",
+        event.error
     );
 }
 

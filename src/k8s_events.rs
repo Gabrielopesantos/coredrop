@@ -314,12 +314,7 @@ impl EventClient {
         api_result(resp, "create event").await
     }
 
-    async fn patch_event_series(
-        &self,
-        namespace: &str,
-        name: &str,
-        body: &Value,
-    ) -> Result<()> {
+    async fn patch_event_series(&self, namespace: &str, name: &str, body: &Value) -> Result<()> {
         let url = self.events_url(namespace, Some(name))?;
         let resp = self
             .http

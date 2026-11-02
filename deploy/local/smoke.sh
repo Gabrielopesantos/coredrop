@@ -2,21 +2,22 @@
 # Live smoke test. Asserts the full kernel-to-bucket path on a real
 # node: the DaemonSet repoints core_pattern at the handler, a faulting workload
 # produces a core, and coredrop streams a valid core + redacted proc-snapshot +
-# manifest to MinIO - then uninstall restores core_pattern. coredrop has no
-# control plane, so every assertion is made directly against the bucket (mc over
-# a port-forward), not a REST API. See README.md.
+# manifest to MinIO. Non-destructive and repeatable: coredrop stays installed
+# (lifecycle.sh tests the uninstall paths). coredrop has no control plane, so
+# every assertion is made directly against the bucket (mc over a port-forward),
+# not a REST API. See README.md.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 require kubectl helm mc zstd jq tar sha256sum limactl
 kube_context
+require_release
+restart_demo
 
 LOCAL_PORT="${LOCAL_PORT:-19000}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
 MC_ALIAS="coredrop-smoke"
-HANDLER_MARK="coredrop capture"               # core_pattern points at our handler
 SECRET_CANARY="s3cr3t-smoke-canary-do-not-store"  # the workload's SECRET_FOO value
 CMDLINE_CANARY="s3cr3t-cmdline-canary-do-not-store"  # the workload's --db-password value
-ORIG_FILE="$SCRIPT_DIR/.tmp/orig_core_pattern"    # pre-install value (written by up.sh)
 WORKDIR="$(mktemp -d)"
 
 fail=0
@@ -95,14 +96,19 @@ crash_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods \
            | select(.metadata.deletionTimestamp == null)
            | .metadata.name' | head -n1)"
 [ -n "$crash_pod" ] || die "could not resolve a running crash-segfault pod in $DEMO_NAMESPACE"
-log "crash workload pod: $crash_pod (replicaset $active_hash)"
+# Object keys start with {cluster}/{podUID}/. Match only this pod's objects: a
+# handler still uploading for the previous (rate-limited) pod can write a
+# manifest after the purge above.
+crash_uid="$(kubectl -n "$DEMO_NAMESPACE" get pod "$crash_pod" -o jsonpath='{.metadata.uid}')"
+[ -n "$crash_uid" ] || die "could not read the UID of $crash_pod"
+log "crash workload pod: $crash_pod (replicaset $active_hash, uid $crash_uid)"
 
 log "polling s3://$BUCKET for a captured manifest (up to ${SMOKE_TIMEOUT}s)"
 manifest_key=""
 deadline=$(( SECONDS + SMOKE_TIMEOUT ))
 while :; do
   manifest_key="$(mc ls --recursive "$MC_ALIAS/$BUCKET" 2>/dev/null \
-    | awk '{print $NF}' | grep -- '-manifest\.json$' | head -n1 || true)"
+    | awk '{print $NF}' | grep -F -- "/$crash_uid/" | grep -- '-manifest\.json$' | head -n1 || true)"
   [ -n "$manifest_key" ] && break
   [ "$SECONDS" -ge "$deadline" ] && break
   sleep 5
@@ -242,7 +248,7 @@ suppressed_key=""
 deadline=$(( SECONDS + SMOKE_TIMEOUT ))
 while :; do
   for k in $(mc ls --recursive "$MC_ALIAS/$BUCKET" 2>/dev/null \
-    | awk '{print $NF}' | grep -- '-manifest\.json$'); do
+    | awk '{print $NF}' | grep -F -- "/$crash_uid/" | grep -- '-manifest\.json$'); do
     reason="$(mc cat "$MC_ALIAS/$BUCKET/$k" 2>/dev/null | jq -r '.core.skipped_reason // empty')"
     if [ "$reason" = "rate_limit" ]; then suppressed_key="$k"; break; fi
   done
@@ -325,44 +331,6 @@ if [ -n "$suppressed_json" ]; then
 else
   warn "  no CoreDumpSuppressed k8s Event appeared in $DEMO_NAMESPACE within ${SMOKE_TIMEOUT}s"; fail=1
 fi
-
-# --- 9. uninstall restores core_pattern (CorePatternGuard drop path) ----------
-# The uninstall's exit status is an assertion in its own right: helm waits on the
-# post-delete cleanup hook, so a failure here means the hook did not finish - and
-# a half-finished hook leaves an orphaned, privileged cleanup worker behind.
-log "uninstalling coredrop to exercise core_pattern restore + post-delete cleanup"
-if ! helm uninstall "$RELEASE" -n "$NAMESPACE" >/dev/null; then
-  warn "  helm uninstall failed - the post-delete cleanup hook did not complete"; fail=1
-fi
-kubectl -n "$NAMESPACE" wait --for=delete pod -l app.kubernetes.io/name=coredrop --timeout=60s >/dev/null 2>&1 || true
-sleep 2
-restored="$(node_exec cat /proc/sys/kernel/core_pattern)"
-if printf '%s' "$restored" | grep -q "$HANDLER_MARK"; then
-  warn "  core_pattern STILL points at the handler after uninstall: $restored"; fail=1
-else
-  log "  core_pattern no longer points at the handler: $restored"
-fi
-if [ -f "$ORIG_FILE" ]; then
-  orig="$(cat "$ORIG_FILE")"
-  if [ "$restored" = "$orig" ]; then
-    log "  core_pattern matches its pre-install value"
-  else
-    warn "  core_pattern differs from pre-install value: '$orig'"; fail=1
-  fi
-fi
-
-# --- 10. the post-delete hook left nothing on the node ------------------------
-# The cleanup worker removes the handler binary, runtime config/state AND the
-# hostPath directories themselves. A successful hook does not prove that the
-# directories are gone, so check them on the node.
-log "checking the node for leftover coredrop hostPath directories"
-for d in "$HOST_BIN_DIR" "$HOST_RUN_DIR"; do
-  if node_exec test -e "$d"; then
-    warn "  leftover on the node after uninstall: $d"; fail=1
-  else
-    log "  removed from the node: $d"
-  fi
-done
 
 if [ "$fail" -ne 0 ]; then
   die "smoke test FAILED"

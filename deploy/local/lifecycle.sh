@@ -24,6 +24,10 @@ stopped_pid=""
 orig="$(cat "$ORIG_FILE")"
 
 node_pattern() { node_exec cat /proc/sys/kernel/core_pattern; }
+# Kernel log lines for crashes routed to a missing handler binary. The demo
+# workload crashes every ~5s throughout, so a window where core_pattern points
+# at a removed binary shows up here.
+pipe_failures() { node_exec dmesg | grep -c "$HOST_BIN_DIR/coredrop pipe failed" || true; }
 # stdin, not an argument: core_pattern values hold spaces and % characters.
 set_node_pattern() { printf '%s' "$1" | node_exec tee /proc/sys/kernel/core_pattern >/dev/null; }
 
@@ -95,6 +99,8 @@ assert_node_clean() {
   done
 }
 
+pipe_failures_before="$(pipe_failures)"
+
 # --- A. clean uninstall ------------------------------------------------------
 log "A: clean uninstall restores core_pattern + post-delete cleanup"
 uninstall_and_wait 60s
@@ -134,6 +140,17 @@ assert_node_clean
 set_node_pattern "$orig"
 install_coredrop >/dev/null
 assert_installed
+
+# --- no crash hit a missing handler ------------------------------------------
+# The cleanup worker resets core_pattern before it removes the binary, and the
+# daemon restores it before it stops. Either order keeps crashes away from a
+# missing handler.
+pipe_failures_after="$(pipe_failures)"
+if [ "$pipe_failures_after" -eq "$pipe_failures_before" ]; then
+  log "no crash hit a missing handler"
+else
+  warn "$((pipe_failures_after - pipe_failures_before)) crash(es) hit a missing handler (dmesg: 'pipe failed')"; fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
   die "lifecycle test FAILED"

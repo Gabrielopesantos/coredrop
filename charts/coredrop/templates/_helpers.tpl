@@ -130,6 +130,17 @@ spec:
             - -c
             - |
               set -e
+              # For a daemon killed without a clean shutdown: if core_pattern still
+              # points at our handler, reset it to the kernel default. The original
+              # value is unknown at this point. This runs before the binary is
+              # removed, so no crash is routed to a missing handler.
+              pattern=$(cat /host/sysctl/core_pattern)
+              case "$pattern" in
+                *"{{ $binDir }}/coredrop"*)
+                  printf 'core' > /host/sysctl/core_pattern
+                  ;;
+              esac
+
               # The parent of each directory is what gets mounted, not the
               # directory itself: a hostPath mounted at its own path is a mount
               # point inside this container, and rmdir on a mount point always
@@ -145,16 +156,6 @@ spec:
               rm -f "$run_dir/recent.json"
               rmdir "$bin_dir" 2>/dev/null || true
               rmdir "$run_dir" 2>/dev/null || true
-
-              # For a daemon killed without a clean shutdown: if core_pattern still
-              # points at our handler, reset it to the kernel default. The original
-              # value is unknown at this point.
-              pattern=$(cat /host/sysctl/core_pattern)
-              case "$pattern" in
-                *"{{ $binDir }}/coredrop"*)
-                  printf 'core' > /host/sysctl/core_pattern
-                  ;;
-              esac
 
               # Keep the pod alive so the orchestrator Job can observe the
               # DaemonSet's rollout as ready - cleanup already ran above by

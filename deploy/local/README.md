@@ -59,6 +59,8 @@ coredrop installed.
 3. After each phase, coredrop is reinstalled, and `core_pattern` points at
    the handler again. If a phase fails, the exit trap thaws the daemon and
    reinstalls.
+4. No crash hit a missing handler during the run: the node's `dmesg` has no
+   new `coredrop pipe failed` lines.
 
 ## Pieces
 

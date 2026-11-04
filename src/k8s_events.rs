@@ -74,7 +74,9 @@ impl Reason {
             Outcome::Uploaded => Some(Self::CoreDumped),
             Outcome::SuppressedRateLimit => Some(Self::CoreDumpSuppressed),
             Outcome::NoStoreDiscard => Some(Self::CoreDiscardedNoStore),
-            Outcome::SkippedNonK8s | Outcome::Failed => None,
+            Outcome::Spooled | Outcome::SpoolFull | Outcome::SkippedNonK8s | Outcome::Failed => {
+                None
+            }
         }
     }
 

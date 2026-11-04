@@ -3,7 +3,7 @@
 //! The binary runs in three modes:
 //!   - capture handler (`coredrop capture %P %s %t %E`): the short-lived
 //!     process the kernel exec's per fault. Snapshots `/proc`, drains the core
-//!     to the object store, enriches identity via crictl, writes a JSON
+//!     into the node-local spool, enriches identity via crictl, writes a JSON
 //!     manifest sidecar.
 //!   - daemon (`coredrop`): the long-running `DaemonSet` container. Installs
 //!     `core_pattern` so faults route to the handler, writes the handler
@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 
 use coredrop::config::HandlerConfig;
 use coredrop::core_pattern::CorePatternGuard;
-use coredrop::handler::{CaptureArgs, run as run_handler};
+use coredrop::handler::{CaptureArgs, KernelPipe, run as run_handler};
 
 /// `coredrop` daemon config. Every knob is a flag with an env-var fallback.
 /// Secrets (store creds) stay env-only - never flags (leak via `ps`/cmdline).
@@ -50,8 +50,9 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = coredrop::config::DEFAULT_PROC_ROOT)]
     proc_root: PathBuf,
 
-    /// Object-store URL for the streamed core (e.g. `s3://crash-artifacts`);
-    /// unset disables upload. Store creds come from env (`AWS_*` etc.), not flags.
+    /// Object-store URL the daemon uploads spooled captures to (e.g.
+    /// `s3://crash-artifacts`); unset disables upload. Store creds come from
+    /// env (`AWS_*` etc.), not flags.
     #[arg(long, env = "CAPTURE_STORE_URL")]
     store_url: Option<String>,
 
@@ -73,11 +74,26 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = coredrop::config::DEFAULT_MAX_CORES_PER_HOUR)]
     max_cores_per_hour: u32,
 
-    /// Wall-clock deadline (seconds) for draining/uploading one core; 0 = no
-    /// deadline. On expiry the handler abandons the upload and exits, freeing
-    /// its `core_pipe_limit` slot instead of letting a slow store hold it.
-    #[arg(long, env = "CAPTURE_UPLOAD_DEADLINE_SECS", default_value_t = coredrop::config::DEFAULT_UPLOAD_DEADLINE_SECS)]
-    upload_deadline_secs: u64,
+    /// Wall-clock deadline (seconds) for draining one core into the spool;
+    /// 0 = no deadline. On expiry the handler drops the core and exits,
+    /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
+    #[arg(long, env = "CAPTURE_DRAIN_DEADLINE_SECS", default_value_t = coredrop::config::DEFAULT_DRAIN_DEADLINE_SECS)]
+    drain_deadline_secs: u64,
+
+    /// Spool root on the node: the handler writes capture bundles here and
+    /// the daemon uploads them.
+    #[arg(long, env = "CAPTURE_SPOOL_DIR", default_value = coredrop::spool::DEFAULT_SPOOL_DIR)]
+    spool_dir: PathBuf,
+
+    /// Cap on the spool's total size in bytes; 0 = no cap. A core that does
+    /// not fit is dropped; its snapshot and manifest are still spooled.
+    #[arg(long, env = "CAPTURE_SPOOL_MAX_BYTES", default_value_t = coredrop::spool::DEFAULT_SPOOL_MAX_BYTES)]
+    spool_max_bytes: u64,
+
+    /// Free-space floor of the spool's filesystem, in percent. The handler
+    /// stops writing cores below it.
+    #[arg(long, env = "CAPTURE_SPOOL_MIN_FREE_PERCENT", default_value_t = coredrop::spool::DEFAULT_SPOOL_MIN_FREE_PERCENT, value_parser = clap::value_parser!(u8).range(0..=100))]
+    spool_min_free_percent: u8,
 
     /// Timeout in seconds for `crictl inspect` in the handler; 0 = no timeout.
     #[arg(long, env = "CRICTL_TIMEOUT_SECS", default_value_t = coredrop::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
@@ -114,20 +130,21 @@ struct DaemonArgs {
 }
 
 impl DaemonArgs {
-    fn to_handler_config(&self) -> HandlerConfig {
-        let store_options = coredrop::upload::store_options_from_env();
+    fn to_handler_config(&self, store_configured: bool) -> HandlerConfig {
         HandlerConfig {
             cluster: self.cluster.clone(),
             no_redact: self.no_redact,
             proc_root: self.proc_root.clone(),
-            store_url: self.store_url.clone().filter(|s| !s.is_empty()),
-            store_options,
+            store_configured,
             crictl_path: self.crictl_path.clone(),
             cri_runtime_endpoint: self.cri_runtime_endpoint.clone(),
             max_core_bytes: self.max_core_bytes,
             max_cores_per_hour: self.max_cores_per_hour,
-            upload_deadline_secs: self.upload_deadline_secs,
+            drain_deadline_secs: self.drain_deadline_secs,
             crictl_timeout_secs: self.crictl_timeout_secs,
+            spool_dir: self.spool_dir.clone(),
+            spool_max_bytes: self.spool_max_bytes,
+            spool_min_free_percent: self.spool_min_free_percent,
             rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
             event_socket_path: Some(coredrop::config::event_socket_path_for(&self.config_path)),
         }
@@ -160,8 +177,7 @@ async fn main() -> Result<()> {
             let config_path =
                 env_path("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH);
             let config = HandlerConfig::read(&config_path).unwrap_or_default();
-            let mut stdin = tokio::io::stdin();
-            run_handler(capture_args, &config, &mut stdin, None).await
+            run_handler(capture_args, &config, KernelPipe::stdin()).await
         }
         // Run by the readiness/liveness probes. Reads the same env the daemon
         // container is configured with; the error is the probe's failure reason.
@@ -191,12 +207,23 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         "coredrop starting"
     );
 
-    let config = args.to_handler_config();
-
-    if config.store_url.is_some() && coredrop::upload::is_plaintext_endpoint(&config.store_options)
-    {
-        warn!("object-store endpoint is plaintext HTTP; cores traverse the network unencrypted");
+    // Only the daemon holds store credentials; the handler learns only
+    // whether there is a store to spool for.
+    let store_options = coredrop::upload::store_options_from_env();
+    let store = args
+        .store_url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .and_then(|url| {
+            if coredrop::upload::is_plaintext_endpoint(&store_options) {
+                warn!("object-store endpoint is plaintext HTTP; cores traverse the network unencrypted");
+            }
+            coredrop::upload::object_store_from_url_opts(url, store_options)
+        });
+    if store.is_none() {
+        info!("no object store configured; the handler discards cores");
     }
+    let config = args.to_handler_config(store.is_some());
 
     // crictl enrichment is best-effort, so a missing socket is not fatal - but
     // it is otherwise invisible until a crash produces a manifest with no
@@ -319,7 +346,10 @@ mod tests {
             cri_runtime_endpoint: None,
             max_core_bytes: 0,
             max_cores_per_hour: 0,
-            upload_deadline_secs: 0,
+            drain_deadline_secs: 0,
+            spool_dir: config_path.with_file_name("spool"),
+            spool_max_bytes: 0,
+            spool_min_free_percent: 0,
             crictl_timeout_secs: 0,
             no_events: true,
             pipe_limit: 16,

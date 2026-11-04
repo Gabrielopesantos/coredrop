@@ -1,7 +1,8 @@
 #![warn(missing_docs)]
 
-//! Standalone Kubernetes coredump handler: capture backends, object-store
-//! upload, manifest/event types, and the daemon-side helpers that use them.
+//! Standalone Kubernetes coredump handler: capture backends, the node-local
+//! spool, object-store upload, manifest/event types, and the daemon-side
+//! helpers that use them.
 
 pub mod backend;
 pub mod buildid;
@@ -17,6 +18,7 @@ pub mod manifest;
 pub mod ratelimit;
 pub mod redact;
 pub mod snapshot;
+pub mod spool;
 pub mod upload;
 
 /// Host path the `DaemonSet` installs the binary to, so the kernel can exec it as

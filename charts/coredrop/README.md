@@ -1,8 +1,9 @@
 # coredrop Helm chart
 
 Deploys the coredrop DaemonSet: a root pod per node, with no capabilities, that
-installs the kernel `core_pattern` handler and streams captured cores,
-`/proc` snapshots, and manifests to an object store.
+installs the kernel `core_pattern` handler. The handler writes captured cores,
+`/proc` snapshots, and manifests to a spool on the node's disk, and the daemon
+uploads the spool to an object store.
 
 ## Install
 
@@ -14,7 +15,8 @@ helm install coredrop oci://ghcr.io/gabrielopesantos/charts/coredrop \
 ```
 
 Leaving `capture.objectStore.url` empty runs coredrop with no upload: cores
-are drained (so the kernel completes the dump) but nothing is stored.
+are drained (so the kernel completes the dump) but nothing is stored or
+spooled.
 
 ## Values
 
@@ -22,13 +24,13 @@ are drained (so the kernel completes the dump) but nothing is stored.
 |-----|------|---------|-------------|
 | capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. |
 | capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
+| capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped. `0` disables. |
 | capture.maxCoreBytes | int | `2147483648` | Truncate stored cores at this many bytes (2 GiB default). |
 | capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only. |
 | capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
 | capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload. |
-| capture.uploadDeadlineSeconds | int | `300` | Core upload deadline in seconds; past it the upload is abandoned. 0 disables. |
 | cleanup.enabled | bool | `true` | Run the post-delete cleanup DaemonSet on `helm uninstall`. |
 | cleanup.image | string | `"rancher/kubectl:v1.35.6"` | Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl. |
 | corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
@@ -48,10 +50,17 @@ are drained (so the kernel completes the dump) but nothing is stored.
 | resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | DaemonSet resource requests/limits. |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}` | Daemon container securityContext. |
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
+| spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. |
+| spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default). |
+| spool.maxBytes | int | `10737418240` | Cap on the spool's total size in bytes (10 GiB default); a core that does not fit is dropped, its snapshot and manifest are kept. `0` = no cap. |
+| spool.minFreePercent | int | `15` | Free-space floor of the spool's filesystem, in percent; below it cores are dropped. |
 | tolerations | list | `[{"operator":"Exists"}]` | Pod tolerations (defaults to tolerating everything so it runs on all nodes). |
+| upload.concurrency | int | `2` | Captures uploaded at the same time. |
+| upload.shutdownFlushSeconds | int | `25` | On pod shutdown, seconds the daemon keeps uploading the spool. The pod's termination grace period is this plus 5. |
+| upload.timeoutSeconds | int | `600` | Time limit in seconds for one upload attempt of one capture; it is retried after. `0` = no limit. |
 
-Only allowlisted object-store keys are forwarded to the handler. An
-unrecognized key in either map fails `helm install`/`template` naming it and
+Only allowlisted object-store keys are read by the daemon. An unrecognized
+key in either map fails `helm install`/`template` naming it and
 the valid set - a typo can't reach the cluster and silently drop out:
 
 - `capture.objectStore.config` (non-secret):
@@ -146,18 +155,48 @@ contents:
 
 Replace `local/` with your `capture.cluster` value.
 
-The handler aborts an in-progress multipart upload when its upload deadline
-fires during the stream. Two cases can still leave an incomplete multipart
+The daemon aborts a multipart upload that fails or passes
+`upload.timeoutSeconds`. Some cases can still leave an incomplete multipart
 upload. A normal listing does not show it, but it is billed:
 
-- The deadline fires during the final complete-multipart-upload call. The
+- The time limit passes during the final complete-multipart-upload call. The
   upload cannot be aborted at that point.
-- The handler process dies.
+- The daemon is killed mid-upload, or the shutdown flush ends mid-upload.
+
+The capture stays in the spool in each case, and its next upload starts over.
 
 Add incomplete-multipart cleanup to the expiry rule: S3's
 `AbortIncompleteMultipartUpload` (shown above) or GCS's
 `AbortIncompleteMultipartUpload` lifecycle action. Azure deletes uncommitted
 blocks on its own after about a week.
+
+## Spool
+
+```
+crash --> handler --> spool.hostDir/incoming/<capture>/   (being written)
+                  --> spool.hostDir/ready/<capture>/      (complete)
+daemon --> uploads ready/ (upload.concurrency at a time) --> deletes the capture
+```
+
+The handler writes only to local disk, so a crash does not wait for the
+network: the kernel reaps the crashed process as soon as the core is on disk.
+The handler has no store credentials and makes no network calls.
+
+- **Size.** `spool.maxBytes` caps the spool, and `spool.minFreePercent` keeps
+  free space on its filesystem. The spool shares `/var/lib` with the kubelet,
+  which evicts pods under disk pressure, so keep both conservative. A core that
+  does not fit is dropped; its snapshot and manifest are still spooled, with
+  `skipped_reason: spool_full`, and the pod gets a `CoreDumpSpoolFull` Event.
+- **Retries.** A capture that fails to upload stays in the spool and is retried
+  with exponential backoff (10s, doubling, up to 10 minutes). Past
+  `spool.maxAgeSeconds` it is deleted and logged as `outcome="failed"`.
+- **Shutdown.** On SIGTERM the daemon restores `core_pattern` first, then
+  keeps uploading for `upload.shutdownFlushSeconds`. What is left stays on
+  the node for the next daemon.
+- **Node loss.** A capture on a node that is deleted before its upload (an
+  autoscaler scale-down, a spot reclaim) is lost.
+- **At rest.** Spooled cores are unencrypted on the node's disk, in
+  directories readable only by root.
 
 ## Rate limit
 
@@ -182,12 +221,12 @@ serviceAccount:
 ```
 
 Each provider's admission webhook injects credentials as env vars into the
-daemon pod; only the allowlisted keys (above) are forwarded on to the
-kernel-exec'd handler:
+daemon pod, which does all the uploads; the daemon reads only the
+allowlisted keys (above):
 
 - **IRSA (EKS):** the pod-identity webhook injects `AWS_ROLE_ARN` +
-  `AWS_WEB_IDENTITY_TOKEN_FILE` (+ `AWS_DEFAULT_REGION`) - forwarded and wired
-  to assume-role-with-web-identity.
+  `AWS_WEB_IDENTITY_TOKEN_FILE` (+ `AWS_DEFAULT_REGION`) - wired to
+  assume-role-with-web-identity.
 - **AKS workload identity:** the webhook only injects credentials into pods
   labeled `azure.workload.identity/use: "true"`; set that via `podLabels` and
   annotate the ServiceAccount with `azure.workload.identity/client-id` per
@@ -202,10 +241,10 @@ kernel-exec'd handler:
   ```
 
   The webhook then injects `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-  `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_AUTHORITY_HOST` - all forwarded.
-- **GKE workload identity:** no env vars needed or forwarded - the handler
-  authenticates via the node's metadata server automatically, same as any
-  other GCE-hosted workload.
+  `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_AUTHORITY_HOST` - all read.
+- **GKE workload identity:** no env vars needed - the daemon authenticates
+  through the GKE metadata server as the pod's Kubernetes ServiceAccount,
+  same as any other workload.
 
 ## Health
 
@@ -230,8 +269,8 @@ kernel-exec'd processes and survive the restart.
 
 The pods run as root with all capabilities dropped. `install-handler` copies
 the binary to `corePattern.hostBinDir`. The daemon writes `handler.json`,
-binds `events.sock` in `corePattern.hostRunDir`, and writes two node-global
-sysctls:
+binds `events.sock` in `corePattern.hostRunDir`, reads and deletes captures
+in `spool.hostDir`, and writes two node-global sysctls:
 
 ```
 node                                     daemon container
@@ -253,9 +292,9 @@ level.
 
 The kernel-exec'd handler does not see env vars on the pod, so its config
 and the rate-limit state live on a hostPath (`corePattern.hostRunDir`). The
-handler runs in the host network namespace: the object-store endpoint must
-be resolvable and reachable from the node itself (cluster DNS names do not
-resolve there).
+config holds no credentials. The handler never reaches the network; the
+daemon uploads from its pod, so the object-store endpoint can be a cluster
+DNS name.
 
 Uninstalling the release stops the daemon, which restores the node's original
 `core_pattern` on shutdown.
@@ -291,8 +330,13 @@ usually a restart, upgrade or node drain, not an uninstall. Removing them is
 instead a `post-delete` hook (`cleanup.enabled`, on by default): a Job that
 applies a short-lived DaemonSet, waits for it to roll out on every
 node, then deletes it. On each node that worker removes the handler binary,
-`handler.json`, `events.sock` and `recent.json`, then the
-`corePattern.hostBinDir` and `corePattern.hostRunDir` directories themselves.
+`handler.json`, `events.sock` and `recent.json`, the spool's `incoming/` and
+`ready/` directories, then the `corePattern.hostBinDir`,
+`corePattern.hostRunDir` and `spool.hostDir` directories themselves.
+
+Uninstalling deletes every capture still in the spool. Wait for the spool to
+drain first if those captures matter: the daemon logs `capture complete` for
+each upload.
 If the daemon was killed without a clean shutdown, it also resets
 `core_pattern` to the kernel default `core` if it still points at the handler.
 

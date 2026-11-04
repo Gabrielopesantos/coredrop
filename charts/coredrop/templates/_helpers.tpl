@@ -78,6 +78,18 @@ filter would drop it silently at runtime, leaving no error anywhere.
 {{- end -}}
 
 {{/*
+Fail rendering on a spool directory that is not an absolute path below the
+root. The handler only accepts absolute paths, and the cleanup worker mounts
+the directory's parent.
+*/}}
+{{- define "coredrop.validateSpool" -}}
+{{- $dir := clean .Values.spool.hostDir -}}
+{{- if or (not (isAbs $dir)) (eq $dir "/") -}}
+{{- fail (printf "spool.hostDir must be an absolute path below /: %q" .Values.spool.hostDir) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The post-delete cleanup worker: a DaemonSet that removes the handler binary,
 runtime config/state, and hostPath directories from every node.
 Rendered here (rather than inline in cleanup-hook.yaml) so it can be shipped
@@ -87,6 +99,7 @@ cleanup-hook.yaml for why a Job has to be the thing driving it.
 {{- define "coredrop.cleanupWorkerManifest" -}}
 {{- $binDir := clean .Values.corePattern.hostBinDir -}}
 {{- $runDir := clean .Values.corePattern.hostRunDir -}}
+{{- $spoolDir := clean .Values.spool.hostDir -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -149,13 +162,18 @@ spec:
               # subdirectories, so rmdir works.
               bin_dir=/host/bin-parent/{{ base $binDir }}
               run_dir=/host/run-parent/{{ base $runDir }}
+              spool_dir=/host/spool-parent/{{ base $spoolDir }}
 
               rm -f "$bin_dir/coredrop"
               rm -f "$run_dir/handler.json"
               rm -f "$run_dir/events.sock"
               rm -f "$run_dir/recent.json"
+              # Only the spool's own subdirectories, never the configured
+              # directory's other contents: spool.hostDir is user input.
+              rm -rf "$spool_dir/incoming" "$spool_dir/ready"
               rmdir "$bin_dir" 2>/dev/null || true
               rmdir "$run_dir" 2>/dev/null || true
+              rmdir "$spool_dir" 2>/dev/null || true
 
               # Keep the pod alive so the orchestrator Job can observe the
               # DaemonSet's rollout as ready - cleanup already ran above by
@@ -168,6 +186,8 @@ spec:
               mountPath: /host/bin-parent
             - name: host-run-parent
               mountPath: /host/run-parent
+            - name: host-spool-parent
+              mountPath: /host/spool-parent
             # The node's core_pattern sysctl, writable; /proc/sys stays read-only.
             - name: host-core-pattern
               mountPath: /host/sysctl/core_pattern
@@ -179,6 +199,10 @@ spec:
         - name: host-run-parent
           hostPath:
             path: {{ dir $runDir }}
+            type: DirectoryOrCreate
+        - name: host-spool-parent
+          hostPath:
+            path: {{ dir $spoolDir }}
             type: DirectoryOrCreate
         - name: host-core-pattern
           hostPath:

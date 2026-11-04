@@ -8,20 +8,30 @@
 //!   - daemon (`coredrop`): the long-running `DaemonSet` container. Installs
 //!     `core_pattern` so faults route to the handler, writes the handler
 //!     config to a hostPath the kernel-exec'd handler can read (the kernel
-//!     exec's with a clean environment), and holds the restore guard until
-//!     shutdown.
+//!     exec's with a clean environment), uploads the spool, and holds the
+//!     restore guard until shutdown.
 //!   - health check (`coredrop check`): what the chart's readiness and
 //!     liveness probes exec. Exits non-zero when the capture path has drifted.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use object_store::ObjectStore;
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use coredrop::config::HandlerConfig;
 use coredrop::core_pattern::CorePatternGuard;
 use coredrop::handler::{CaptureArgs, KernelPipe, run as run_handler};
+use coredrop::spool::Spool;
+use coredrop::uploader::{UploadSettings, Uploader};
+
+/// Default time the daemon keeps uploading the spool after SIGTERM. The
+/// chart's termination grace period adds a margin on top.
+const DEFAULT_SHUTDOWN_FLUSH_SECS: u64 = 25;
 
 /// `coredrop` daemon config. Every knob is a flag with an env-var fallback.
 /// Secrets (store creds) stay env-only - never flags (leak via `ps`/cmdline).
@@ -95,6 +105,25 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_SPOOL_MIN_FREE_PERCENT", default_value_t = coredrop::spool::DEFAULT_SPOOL_MIN_FREE_PERCENT, value_parser = clap::value_parser!(u8).range(0..=100))]
     spool_min_free_percent: u8,
 
+    /// Age in seconds past which a spooled capture that still fails to
+    /// upload is deleted.
+    #[arg(long, env = "CAPTURE_SPOOL_MAX_AGE_SECS", default_value_t = coredrop::uploader::DEFAULT_SPOOL_MAX_AGE_SECS)]
+    spool_max_age_secs: u64,
+
+    /// Spooled captures the daemon uploads at the same time.
+    #[arg(long, env = "CAPTURE_UPLOAD_CONCURRENCY", default_value_t = coredrop::uploader::DEFAULT_UPLOAD_CONCURRENCY, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64))]
+    upload_concurrency: usize,
+
+    /// Time limit in seconds for one upload attempt of one spooled capture;
+    /// 0 = no limit. A timed-out capture is retried later.
+    #[arg(long, env = "CAPTURE_UPLOAD_TIMEOUT_SECS", default_value_t = coredrop::uploader::DEFAULT_UPLOAD_TIMEOUT_SECS)]
+    upload_timeout_secs: u64,
+
+    /// On SIGTERM, how long in seconds the daemon keeps uploading the spool
+    /// before it exits. Keep it below the pod's termination grace period.
+    #[arg(long, env = "CAPTURE_SHUTDOWN_FLUSH_SECS", default_value_t = DEFAULT_SHUTDOWN_FLUSH_SECS)]
+    shutdown_flush_secs: u64,
+
     /// Timeout in seconds for `crictl inspect` in the handler; 0 = no timeout.
     #[arg(long, env = "CRICTL_TIMEOUT_SECS", default_value_t = coredrop::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
     crictl_timeout_secs: u64,
@@ -130,6 +159,39 @@ struct DaemonArgs {
 }
 
 impl DaemonArgs {
+    /// The object store the daemon uploads to, built from `--store-url` and
+    /// the store env vars. Only the daemon holds store credentials; the
+    /// handler learns only whether there is a store to spool for.
+    fn object_store(&self) -> Option<Arc<dyn ObjectStore>> {
+        let store_options = coredrop::upload::store_options_from_env();
+        let store = self
+            .store_url
+            .as_deref()
+            .filter(|url| !url.is_empty())
+            .and_then(|url| {
+                if coredrop::upload::is_plaintext_endpoint(&store_options) {
+                    warn!(
+                        "object-store endpoint is plaintext HTTP; cores traverse the network unencrypted"
+                    );
+                }
+                coredrop::upload::object_store_from_url_opts(url, store_options)
+            });
+        if store.is_none() {
+            info!("no object store configured; the handler discards cores");
+        }
+        store
+    }
+
+    fn upload_settings(&self) -> UploadSettings {
+        UploadSettings {
+            concurrency: self.upload_concurrency,
+            attempt_timeout: (self.upload_timeout_secs != 0)
+                .then(|| Duration::from_secs(self.upload_timeout_secs)),
+            max_age: Duration::from_secs(self.spool_max_age_secs),
+            ..UploadSettings::default()
+        }
+    }
+
     fn to_handler_config(&self, store_configured: bool) -> HandlerConfig {
         HandlerConfig {
             cluster: self.cluster.clone(),
@@ -207,22 +269,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         "coredrop starting"
     );
 
-    // Only the daemon holds store credentials; the handler learns only
-    // whether there is a store to spool for.
-    let store_options = coredrop::upload::store_options_from_env();
-    let store = args
-        .store_url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| {
-            if coredrop::upload::is_plaintext_endpoint(&store_options) {
-                warn!("object-store endpoint is plaintext HTTP; cores traverse the network unencrypted");
-            }
-            coredrop::upload::object_store_from_url_opts(url, store_options)
-        });
-    if store.is_none() {
-        info!("no object store configured; the handler discards cores");
-    }
+    let store = args.object_store();
     let config = args.to_handler_config(store.is_some());
 
     // crictl enrichment is best-effort, so a missing socket is not fatal - but
@@ -270,7 +317,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         return Err(e);
     }
 
-    let _guard = match CorePatternGuard::install_at(
+    let guard = match CorePatternGuard::install_at(
         &args.handler_path,
         args.pipe_limit,
         args.core_pattern_path.clone(),
@@ -295,17 +342,57 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         .clone()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(coredrop::handler::node_hostname);
+    let wake = Arc::new(Notify::new());
+    let (reports_tx, reports_rx) = mpsc::unbounded_channel();
     tokio::spawn(coredrop::k8s_events::run_listener(
         events_socket,
+        reports_rx,
+        wake.clone(),
         node,
         !args.no_events,
     ));
 
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let uploader = store.map(|store| spawn_uploader(&args, store, wake, reports_tx, stop_rx));
+
     shutdown_signal().await?;
     info!("shutdown signal received");
 
-    // `_guard` drops here -> core_pattern/core_pipe_limit restored.
+    // Stop new captures first, then give the spool the rest of the grace
+    // period. Bundles not uploaded by then stay for the next daemon.
+    drop(guard);
+    if let Some(uploader) = uploader {
+        let _ = stop_tx.send(());
+        if let Err(e) = uploader.await {
+            warn!(error = %e, "spool uploader task failed");
+        }
+    }
     Ok(())
+}
+
+/// Start the spool uploader. It runs until `stop` fires, then flushes for
+/// `--shutdown-flush-secs`.
+fn spawn_uploader(
+    args: &DaemonArgs,
+    store: Arc<dyn ObjectStore>,
+    wake: Arc<Notify>,
+    reports: mpsc::UnboundedSender<coredrop::events::CaptureEventPayload>,
+    stop: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    let settings = args.upload_settings();
+    info!(
+        spool = %args.spool_dir.display(),
+        concurrency = settings.concurrency,
+        "spool uploader started"
+    );
+    let uploader = Uploader::new(Spool::new(&args.spool_dir), store, settings, reports);
+    tokio::spawn(uploader.run(
+        wake,
+        async {
+            let _ = stop.await;
+        },
+        Duration::from_secs(args.shutdown_flush_secs),
+    ))
 }
 
 /// Wait for a termination signal. Kubernetes sends SIGTERM on pod shutdown
@@ -350,6 +437,10 @@ mod tests {
             spool_dir: config_path.with_file_name("spool"),
             spool_max_bytes: 0,
             spool_min_free_percent: 0,
+            spool_max_age_secs: 0,
+            upload_concurrency: 1,
+            upload_timeout_secs: 0,
+            shutdown_flush_secs: 0,
             crictl_timeout_secs: 0,
             no_events: true,
             pipe_limit: 16,

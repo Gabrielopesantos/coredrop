@@ -1,11 +1,15 @@
 //! Object store access: the key scheme, building the store from the daemon's
 //! environment, and the uploads the daemon makes from the spool.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use object_store::buffered::BufWriter;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use tokio::io::AsyncWriteExt;
+use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
 /// Object keys for one capture. Every object of a capture shares the prefix
@@ -68,6 +72,52 @@ pub async fn put_object(store: &Arc<dyn ObjectStore>, key: &str, bytes: Vec<u8>)
         .await
         .with_context(|| format!("putting object {key}"))?;
     Ok(())
+}
+
+/// Stream the file at `path` to `key`, as a multipart upload when it is large.
+/// The file is never held in memory whole.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, the upload fails, or `deadline_at`
+/// passes. A failed upload is aborted, except when the deadline passes while
+/// the upload completes: those parts stay until the bucket's lifecycle rule
+/// removes them.
+pub async fn upload_file(
+    store: &Arc<dyn ObjectStore>,
+    path: &Path,
+    key: &str,
+    deadline_at: Option<Instant>,
+) -> Result<()> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut writer = BufWriter::new(store.clone(), ObjectPath::from(key));
+    let copied = match deadline_at {
+        Some(dl) => timeout_at(dl, tokio::io::copy(&mut file, &mut writer))
+            .await
+            .map_err(|_| anyhow!("upload deadline passed")),
+        None => Ok(tokio::io::copy(&mut file, &mut writer).await),
+    };
+    // `BufWriter` does not abort its multipart upload on drop, and S3/GCS
+    // keep (and bill) the parts of an upload nobody completes or aborts.
+    // `abort` panics once `shutdown` has been polled, so abort only here.
+    let copied = copied.and_then(|r| r.map_err(anyhow::Error::from));
+    if let Err(e) = copied {
+        if let Err(abort) = writer.abort().await {
+            warn!(error = %abort, key, "aborting multipart upload failed; orphaned parts may remain in the object store");
+        }
+        return Err(e).with_context(|| format!("uploading {key}"));
+    }
+    let shutdown = match deadline_at {
+        Some(dl) => timeout_at(dl, writer.shutdown())
+            .await
+            .map_err(|_| anyhow!("upload deadline passed while completing")),
+        None => Ok(writer.shutdown().await),
+    };
+    shutdown
+        .and_then(|r| r.map_err(anyhow::Error::from))
+        .with_context(|| format!("completing upload of {key}"))
 }
 
 /// The `AWS_*` and GCP/Azure keys `object_store` recognizes. Forwarding only

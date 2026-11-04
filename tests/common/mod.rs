@@ -54,26 +54,43 @@ pub fn write_fixture_proc(root: &Path, pid: i32, pod_uid: &str, container_id: &s
     .unwrap();
 }
 
-/// Handler config rooted at a test's temp dir. crictl is `/bin/false`, so
-/// enrichment fails and identity stays cgroup-only unless a test overrides it
-/// with [`write_fake_crictl`]. Events are off; a test that wants them sets
+/// Handler config rooted at a test's temp dir, with a store configured and an
+/// unlimited spool at `<root>/spool`. crictl is `/bin/false`, so enrichment
+/// fails and identity stays cgroup-only unless a test overrides it with
+/// [`write_fake_crictl`]. Events are off; a test that wants them sets
 /// `event_socket_path` after binding a listener.
 pub fn base_config(root: &Path) -> HandlerConfig {
     HandlerConfig {
         cluster: "test".into(),
         no_redact: false,
         proc_root: proc_root(root),
-        store_url: None,
-        store_options: vec![],
+        store_configured: true,
         crictl_path: "/bin/false".into(),
         cri_runtime_endpoint: None,
         max_core_bytes: 0,
         max_cores_per_hour: 0,
-        upload_deadline_secs: 0,
+        drain_deadline_secs: 0,
         crictl_timeout_secs: 0,
+        spool_dir: root.join("spool"),
+        spool_max_bytes: 0,
+        spool_min_free_percent: 0,
         rate_state_path: root.join("recent.json"),
         event_socket_path: None,
     }
+}
+
+/// The names of the bundles in one spool directory (`incoming` or `ready`),
+/// sorted. Empty when the directory does not exist.
+pub fn bundle_names(spool_subdir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(spool_subdir)
+        .map(|entries| {
+            entries
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// Write an executable `crictl` stand-in and return its path. Callers must
@@ -133,8 +150,8 @@ pub async fn is_absent(store: &Arc<dyn ObjectStore>, key: &str) -> bool {
     store.get(&ObjectPath::from(key)).await.is_err()
 }
 
-/// A core stream that never yields data nor EOF - stands in for a hung store
-/// or kernel pipe when exercising the upload deadline.
+/// A core stream that never yields data nor EOF - stands in for a hung kernel
+/// pipe when exercising the drain deadline.
 pub struct StallReader;
 
 impl tokio::io::AsyncRead for StallReader {

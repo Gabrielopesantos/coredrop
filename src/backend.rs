@@ -2,10 +2,10 @@
 //!
 //! The pre-reap `/proc` snapshot is backend-independent; only the core's
 //! destination differs - that is this interface boundary. The
-//! [`StandaloneBackend`](crate::upload::StandaloneBackend) (zstd-in-stream
-//! multipart upload to the object store) is the primary backend;
-//! [`DiscardBackend`] is the fallback when no store is configured: it drains
-//! the pipe so the kernel completes the dump but stores nothing.
+//! [`SpoolBackend`](crate::spool::SpoolBackend) (zstd-in-stream write to the
+//! node-local spool) is the primary backend; [`DiscardBackend`] is the
+//! fallback when no core is kept: it drains the pipe so the kernel completes
+//! the dump but stores nothing.
 
 use std::time::Duration;
 
@@ -16,22 +16,22 @@ use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
 /// Integrity stats for a drained core. The byte count and truncation flag come
-/// from every backend; the streaming `StandaloneBackend` also fills the stored
-/// (compressed) size and the sha256 of the stored object.
+/// from every backend; the `SpoolBackend` also fills the stored (compressed)
+/// size and the sha256 of the stored file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreStats {
     /// Uncompressed bytes drained from the kernel's core pipe.
     pub bytes: u64,
-    /// Bytes stored in the object store (zstd-compressed). `0` for
-    /// `DiscardBackend`, which stores nothing.
+    /// Bytes stored (zstd-compressed). `0` for `DiscardBackend`, which stores
+    /// nothing.
     pub stored_bytes: u64,
-    /// sha256 (hex) of the *stored* object - the zstd-compressed bytes.
+    /// sha256 (hex) of the *stored* bytes - the zstd-compressed core.
     /// `None` when nothing was stored (`DiscardBackend`).
     pub sha256: Option<String>,
     /// The stored core is incomplete (stream error or size cap).
     pub truncated: bool,
-    /// Why the core is truncated: `size_cap` | `stream_error`. `None` when
-    /// not truncated.
+    /// Why the core is truncated: `size_cap` | `spool_full` | `stream_error`.
+    /// `None` when not truncated.
     pub truncated_reason: Option<String>,
 }
 
@@ -52,7 +52,8 @@ pub trait CaptureBackend: Send + Sync {
 }
 
 /// Fallback core sink: count and discard the core so the kernel's pipe still
-/// completes when no object store is configured or identity is unresolved.
+/// completes when no core is kept: no object store, no resolved identity, an
+/// exhausted rate-limit budget, or a full spool.
 pub struct DiscardBackend;
 
 #[async_trait]
@@ -73,8 +74,8 @@ impl CaptureBackend for DiscardBackend {
             };
             match read {
                 Err(_elapsed) => {
-                    warn!(bytes, "core stream discard exceeded the upload deadline");
-                    return Err(anyhow!("core drain exceeded the upload deadline"));
+                    warn!(bytes, "core stream discard exceeded the deadline");
+                    return Err(anyhow!("core drain exceeded the deadline"));
                 }
                 Ok(Ok(0)) => {
                     return Ok(CoreStats {

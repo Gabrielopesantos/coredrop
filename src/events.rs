@@ -22,8 +22,12 @@ use tracing::warn;
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)] // DTO: variant names are self-explanatory.
 pub enum Outcome {
+    /// The handler wrote the core into the spool; the daemon uploads it.
+    Spooled,
     Uploaded,
     SuppressedRateLimit,
+    /// The spool had no room for the core; snapshot and manifest are spooled.
+    SpoolFull,
     SkippedNonK8s,
     NoStoreDiscard,
     Failed,
@@ -34,8 +38,10 @@ impl Outcome {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Outcome::Spooled => "spooled",
             Outcome::Uploaded => "uploaded",
             Outcome::SuppressedRateLimit => "suppressed-rate-limit",
+            Outcome::SpoolFull => "spool-full",
             Outcome::SkippedNonK8s => "skipped-non-k8s",
             Outcome::NoStoreDiscard => "no-store-discard",
             Outcome::Failed => "failed",

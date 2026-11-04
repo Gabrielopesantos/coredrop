@@ -8,13 +8,11 @@
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 
-use crate::upload;
+use crate::spool;
 
 /// Host path the daemon writes the serialized [`HandlerConfig`] to, and the
 /// handler reads it back from.
@@ -46,10 +44,10 @@ pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Default per-pod core-upload budget per hour.
 pub const DEFAULT_MAX_CORES_PER_HOUR: u32 = 3;
 
-/// Default deadline for draining/uploading one core: 5 minutes.
-/// The handler holds one of the node's `core_pipe_limit` slots for its whole
-/// lifetime, so a hung store must not be able to hold it indefinitely.
-pub const DEFAULT_UPLOAD_DEADLINE_SECS: u64 = 300;
+/// Default deadline for draining one core into the spool: 1 minute.
+/// The handler holds one of the node's `core_pipe_limit` slots while it
+/// drains, so a hung disk must not be able to hold it indefinitely.
+pub const DEFAULT_DRAIN_DEADLINE_SECS: u64 = 60;
 
 /// Default timeout for `crictl inspect` in the handler.
 pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
@@ -82,8 +80,9 @@ pub fn event_socket_path_for(config_path: &Path) -> PathBuf {
 }
 
 /// Everything the kernel-exec'd handler needs that env can't deliver. The
-/// daemon fills it from its own env and writes it; the handler reads it.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// daemon fills it from its own env and writes it; the handler reads it. It
+/// holds no credentials: only the daemon talks to the object store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandlerConfig {
     /// Cluster name - the first path segment of the object key.
     pub cluster: String,
@@ -91,10 +90,9 @@ pub struct HandlerConfig {
     pub no_redact: bool,
     /// `/proc` root (overridable for tests/non-standard layouts).
     pub proc_root: PathBuf,
-    /// Object-store URL (e.g. `s3://crash-artifacts`); `None` disables upload.
-    pub store_url: Option<String>,
-    /// `object_store` config options (the `AWS_*`/cloud keys) forwarded verbatim.
-    pub store_options: Vec<(String, String)>,
+    /// Whether the daemon has an object store to upload to. `false` makes the
+    /// handler discard cores instead of spooling them.
+    pub store_configured: bool,
     /// Path to the `crictl` binary for post-drain container enrichment.
     pub crictl_path: PathBuf,
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
@@ -106,15 +104,22 @@ pub struct HandlerConfig {
     /// Max core uploads per pod per hour; `0` = unlimited. Suppressed
     /// crashes still get a proc snapshot and manifest, just no core.
     pub max_cores_per_hour: u32,
-    /// Deadline in seconds for draining/uploading the core; `0` =
-    /// no deadline. On expiry the handler abandons the upload and exits,
-    /// freeing its `core_pipe_limit` slot instead of letting a slow store
-    /// hold it.
-    pub upload_deadline_secs: u64,
+    /// Deadline in seconds for draining the core into the spool; `0` = no
+    /// deadline. On expiry the handler drops the core and exits, freeing its
+    /// `core_pipe_limit` slot instead of letting a hung disk hold it.
+    pub drain_deadline_secs: u64,
     /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
-    /// crictl runs after the core drain, so a wedged CRI socket must not pin the
-    /// handler's `core_pipe_limit` slot forever.
+    /// crictl runs after the handler releases the core pipe, so this only
+    /// bounds how long the capture takes to reach the spool.
     pub crictl_timeout_secs: u64,
+    /// Spool root on the node: where the handler writes capture bundles for
+    /// the daemon to upload.
+    pub spool_dir: PathBuf,
+    /// Cap on the spool's total size in bytes; `0` = no cap. A core that does
+    /// not fit is dropped; its snapshot and manifest are still spooled.
+    pub spool_max_bytes: u64,
+    /// Free-space floor of the spool's filesystem, in percent.
+    pub spool_min_free_percent: u8,
     /// Rate-limit state file, sibling of the handler config on the hostPath.
     pub rate_state_path: PathBuf,
     /// Capture-event unix datagram socket the daemon listens on, sibling of
@@ -123,62 +128,22 @@ pub struct HandlerConfig {
     pub event_socket_path: Option<PathBuf>,
 }
 
-/// Hand-written so `store_options` values (object-store credentials) never
-/// reach a log line. The destructuring makes a new field a compile error here
-/// until it is listed.
-impl std::fmt::Debug for HandlerConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            cluster,
-            no_redact,
-            proc_root,
-            store_url,
-            store_options,
-            crictl_path,
-            cri_runtime_endpoint,
-            max_core_bytes,
-            max_cores_per_hour,
-            upload_deadline_secs,
-            crictl_timeout_secs,
-            rate_state_path,
-            event_socket_path,
-        } = self;
-        let store_option_keys: Vec<(&str, &str)> = store_options
-            .iter()
-            .map(|(key, _)| (key.as_str(), "<redacted>"))
-            .collect();
-        f.debug_struct("HandlerConfig")
-            .field("cluster", cluster)
-            .field("no_redact", no_redact)
-            .field("proc_root", proc_root)
-            .field("store_url", store_url)
-            .field("store_options", &store_option_keys)
-            .field("crictl_path", crictl_path)
-            .field("cri_runtime_endpoint", cri_runtime_endpoint)
-            .field("max_core_bytes", max_core_bytes)
-            .field("max_cores_per_hour", max_cores_per_hour)
-            .field("upload_deadline_secs", upload_deadline_secs)
-            .field("crictl_timeout_secs", crictl_timeout_secs)
-            .field("rate_state_path", rate_state_path)
-            .field("event_socket_path", event_socket_path)
-            .finish()
-    }
-}
-
 impl Default for HandlerConfig {
     fn default() -> Self {
         Self {
             cluster: DEFAULT_CLUSTER.to_string(),
             no_redact: false,
             proc_root: PathBuf::from(DEFAULT_PROC_ROOT),
-            store_url: None,
-            store_options: Vec::new(),
+            store_configured: false,
             crictl_path: PathBuf::from(DEFAULT_CRICTL_PATH),
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
             max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
-            upload_deadline_secs: DEFAULT_UPLOAD_DEADLINE_SECS,
+            drain_deadline_secs: DEFAULT_DRAIN_DEADLINE_SECS,
             crictl_timeout_secs: DEFAULT_CRICTL_TIMEOUT_SECS,
+            spool_dir: PathBuf::from(spool::DEFAULT_SPOOL_DIR),
+            spool_max_bytes: spool::DEFAULT_SPOOL_MAX_BYTES,
+            spool_min_free_percent: spool::DEFAULT_SPOOL_MIN_FREE_PERCENT,
             rate_state_path: default_rate_state_path(),
             event_socket_path: Some(default_event_socket_path()),
         }
@@ -186,7 +151,7 @@ impl Default for HandlerConfig {
 }
 
 impl HandlerConfig {
-    /// Validate that paths are absolute and the store URL is a supported scheme.
+    /// Validate that paths are absolute and the free-space floor is a percent.
     /// Called by [`Self::read`] before trusting a daemon-written config file.
     fn validate(&self) -> Result<()> {
         let must_be_absolute = |path: &Path, label: &str| -> Result<()> {
@@ -203,17 +168,12 @@ impl HandlerConfig {
         if let Some(event_socket_path) = &self.event_socket_path {
             must_be_absolute(event_socket_path, "event_socket_path")?;
         }
-        if let Some(store_url) = &self.store_url {
-            let url = url::Url::parse(store_url)
-                .with_context(|| format!("store_url is not a valid URL: {store_url}"))?;
-            let (scheme, _) = object_store::ObjectStoreScheme::parse(&url)
-                .with_context(|| format!("store_url has unrecognized scheme: {store_url}"))?;
-            match scheme {
-                object_store::ObjectStoreScheme::AmazonS3
-                | object_store::ObjectStoreScheme::GoogleCloudStorage
-                | object_store::ObjectStoreScheme::MicrosoftAzure => {}
-                _ => bail!("store_url scheme must be s3://, gs://, or az://: {store_url}"),
-            }
+        must_be_absolute(&self.spool_dir, "spool_dir")?;
+        if self.spool_min_free_percent > 100 {
+            bail!(
+                "spool_min_free_percent must be at most 100: {}",
+                self.spool_min_free_percent
+            );
         }
         Ok(())
     }
@@ -249,8 +209,8 @@ impl HandlerConfig {
     /// kernel-exec'd handler can read it.
     ///
     /// The parent dir is created mode `0700` and the file itself mode `0600`:
-    /// `store_options` carries object-store credentials forwarded from the
-    /// daemon's environment, written here in plaintext on a hostPath.
+    /// the config holds no secrets, but it steers a root process that runs
+    /// on every crash, so only root may read or replace it.
     ///
     /// # Errors
     ///
@@ -291,13 +251,6 @@ impl HandlerConfig {
             .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
         Ok(())
     }
-
-    /// Build the configured object store, or `None` when no store URL is set.
-    #[must_use]
-    pub fn object_store(&self) -> Option<Arc<dyn ObjectStore>> {
-        let url = self.store_url.as_deref()?;
-        upload::object_store_from_url_opts(url, self.store_options.clone())
-    }
 }
 
 #[cfg(test)]
@@ -323,17 +276,16 @@ mod tests {
             cluster: "prod".into(),
             no_redact: true,
             proc_root: "/proc".into(),
-            store_url: Some("s3://crash-artifacts".into()),
-            store_options: vec![
-                ("AWS_ACCESS_KEY_ID".into(), "minioadmin".into()),
-                ("AWS_ENDPOINT".into(), "http://minio:9000".into()),
-            ],
+            store_configured: true,
             crictl_path: "/usr/local/bin/crictl".into(),
             cri_runtime_endpoint: Some("unix:///run/containerd/containerd.sock".into()),
             max_core_bytes: 1024,
             max_cores_per_hour: 5,
-            upload_deadline_secs: 60,
+            drain_deadline_secs: 60,
             crictl_timeout_secs: 15,
+            spool_dir: "/var/lib/coredrop/spool".into(),
+            spool_max_bytes: 1 << 30,
+            spool_min_free_percent: 20,
             rate_state_path: "/run/coredrop/recent.json".into(),
             event_socket_path: Some("/run/coredrop/events.sock".into()),
         };
@@ -398,17 +350,6 @@ mod tests {
     }
 
     #[test]
-    fn debug_hides_store_option_values() {
-        let cfg = HandlerConfig {
-            store_options: vec![("AWS_SECRET_ACCESS_KEY".into(), "s3cr3t-debug-canary".into())],
-            ..HandlerConfig::default()
-        };
-        let debug = format!("{cfg:?}");
-        assert!(debug.contains("AWS_SECRET_ACCESS_KEY"), "{debug}");
-        assert!(!debug.contains("s3cr3t-debug-canary"), "{debug}");
-    }
-
-    #[test]
     fn read_absent_file_is_none() {
         assert!(HandlerConfig::read("/no/such/coredrop/handler.json").is_none());
     }
@@ -457,11 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn no_store_url_yields_no_object_store() {
-        assert!(HandlerConfig::default().object_store().is_none());
-    }
-
-    #[test]
     fn validate_accepts_default_config() {
         assert!(HandlerConfig::default().validate().is_ok());
     }
@@ -485,6 +421,10 @@ mod tests {
                 event_socket_path: Some("events.sock".into()),
                 ..Default::default()
             },
+            HandlerConfig {
+                spool_dir: "spool".into(),
+                ..Default::default()
+            },
         ];
         for cfg in relative {
             assert!(cfg.validate().is_err(), "{cfg:?} should be rejected");
@@ -492,26 +432,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_only_supported_store_url_schemes() {
-        for url in [
-            "s3://crash-artifacts",
-            "gs://crash-artifacts",
-            "az://crash-artifacts",
-        ] {
-            let cfg = HandlerConfig {
-                store_url: Some(url.into()),
-                ..Default::default()
-            };
-            assert!(cfg.validate().is_ok(), "{url} should be valid");
-        }
-        // Not a URL at all, and a URL whose scheme we do not serve
-        // from a daemon-written config.
-        for url in ["not a url", "memory://bucket", "file:///var/tmp"] {
-            let cfg = HandlerConfig {
-                store_url: Some(url.into()),
-                ..Default::default()
-            };
-            assert!(cfg.validate().is_err(), "{url} should be rejected");
-        }
+    fn validate_rejects_a_free_space_floor_over_100_percent() {
+        let cfg = HandlerConfig {
+            spool_min_free_percent: 101,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
     }
 }

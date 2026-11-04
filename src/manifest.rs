@@ -1,12 +1,13 @@
 //! The JSON manifest sidecar written next to each captured core.
 //!
-//! After core drain + `/proc` snapshot upload + crictl enrichment, the handler
-//! assembles a `Manifest` and writes it to the object store at
+//! After core drain + `/proc` snapshot + crictl enrichment, the handler
+//! assembles a `Manifest` and writes it into the capture's spool bundle. The
+//! daemon uploads it to
 //! `{cluster}/{podUID}/{containerID}/{ts}-{hostPid}-manifest.json` - sibling
 //! to the core at `...-core.zst`. The manifest is the "record": a manifest pointing at a
 //! missing core is a real bug; an orphan core with no manifest is GC-able.
 //!
-//! Write ordering: core -> proc snapshot -> manifest.
+//! Upload ordering: core -> proc snapshot -> manifest.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +55,7 @@ pub struct ManifestIdentity {
 #[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct CoreRef {
     /// Whether a core was stored (`false` when no store is
-    /// configured).
+    /// configured, or the core was skipped).
     pub present: bool,
     pub object_key: Option<String>,
     pub sha256: Option<String>,
@@ -63,12 +64,12 @@ pub struct CoreRef {
     /// Compressed size in bytes (what's stored in the object store).
     pub stored_bytes: Option<u64>,
     pub truncated: bool,
-    /// Why the core is truncated: `size_cap` | `stream_error`. Absent when
-    /// not truncated.
+    /// Why the core is truncated: `size_cap` | `spool_full` | `stream_error`.
+    /// Absent when not truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated_reason: Option<String>,
-    /// Why no core was stored despite a configured store: `rate_limit`.
-    /// Absent when a core is present.
+    /// Why no core was stored despite a configured store: `rate_limit` |
+    /// `spool_full`. Absent when a core is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_reason: Option<String>,
     /// Compression codec applied to the stored object.

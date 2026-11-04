@@ -1,29 +1,33 @@
 //! The kernel-exec'd capture handler: `coredrop capture %P %s %t %E`.
 //!
-//! The kernel runs this in the *host* namespaces with the core on stdin.
-//! Handler flow (top-to-bottom, ordered by time-criticality):
+//! The kernel runs this in the *host* namespaces with the core on stdin. The
+//! handler writes only to the node-local spool (see [`crate::spool`]); the
+//! daemon uploads the spool later. Handler flow (top-to-bottom, ordered by
+//! time-criticality):
 //!
 //! 1. Pre-reap snapshot - snapshot `/proc/<hostpid>` before the kernel
 //!    reaps the PID; must complete while the kernel waits.
-//! 2. Core drain - stream stdin through zstd to the object store (or
-//!    discard if no store). Releases the kernel's pipe.
-//! 3. Proc snapshot upload - buffered PUT of the small tar.
-//! 4. Crictl enrichment - post-drain, best-effort: shell `crictl inspect`
-//!    for human-readable identity (namespace, pod name, container name, image,
+//! 2. Core drain - stream stdin through zstd into the capture's spool bundle
+//!    (or discard it). Then release the kernel's pipe: the kernel reaps the
+//!    crashed process and frees its `core_pipe_limit` slot.
+//! 3. Proc snapshot - write the small tar into the bundle.
+//! 4. Crictl enrichment - best-effort: shell `crictl inspect` for
+//!    human-readable identity (namespace, pod name, container name, image,
 //!    restart count). Failure degrades to cgroup-only identity.
-//! 5. Manifest write - assemble and PUT the JSON sidecar next to the core.
+//! 5. Manifest - write the JSON sidecar into the bundle, then move the
+//!    complete bundle to the spool's `ready/` directory.
 //! 6. Capture event - fire-and-forget datagram to the daemon for every
 //!    outcome, failures included. The daemon logs it (the handler itself has
-//!    no stdout) and, with crictl-enriched identity (namespace + pod name),
-//!    posts a k8s Event on the crashing pod. Best-effort.
+//!    no stdout) and treats a spooled capture as a hint to scan the spool.
+//!    Best-effort.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 
-use anyhow::{Context, Result, bail};
-use object_store::ObjectStore;
-use tokio::io::AsyncRead;
+use anyhow::{Context, Result, anyhow, bail};
+use tokio::io::{AsyncRead, ReadBuf};
 use tracing::{info, warn};
 
 use crate::backend::{CaptureBackend, DiscardBackend};
@@ -35,7 +39,8 @@ use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
 use crate::ratelimit::{RateDecision, RateLimiter};
 use crate::redact::Redactor;
 use crate::snapshot::ProcSnapshot;
-use crate::upload::{self, ObjectKeys, StandaloneBackend};
+use crate::spool::{self, Bundle, Spool, SpoolBackend};
+use crate::upload::ObjectKeys;
 
 /// The positional args the kernel passes after the `capture` subcommand,
 /// matching the `core_pattern` template `%P %s %t %E`.
@@ -82,25 +87,68 @@ fn parse_number<T: std::str::FromStr>(arg: &OsStr) -> Option<T> {
     arg.to_str()?.parse().ok()
 }
 
-/// Run the handler: snapshot /proc, drain core, enrich via crictl, write manifest.
+/// The kernel's core pipe on stdin. Dropping it points fd 0 at `/dev/null`,
+/// which closes the handler's end of the pipe: the kernel then reaps the
+/// crashed process and frees its `core_pipe_limit` slot while the handler goes
+/// on with crictl and the manifest. Dropping tokio's `Stdin` alone does not
+/// close fd 0.
+pub struct KernelPipe(tokio::io::Stdin);
+
+impl KernelPipe {
+    /// The core pipe the kernel connected to the handler's stdin.
+    #[must_use]
+    pub fn stdin() -> Self {
+        Self(tokio::io::stdin())
+    }
+}
+
+impl AsyncRead for KernelPipe {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl Drop for KernelPipe {
+    fn drop(&mut self) {
+        let released = std::fs::File::open("/dev/null")
+            .and_then(|null| rustix::stdio::dup2_stdin(&null).map_err(std::io::Error::from));
+        if let Err(e) = released {
+            warn!(error = %e, "releasing the core pipe failed; the kernel waits for the handler to exit");
+        }
+    }
+}
+
+/// Where a capture's files go: the spool bundle and the object keys the
+/// daemon will upload them to. Only a capture with a kubernetes identity and
+/// a configured store has one.
+struct Target<'a> {
+    identity: &'a CgroupIdentity,
+    keys: ObjectKeys,
+    bundle: Bundle,
+}
+
+/// Run the handler: snapshot /proc, drain the core into the spool, enrich via
+/// crictl, write the manifest, and hand the bundle to the daemon.
 ///
-/// `core_in` is the core stream (normally `tokio::io::stdin()`; injected in
-/// tests as a byte slice). `store_override` injects a pre-built `ObjectStore`
-/// for tests; `None` falls back to the URL-derived store from `config`.
+/// `core_in` is the core stream (normally [`KernelPipe::stdin`]; a byte slice
+/// in tests). It is dropped right after the drain, which releases the kernel's
+/// pipe.
 ///
 /// # Errors
 ///
-/// Fails when no object store is configured or reachable, or when draining
-/// the core stream or writing the manifest fails. Best-effort stages
-/// (proc snapshot, crictl enrichment, rate-limit state IO) degrade instead
-/// of erroring.
+/// Fails when draining the core stream fails or the bundle cannot be written.
+/// Best-effort stages (proc snapshot, crictl enrichment, rate-limit state IO)
+/// degrade instead of erroring.
 // Sequential capture pipeline; splitting it would only scatter the stages.
 #[allow(clippy::too_many_lines)]
 pub async fn run(
     args: CaptureArgs,
     config: &HandlerConfig,
-    core_in: &mut (impl AsyncRead + Unpin + Send),
-    store_override: Option<Arc<dyn ObjectStore>>,
+    mut core_in: impl AsyncRead + Unpin + Send,
 ) -> Result<()> {
     info!(
         host_pid = args.host_pid,
@@ -129,38 +177,50 @@ pub async fn run(
     if identity.is_none() {
         warn!(
             host_pid = args.host_pid,
-            "no kubernetes cgroup identity resolved; uploads will be skipped"
+            "no kubernetes cgroup identity resolved; nothing will be spooled"
         );
     }
     let cluster = config.cluster.as_str();
-    let store = store_override.or_else(|| config.object_store());
+    let spool = Spool::new(&config.spool_dir);
 
-    let keys = identity.as_ref().map(|id| {
-        ObjectKeys::new(
-            cluster,
-            &id.pod_uid,
-            &id.container_id,
-            args.timestamp,
-            args.host_pid,
-        )
-    });
-    let core_key = keys.as_ref().map(ObjectKeys::core);
-    // Identity and store both resolved: the only case where anything uploads.
-    let target = identity
-        .as_ref()
-        .zip(store.as_ref())
-        .zip(keys.as_ref())
-        .map(|((id, store), keys)| (id, store, keys));
+    // A bundle needs an identity (for its object keys) and a store to go to.
+    // When the bundle cannot be created the core is still drained, so the
+    // kernel completes the dump, and the capture is reported as failed.
+    let mut spool_error = None;
+    let target = match &identity {
+        Some(id) if config.store_configured => {
+            let name =
+                spool::bundle_name(args.timestamp, args.host_pid, &id.pod_uid, &id.container_id);
+            match spool.create_bundle(&name) {
+                Ok(bundle) => Some(Target {
+                    identity: id,
+                    keys: ObjectKeys::new(
+                        cluster,
+                        &id.pod_uid,
+                        &id.container_id,
+                        args.timestamp,
+                        args.host_pid,
+                    ),
+                    bundle,
+                }),
+                Err(e) => {
+                    warn!(error = %e, spool = %config.spool_dir.display(), "creating the spool bundle failed; discarding core");
+                    spool_error = Some(anyhow!(e).context("creating the spool bundle"));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
 
-    // Rate limit: consult only when a core would upload
-    // (identity + store resolved).
+    // Rate limit: consult only when a core would be kept.
     let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
     let mut rate_recorded = false;
-    let rate_suppressed = match target {
-        Some((id, _, _)) => match limiter.check_and_record(&id.pod_uid, args.timestamp) {
+    let rate_suppressed = match &target {
+        Some(t) => match limiter.check_and_record(&t.identity.pod_uid, args.timestamp) {
             RateDecision::Suppressed { recent } => {
                 warn!(
-                    pod_uid = %id.pod_uid,
+                    pod_uid = %t.identity.pod_uid,
                     recent,
                     max_per_hour = config.max_cores_per_hour,
                     "per-pod core budget exhausted - discarding core, keeping snapshot + manifest"
@@ -175,35 +235,66 @@ pub async fn run(
         None => false,
     };
 
-    // Step 2: Drain core (releases the kernel's pipe).
-    let backend: Box<dyn CaptureBackend> = if rate_suppressed {
-        Box::new(DiscardBackend)
-    } else if let Some((_, store, keys)) = target {
-        let key = keys.core();
-        info!(key = %key, "streaming core to object store");
-        Box::new(StandaloneBackend::new(
-            store.clone(),
-            &key,
-            config.max_core_bytes,
-        ))
-    } else {
-        info!("no object store configured or identity unresolved; discarding core");
-        Box::new(DiscardBackend)
+    // Spool quota: a core that cannot fit is dropped, and gives its budget
+    // slot back - nothing was kept.
+    let core_budget = match &target {
+        Some(_) if !rate_suppressed => {
+            spool.core_budget(config.spool_max_bytes, config.spool_min_free_percent)
+        }
+        _ => 0,
     };
-    // The handler holds a `core_pipe_limit` slot while it runs, so the drain
-    // has a deadline. On expiry the drain fails and the budget is refunded
-    // below. `drain_core` enforces the deadline itself so it can abort the
-    // multipart upload - see `race` in upload.rs.
-    let deadline = (config.upload_deadline_secs != 0)
-        .then(|| std::time::Duration::from_secs(config.upload_deadline_secs));
-    let drained = backend.drain_core(core_in, deadline).await;
-    let stats = match drained.context("draining core stream") {
+    let spool_full = target.is_some() && !rate_suppressed && core_budget == 0;
+    if spool_full {
+        warn!(
+            spool = %config.spool_dir.display(),
+            max_bytes = config.spool_max_bytes,
+            min_free_percent = config.spool_min_free_percent,
+            "spool is full - discarding core, keeping snapshot + manifest"
+        );
+    }
+    let refund = |t: &Target<'_>| {
+        if rate_recorded {
+            limiter.refund(&t.identity.pod_uid, args.timestamp);
+        }
+    };
+    if spool_full && let Some(t) = &target {
+        refund(t);
+    }
+
+    // Step 2: Drain core, then release the kernel's pipe.
+    let backend: Box<dyn CaptureBackend> = match &target {
+        Some(t) if !rate_suppressed && !spool_full => {
+            info!(bundle = %t.bundle.path("").display(), "spooling core");
+            Box::new(SpoolBackend::new(
+                t.bundle.path(spool::CORE_FILE),
+                config.max_core_bytes,
+                core_budget,
+            ))
+        }
+        _ => {
+            info!("core is not kept; discarding");
+            Box::new(DiscardBackend)
+        }
+    };
+    let deadline = (config.drain_deadline_secs != 0)
+        .then(|| std::time::Duration::from_secs(config.drain_deadline_secs));
+    let drained = backend.drain_core(&mut core_in, deadline).await;
+    drop(core_in);
+    let drained =
+        drained
+            .context("draining core stream")
+            .and_then(|stats| match spool_error.take() {
+                Some(e) => Err(e),
+                None => Ok(stats),
+            });
+    let stats = match drained {
         Ok(stats) => stats,
         Err(e) => {
-            // Nothing was stored: give the budget slot back, or a transient
-            // store outage would exhaust the budget with zero cores kept.
-            if rate_recorded && let Some((id, _, _)) = target {
-                limiter.refund(&id.pod_uid, args.timestamp);
+            // Nothing was kept: give the budget slot back, or a transient
+            // disk problem would exhaust the budget with zero cores kept.
+            if let Some(t) = target {
+                refund(&t);
+                t.bundle.discard();
             }
             // crictl has not run yet, so only the cgroup identity is known.
             report(
@@ -218,43 +309,37 @@ pub async fn run(
             return Err(e);
         }
     };
-    let uploaded = stats.sha256.is_some();
+    let stored = stats.sha256.is_some();
     info!(
         core_bytes = stats.bytes,
         stored_bytes = stats.stored_bytes,
         truncated = stats.truncated,
-        uploaded,
+        stored,
         "core stream drained"
     );
 
-    // Step 3: Upload proc snapshot (small, buffered).
-    let proc_snapshot_key = match target {
-        Some((_, store, keys)) => {
-            let key = keys.proc_snapshot();
-            match snapshot.to_tar() {
-                Ok(tar) => {
-                    let bytes = tar.len();
-                    match upload::put_object(store, &key, tar).await {
-                        Ok(()) => {
-                            info!(key = %key, bytes, "proc snapshot uploaded");
-                            Some(key)
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "proc snapshot upload failed; ref omitted from manifest");
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "rendering proc snapshot tar failed; ref omitted from manifest");
-                    None
-                }
+    // Step 3: Proc snapshot into the bundle (small, buffered).
+    let proc_snapshot_key = target.as_ref().and_then(|t| {
+        let tar = match snapshot.to_tar() {
+            Ok(tar) => tar,
+            Err(e) => {
+                warn!(error = %e, "rendering proc snapshot tar failed; ref omitted from manifest");
+                return None;
+            }
+        };
+        match t.bundle.write_file(spool::SNAPSHOT_FILE, &tar) {
+            Ok(()) => {
+                info!(bytes = tar.len(), "proc snapshot spooled");
+                Some(t.keys.proc_snapshot())
+            }
+            Err(e) => {
+                warn!(error = %e, "spooling proc snapshot failed; ref omitted from manifest");
+                None
             }
         }
-        _ => None,
-    };
+    });
 
-    // Step 4: Crictl enrichment (after the drain, so not time-critical).
+    // Step 4: Crictl enrichment (after the pipe is released, so not time-critical).
     let container_info = if let Some(id) = &identity {
         crictl::inspect(&id.container_id, config).await
     } else {
@@ -285,6 +370,13 @@ pub async fn run(
         file_count: snapshot.files.len(),
     });
 
+    let skipped_reason = if rate_suppressed {
+        Some("rate_limit")
+    } else if spool_full {
+        Some("spool_full")
+    } else {
+        None
+    };
     let manifest = Manifest {
         schema_version: 1,
         captured_at: format_timestamp(args.timestamp),
@@ -296,74 +388,98 @@ pub async fn run(
         build_id: snapshot.build_id.clone(),
         identity: manifest_identity,
         core: CoreRef {
-            present: uploaded,
-            object_key: core_key.clone().filter(|_| uploaded),
+            present: stored,
+            object_key: target.as_ref().map(|t| t.keys.core()).filter(|_| stored),
             sha256: stats.sha256.clone(),
-            size_bytes: uploaded.then_some(stats.bytes),
-            stored_bytes: uploaded.then_some(stats.stored_bytes),
+            size_bytes: stored.then_some(stats.bytes),
+            stored_bytes: stored.then_some(stats.stored_bytes),
             truncated: stats.truncated,
             truncated_reason: stats.truncated_reason.clone(),
-            skipped_reason: rate_suppressed.then(|| "rate_limit".to_string()),
+            skipped_reason: skipped_reason.map(str::to_string),
             codec: "zstd".to_string(),
         },
         proc_snapshot: proc_ref,
     };
 
-    // Write manifest to store (blob-first ordering: core -> snapshot -> manifest).
-    let manifest_key = if let Some((_, store, keys)) = target {
-        let key = keys.manifest();
-        match serde_json::to_vec_pretty(&manifest) {
-            Ok(json) => match upload::put_object(store, &key, json).await {
-                Ok(()) => {
-                    info!(key = %key, "manifest written");
-                    Some(key)
-                }
-                Err(e) => {
-                    warn!(error = %e, key = %key, "manifest write failed");
-                    None
-                }
-            },
-            Err(e) => {
-                warn!(error = %e, "manifest serialization failed");
-                None
-            }
-        }
-    } else {
-        warn!("no store or no cgroup identity; manifest skipped");
-        None
-    };
-
     let outcome = if identity.is_none() {
         Outcome::SkippedNonK8s
+    } else if !config.store_configured {
+        Outcome::NoStoreDiscard
     } else if rate_suppressed {
         Outcome::SuppressedRateLimit
-    } else if store.is_none() {
-        Outcome::NoStoreDiscard
-    } else if uploaded {
-        Outcome::Uploaded
+    } else if spool_full {
+        Outcome::SpoolFull
     } else {
-        Outcome::Failed
+        Outcome::Spooled
+    };
+    let id = &manifest.identity;
+    let payload = CaptureEventPayload {
+        namespace: id.namespace.clone(),
+        pod_name: id.pod_name.clone(),
+        pod_uid: identity.as_ref().map(|i| i.pod_uid.clone()),
+        container_id: identity.as_ref().map(|i| i.container_id.clone()),
+        container_name: id.container_name.clone(),
+        manifest_key: target.as_ref().map(|t| t.keys.manifest()),
+        core_bytes: stats.bytes,
+        stored_bytes: stored.then_some(stats.stored_bytes),
+        truncated: stats.truncated,
+        ..base_payload(&args, outcome)
     };
 
-    // Step 6: report the capture to the daemon, which logs it and, when
-    // crictl resolved namespace + pod name, posts a k8s Event.
-    let id = &manifest.identity;
-    report(
-        config,
-        &CaptureEventPayload {
-            namespace: id.namespace.clone(),
-            pod_name: id.pod_name.clone(),
-            pod_uid: identity.as_ref().map(|i| i.pod_uid.clone()),
-            container_id: identity.as_ref().map(|i| i.container_id.clone()),
-            container_name: id.container_name.clone(),
-            manifest_key,
-            core_bytes: stats.bytes,
-            stored_bytes: uploaded.then_some(stats.stored_bytes),
-            truncated: stats.truncated,
-            ..base_payload(&args, outcome)
-        },
-    );
+    // Write the manifest and the capture event into the bundle, then hand
+    // the complete bundle to the daemon. A bundle that cannot be completed
+    // is deleted: the daemon must never upload part of a capture.
+    if let Some(t) = target {
+        if let Err(e) = commit_bundle(t.bundle, &manifest, &payload) {
+            if rate_recorded {
+                limiter.refund(&t.identity.pod_uid, args.timestamp);
+            }
+            report(
+                config,
+                &CaptureEventPayload {
+                    outcome: Outcome::Failed,
+                    manifest_key: None,
+                    error: Some(format!("{e:#}")),
+                    ..payload
+                },
+            );
+            return Err(e);
+        }
+        info!(
+            manifest_key = payload.manifest_key.as_deref().unwrap_or("<none>"),
+            "capture spooled"
+        );
+    }
 
+    // Step 6: report the capture to the daemon.
+    report(config, &payload);
+
+    Ok(())
+}
+
+/// Write the manifest and capture event into `bundle` and move it to
+/// `ready/`. On failure the bundle is deleted.
+fn commit_bundle(bundle: Bundle, manifest: &Manifest, payload: &CaptureEventPayload) -> Result<()> {
+    let written = serde_json::to_vec_pretty(manifest)
+        .context("serializing manifest")
+        .and_then(|json| {
+            bundle
+                .write_file(spool::MANIFEST_FILE, &json)
+                .context("spooling manifest")
+        })
+        .and_then(|()| serde_json::to_vec(payload).context("serializing capture event"))
+        .and_then(|json| {
+            bundle
+                .write_file(spool::CAPTURE_FILE, &json)
+                .context("spooling capture event")
+        });
+    if let Err(e) = written {
+        bundle.discard();
+        return Err(e);
+    }
+    bundle
+        .commit()
+        .context("moving the bundle to the spool's ready dir")?;
     Ok(())
 }
 

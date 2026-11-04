@@ -20,6 +20,7 @@ use tracing::warn;
 /// log line and the capture-event payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[allow(missing_docs)] // DTO: variant names are self-explanatory.
 pub enum Outcome {
     Uploaded,
     SuppressedRateLimit,
@@ -29,6 +30,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// The `kebab-case` wire/log representation of this outcome.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -56,6 +58,7 @@ impl Display for Outcome {
 /// The fields added after the first release have a serde default, so the
 /// daemon still parses a datagram from an older handler during an upgrade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)] // DTO: undocumented fields are self-explanatory.
 pub struct CaptureEventPayload {
     pub namespace: Option<String>,
     pub pod_name: Option<String>,

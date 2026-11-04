@@ -9,32 +9,22 @@ the `core_pattern` pipe handler. coredrop snapshots the faulting process's
 an object store (S3/GCS/Azure), enriches the crash with Kubernetes
 identity via the CRI, and writes a JSON manifest next to the artifacts.
 
-## Relation to core-dump-handler
+## Design
 
-coredrop is inspired by [IBM/core-dump-handler](https://github.com/IBM/core-dump-handler),
-a well-known implementation of the DaemonSet + `core_pattern` approach for Kubernetes. It differs
-in these ways:
-
-- **Streaming, no node disk** - core-dump-handler's composer writes a zip
-  (core + metadata) to a hostPath directory, and a separate agent watches
-  that directory and uploads it. coredrop is a single binary whose handler
-  streams the core stdin -> zstd -> object store in one pass; the uncompressed
-  core never lands on node disk or in memory, and there is no upload agent,
-  watch loop, or disk quota to manage.
-- **Pre-reap `/proc` snapshot** - coredrop captures `maps`, `smaps`, `fd`,
-  `environ`, `limits`, `stack`, and the executable's GNU build-id while the
-  kernel still holds the faulting process. This state is gone after the
-  kernel reaps the process.
-- **Secret redaction by default** - captured `environ` and `cmdline` values
-  are redacted via a keyword list plus an entropy/shape heuristic before they
-  leave the node.
-- **Built-in guards** - per-pod upload rate limit and a stored core size
-  cap, so a crash-looping pod cannot flood the bucket.
-- **Loose artifacts + manifest, not a zip** - core, `/proc` snapshot tar, and
-  JSON manifest are separate objects under a predictable key scheme, so
-  tooling can read the manifest without downloading a multi-GB archive.
+- **Streaming, no node disk** - the handler streams the core
+  stdin -> zstd -> object store in one pass. The uncompressed core never
+  lands on node disk or in memory. coredrop is a single binary: there is no
+  upload agent, watch loop, or disk quota to manage.
+- **Pre-reap `/proc` snapshot** - process state is captured while the kernel
+  still holds the faulting process (see [How it works](#how-it-works)).
+- **Safe by default** - `environ` and `cmdline` are redacted, stored core size
+  is capped, and uploads are rate limited per pod (see
+  [Safety rails](#safety-rails)).
+- **Loose artifacts + manifest** - core, `/proc` snapshot tar, and JSON
+  manifest are separate objects under a predictable key scheme, so tooling
+  can read the manifest without downloading a multi-GB core.
 - **Multi-cloud via `object_store`** - S3, GCS, and Azure (including workload
-  identity) natively, not only the S3 API.
+  identity).
 
 ## How it works
 
@@ -99,6 +89,20 @@ Objects land at:
   left in place so restarts/upgrades keep the rate-limit state; `helm uninstall`
   runs a post-delete hook that removes the binary, the runtime files and the
   hostPath directories themselves.
+
+## Limitations
+
+- **The store sets the pace** - the kernel holds the faulting process until
+  the handler reads the whole core. A slow object store delays the reaping of
+  that process and holds a `core_pipe_limit` slot.
+- **No spool, no retry** - the core stream cannot be replayed. If the store is
+  unreachable, or the upload passes `--upload-deadline-secs`, the upload is
+  aborted and no core is stored. The capture is reported as failed in the
+  daemon log; no manifest or proc snapshot is uploaded for it.
+- **Size cap truncates** - past `--max-core-bytes` the core is cut, not
+  selected. The manifest records `truncated`.
+- **Manifest is written last** - if the handler is killed after the core
+  upload, the core exists without a manifest.
 
 ## Capture log and Events
 

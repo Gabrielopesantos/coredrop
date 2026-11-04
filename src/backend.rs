@@ -42,6 +42,8 @@ pub struct CoreStats {
 /// `core_pipe_limit` slot while this call runs.
 #[async_trait]
 pub trait CaptureBackend: Send + Sync {
+    /// Drain `reader` to completion, storing or discarding the core per
+    /// implementation. Errors only on an unrecoverable backend failure.
     async fn drain_core(
         &self,
         reader: &mut (dyn AsyncRead + Unpin + Send),

@@ -41,6 +41,8 @@ pub struct ObjectKeys {
 }
 
 impl ObjectKeys {
+    /// Build the key prefix for one capture:
+    /// `{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}`.
     #[must_use]
     pub fn new(
         cluster: &str,
@@ -101,6 +103,8 @@ pub struct StandaloneBackend {
 }
 
 impl StandaloneBackend {
+    /// Build a backend that streams the drained core to `key` in `store`,
+    /// capped at `max_core_bytes` (`0` = unlimited).
     pub fn new(store: Arc<dyn ObjectStore>, key: &str, max_core_bytes: u64) -> Self {
         Self {
             store,

@@ -71,6 +71,7 @@ impl Default for Redactor {
 }
 
 impl Redactor {
+    /// A redactor that never redacts (no keywords configured).
     #[must_use]
     pub fn disabled() -> Self {
         Self {

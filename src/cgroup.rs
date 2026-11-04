@@ -21,6 +21,7 @@
 
 /// Pod + container identity recovered from a process's cgroup path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct CgroupIdentity {
     pub pod_uid: String,
     pub container_id: String,

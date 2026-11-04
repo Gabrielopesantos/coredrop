@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// The top-level manifest written next to each captured core.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct Manifest {
     pub schema_version: u32,
     /// RFC3339 timestamp of the crash (from the kernel's `%t` specifier).
@@ -34,6 +35,7 @@ pub struct Manifest {
 /// Container identity in the manifest. `pod_uid` and `container_id` are always
 /// present (cgroup-derived); the remaining fields are best-effort from crictl.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct ManifestIdentity {
     pub pod_uid: String,
     pub container_id: String,
@@ -49,6 +51,7 @@ pub struct ManifestIdentity {
 
 /// Reference to the captured core object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct CoreRef {
     /// Whether a core was stored (`false` when no store is
     /// configured).
@@ -74,6 +77,7 @@ pub struct CoreRef {
 
 /// Reference to the `/proc` snapshot tar uploaded alongside the core.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct ProcSnapshotRef {
     pub object_key: String,
     pub truncated: bool,

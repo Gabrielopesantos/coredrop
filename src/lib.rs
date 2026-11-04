@@ -1,3 +1,8 @@
+#![warn(missing_docs)]
+
+//! Standalone Kubernetes coredump handler: capture backends, object-store
+//! upload, manifest/event types, and the daemon-side helpers that use them.
+
 pub mod backend;
 pub mod buildid;
 pub mod cgroup;

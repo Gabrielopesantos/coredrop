@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::upload;
 
+/// Host path the daemon writes the serialized [`HandlerConfig`] to, and the
+/// handler reads it back from.
 pub const DEFAULT_CONFIG_PATH: &str = "/run/coredrop/handler.json";
 
 /// Create `dir` (and parents) mode `0700` if missing - `create_dir_all`
@@ -290,6 +292,7 @@ impl HandlerConfig {
         Ok(())
     }
 
+    /// Build the configured object store, or `None` when no store URL is set.
     #[must_use]
     pub fn object_store(&self) -> Option<Arc<dyn ObjectStore>> {
         let url = self.store_url.as_deref()?;

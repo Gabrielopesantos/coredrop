@@ -5,16 +5,27 @@ snapshots to object storage, with a JSON manifest sidecar per crash.
 
 When a containerized process crashes, the node's kernel invokes coredrop as
 the `core_pattern` pipe handler. coredrop snapshots the faulting process's
-`/proc` entry before the kernel reaps it, streams the core through zstd into
-an object store (S3/GCS/Azure), enriches the crash with Kubernetes
-identity via the CRI, and writes a JSON manifest next to the artifacts.
+`/proc` entry before the kernel reaps it, writes the core through zstd into a
+spool on the node's disk, enriches the crash with Kubernetes identity via the
+CRI, and writes a JSON manifest next to it. The coredrop daemon uploads the
+spool to an object store (S3/GCS/Azure).
+
+```
+kernel --core pipe--> handler --> spool on node disk --> daemon --> object store
+        (released once           (one dir per crash)   (bounded queue,
+         the core is on disk)                            retries)
+```
 
 ## Design
 
-- **Streaming, no node disk** - the handler streams the core
-  stdin -> zstd -> object store in one pass. The uncompressed core never
-  lands on node disk or in memory. coredrop is a single binary: there is no
-  upload agent, watch loop, or disk quota to manage.
+- **Local spool, queued upload** - the handler writes only to local disk, so
+  a crash never waits for the network: the kernel reaps the crashed process
+  as soon as the core is on disk. The daemon uploads a bounded number of
+  captures at a time and retries failures with backoff. The uncompressed core
+  never lands on disk or in memory: it goes stdin -> zstd -> spool in one
+  pass.
+- **Credentials stay in the daemon** - the kernel-exec'd handler has no store
+  credentials and makes no network calls.
 - **Pre-reap `/proc` snapshot** - process state is captured while the kernel
   still holds the faulting process (see [How it works](#how-it-works)).
 - **Safe by default** - `environ` and `cmdline` are redacted, stored core size
@@ -33,8 +44,9 @@ The single `coredrop` binary runs in three modes:
 - **Daemon** (`coredrop`) - the long-running DaemonSet container. At startup
   it points `/proc/sys/kernel/core_pattern` at the handler, raises
   `core_pipe_limit` so more concurrent core dumps can be held open, and writes the
-  handler's config to a hostPath file. On shutdown it restores the previous
-  sysctl values.
+  handler's config to a hostPath file. It uploads the spool for as long as it
+  runs. On shutdown it restores the previous sysctl values, then keeps
+  uploading for `--shutdown-flush-secs`.
 - **Capture handler** (`coredrop capture %P %s %t %E`) - the short-lived
   process the kernel exec's per fault, in the host namespaces, with the core
   on stdin. Because the kernel exec's it with a clean environment, it reads
@@ -52,16 +64,19 @@ Handler flow, ordered by time-criticality:
    `environ`, `cmdline`, `stack`, `exe`, plus the executable's GNU build-id.
    Must complete while the kernel holds the faulting process; none of it is
    reconstructable afterwards.
-2. **Core drain** - stdin -> zstd -> sha256 -> multipart upload, fully
-   streaming. The uncompressed core never lands on disk or in memory.
-3. **Proc snapshot upload** - the small in-memory tar, buffered PUT.
+2. **Core drain** - stdin -> zstd -> sha256 -> spool file, fully streaming.
+   The handler then releases the core pipe: the kernel reaps the crashed
+   process and frees its `core_pipe_limit` slot.
+3. **Proc snapshot** - the small in-memory tar, written to the spool.
 4. **CRI enrichment** - best-effort `crictl inspect` for namespace, pod name,
    container name, image, restart count. Failure degrades to cgroup-derived
    identity (pod UID + container ID), which is always present.
-5. **Manifest write** - the JSON record, written last so a manifest always
-   points at complete artifacts.
+5. **Manifest** - the JSON record, written to the spool. The handler then
+   moves the complete capture from the spool's `incoming/` to `ready/`.
 
-Objects land at:
+The daemon uploads each ready capture in the order core, proc snapshot,
+manifest, so a manifest in the bucket always points at complete artifacts,
+then deletes it from the spool. Objects land at:
 
 ```sh
 {cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-core.zst
@@ -80,8 +95,11 @@ Objects land at:
   treat the bucket accordingly.
 - **Size cap** - stored core bytes are capped per crash (default 2 GiB);
   the remainder of the stream is drained but not stored.
-- **Rate limit** - per-pod core-upload budget (default 3/hour) so a
-  crash loop can't flood the bucket. Suppressed crashes still get a proc
+- **Spool quota** - the spool is capped (default 10 GiB) and keeps a
+  free-space floor on its filesystem (default 15%). A core that does not fit
+  is dropped; its proc snapshot and manifest are still spooled.
+- **Rate limit** - per-pod core budget (default 3/hour) so a crash loop
+  can't flood the spool or the bucket. Suppressed crashes still get a proc
   snapshot and manifest, just no core. The limiter fails open: a broken
   limiter never loses a core.
 - **Restore on shutdown** - the daemon restores the node's original
@@ -92,30 +110,34 @@ Objects land at:
 
 ## Limitations
 
-- **The store sets the pace** - the kernel holds the faulting process until
-  the handler reads the whole core. A slow object store delays the reaping of
-  that process and holds a `core_pipe_limit` slot.
-- **No spool, no retry** - the core stream cannot be replayed. If the store is
-  unreachable, or the upload passes `--upload-deadline-secs`, the upload is
-  aborted and no core is stored. The capture is reported as failed in the
-  daemon log; no manifest or proc snapshot is uploaded for it.
+- **Captures live on the node until uploaded** - a node deleted before its
+  spool is uploaded (an autoscaler scale-down, a spot reclaim) loses those
+  captures. `helm uninstall` deletes the spool too.
+- **Cores rest unencrypted on node disk** - in root-only directories, until
+  the daemon uploads them.
+- **Disk speed sets the pace** - the kernel holds the faulting process until
+  the handler has written the whole core to disk.
 - **Size cap truncates** - past `--max-core-bytes` the core is cut, not
   selected. The manifest records `truncated`.
-- **Manifest is written last** - if the handler is killed after the core
-  upload, the core exists without a manifest.
+- **Retries end** - a capture that still fails to upload after
+  `--spool-max-age-secs` (default 7 days) is deleted and logged as failed.
 
 ## Capture log and Events
 
 The kernel gives the handler no stdout, so the handler reports every capture
 to the daemon over a unix datagram socket (`/run/coredrop/events.sock` by
-default). The daemon logs one `capture complete` line per capture, failures
-and non-pod crashes included:
+default). The daemon logs `capture spooled` when a capture reaches the spool,
+and one `capture complete` line per capture once it is done - uploaded, or
+ended without an upload. Failures and non-pod crashes are included:
 
 ```sh
 $ kubectl -n <namespace> logs ds/coredrop | grep 'capture complete'
 INFO coredrop::k8s_events: capture complete outcome="uploaded" namespace="default" pod="my-app-7f8b9c" container="app" ... manifest_key="local/<podUID>/<containerID>/1717000000-4242-manifest.json"
 WARN coredrop::k8s_events: capture complete outcome="failed" ... error="draining core stream: ..."
 ```
+
+A failed upload is logged as `bundle upload failed; will retry` with the
+store's error; the capture stays in the spool until it uploads.
 
 A crash the handler never sees, for example because the handler binary is
 missing, shows up only in the node's kernel log (`dmesg`: `coredump: ...
@@ -135,7 +157,11 @@ LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
 | --- | --- |
 | Core uploaded | `CoreDumped` |
 | Rate-limit budget exhausted | `CoreDumpSuppressed` |
+| Spool full, core dropped | `CoreDumpSpoolFull` |
 | No object store configured | `CoreDiscardedNoStore` |
+
+A spooled capture gets its Event once it is uploaded, so the manifest key in
+the message always exists in the bucket.
 
 Only the daemon touches the API server, so the ServiceAccount token never
 reaches the handler. A crash-looping pod bumps one Event's `series.count` instead of
@@ -211,8 +237,15 @@ The main ones:
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
 | `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = drain but store nothing |
 | `--max-core-bytes` | `CAPTURE_MAX_CORE_BYTES` | 2 GiB | Stored core cap per crash; 0 = unlimited |
-| `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod upload budget; 0 = unlimited |
-| `--upload-deadline-secs` | `CAPTURE_UPLOAD_DEADLINE_SECS` | 300 | Per-core upload deadline; past it the upload is abandoned to free the `core_pipe_limit` slot; 0 = no deadline |
+| `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |
+| `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot; 0 = no deadline |
+| `--spool-dir` | `CAPTURE_SPOOL_DIR` | `/var/lib/coredrop/spool` | Spool root on the node |
+| `--spool-max-bytes` | `CAPTURE_SPOOL_MAX_BYTES` | 10 GiB | Spool size cap; 0 = no cap |
+| `--spool-min-free-percent` | `CAPTURE_SPOOL_MIN_FREE_PERCENT` | 15 | Free-space floor of the spool's filesystem |
+| `--spool-max-age-secs` | `CAPTURE_SPOOL_MAX_AGE_SECS` | 7 days | Age past which a capture that still fails to upload is deleted |
+| `--upload-concurrency` | `CAPTURE_UPLOAD_CONCURRENCY` | 2 | Captures uploaded at the same time |
+| `--upload-timeout-secs` | `CAPTURE_UPLOAD_TIMEOUT_SECS` | 600 | Time limit for one upload attempt of one capture; 0 = no limit |
+| `--shutdown-flush-secs` | `CAPTURE_SHUTDOWN_FLUSH_SECS` | 25 | Time the daemon keeps uploading after SIGTERM |
 | `--crictl-timeout-secs` | `CRICTL_TIMEOUT_SECS` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
 | `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
@@ -221,13 +254,12 @@ The main ones:
 
 Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
 `AZURE_STORAGE_ACCESS_KEY`, ...) are read from the environment only - never
-flags - and only an allowlist of keys is forwarded to the handler
-(`src/upload.rs`, `ALLOWED_STORE_OPTS`).
-
-The handler config file contains these credentials in plaintext. The daemon
-writes it mode `0600` in a `0700` directory and rewrites it on startup. On
-`helm uninstall`, the post-delete hook removes it, the capture-event socket and
-the rate-limit state.
+flags - and only an allowlist of keys is read (`src/upload.rs`,
+`ALLOWED_STORE_OPTS`). Only the daemon reads them: the handler config file
+holds no credentials. The daemon writes that file mode `0600` in a `0700`
+directory and rewrites it on startup. On `helm uninstall`, the post-delete
+hook removes it, the capture-event socket, the rate-limit state and the
+spool.
 
 ## License
 

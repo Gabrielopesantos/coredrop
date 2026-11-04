@@ -1,0 +1,255 @@
+//! Spool uploader tests: bundles written by the real handler, uploaded to an
+//! in-memory object store.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use object_store::ObjectStore;
+use object_store::memory::InMemory;
+use tempfile::TempDir;
+use tokio::sync::{Notify, mpsc};
+
+use coredrop::config::HandlerConfig;
+use coredrop::events::{CaptureEventPayload, Outcome};
+use coredrop::handler::{CaptureArgs, run};
+use coredrop::manifest::Manifest;
+use coredrop::spool::Spool;
+use coredrop::upload::ObjectKeys;
+use coredrop::uploader::{UploadSettings, Uploader};
+
+mod common;
+use common::{
+    FailingStore, base_config, bundle_names, get_object, is_absent, unzstd, write_fixture_proc,
+};
+
+const POD_UID: &str = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
+const CONTAINER_ID: &str = "abc123def456abc123def456";
+/// A recent crash time, so bundles are well inside the default max age.
+fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Run the real handler for one crash of `pid` at `ts`.
+async fn capture(config: &HandlerConfig, pid: i32, ts: i64, core: &[u8]) {
+    let args = CaptureArgs {
+        host_pid: pid,
+        signal: 11,
+        timestamp: ts,
+        exe: "!usr!bin!crasher".into(),
+    };
+    run(args, config, core).await.unwrap();
+}
+
+fn settings() -> UploadSettings {
+    UploadSettings {
+        concurrency: 2,
+        attempt_timeout: Some(Duration::from_secs(10)),
+        max_age: Duration::from_hours(1),
+        retry_backoff: Duration::from_millis(20),
+    }
+}
+
+/// Run the uploader in flush mode: it scans once, uploads what it can within
+/// `flush`, and returns. Returns the reports it sent.
+async fn flush(
+    config: &HandlerConfig,
+    store: Arc<dyn ObjectStore>,
+    settings: UploadSettings,
+    flush: Duration,
+) -> Vec<CaptureEventPayload> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let uploader = Uploader::new(Spool::new(&config.spool_dir), store, settings, tx);
+    uploader
+        .run(Arc::new(Notify::new()), std::future::ready(()), flush)
+        .await;
+    let mut reports = Vec::new();
+    while let Ok(report) = rx.try_recv() {
+        reports.push(report);
+    }
+    reports
+}
+
+fn ready(config: &HandlerConfig) -> Vec<String> {
+    bundle_names(&Spool::new(&config.spool_dir).ready_dir())
+}
+
+async fn manifest(store: &Arc<dyn ObjectStore>, key: &str) -> Manifest {
+    serde_json::from_slice(&get_object(store, key).await).unwrap()
+}
+
+/// A spooled core and a rate-limited capture both upload: every object the
+/// manifest names exists, the bundles are gone, and each capture is reported
+/// with its final outcome.
+#[tokio::test]
+async fn uploads_bundles_deletes_them_and_reports_final_outcomes() {
+    let pid = 5000;
+    let ts = now_ts();
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let mut config = base_config(tmp.path());
+    config.max_cores_per_hour = 1;
+
+    let core_payload = b"core payload for the uploader";
+    capture(&config, pid, ts, core_payload).await;
+    capture(&config, pid, ts + 1, b"suppressed core").await;
+    assert_eq!(ready(&config).len(), 2);
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let mut reports = flush(&config, store.clone(), settings(), Duration::from_secs(10)).await;
+
+    assert!(ready(&config).is_empty(), "uploaded bundles are deleted");
+
+    let first = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
+    let stored_core = get_object(&store, &first.core()).await;
+    assert_eq!(unzstd(&stored_core).await, core_payload);
+    get_object(&store, &first.proc_snapshot()).await;
+    let m = manifest(&store, &first.manifest()).await;
+    assert_eq!(m.core.object_key.as_deref(), Some(first.core().as_str()));
+
+    let second = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts + 1, pid);
+    assert!(is_absent(&store, &second.core()).await);
+    get_object(&store, &second.proc_snapshot()).await;
+    let m = manifest(&store, &second.manifest()).await;
+    assert_eq!(m.core.skipped_reason.as_deref(), Some("rate_limit"));
+
+    reports.sort_by_key(|r| r.timestamp);
+    let outcomes: Vec<Outcome> = reports.iter().map(|r| r.outcome).collect();
+    assert_eq!(
+        outcomes,
+        vec![Outcome::Uploaded, Outcome::SuppressedRateLimit]
+    );
+    assert_eq!(
+        reports[0].manifest_key.as_deref(),
+        Some(first.manifest().as_str())
+    );
+}
+
+/// A store outage keeps the bundle: nothing is deleted and no manifest
+/// appears in the bucket, because the manifest goes last. A later daemon
+/// with a working store uploads it.
+#[tokio::test]
+async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
+    let pid = 5001;
+    let ts = now_ts();
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, ts, b"core during an outage").await;
+
+    let inner = Arc::new(InMemory::new());
+    let failing = Arc::new(FailingStore::core(inner.clone()));
+    let store: Arc<dyn ObjectStore> = failing.clone();
+    let reports = flush(
+        &config,
+        store.clone(),
+        settings(),
+        Duration::from_millis(200),
+    )
+    .await;
+
+    assert!(reports.is_empty(), "a retried bundle is not reported yet");
+    assert_eq!(ready(&config).len(), 1, "the bundle stays in the spool");
+    let keys = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
+    let inner: Arc<dyn ObjectStore> = inner;
+    assert!(
+        is_absent(&inner, &keys.manifest()).await,
+        "no manifest may point at a core that is not uploaded"
+    );
+
+    failing.set_failing(false);
+    let reports = flush(&config, store, settings(), Duration::from_secs(10)).await;
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].outcome, Outcome::Uploaded);
+    assert!(ready(&config).is_empty());
+    get_object(&inner, &keys.core()).await;
+    get_object(&inner, &keys.manifest()).await;
+}
+
+/// Within one run, a failed bundle is retried after its backoff.
+#[tokio::test]
+async fn retries_a_failed_bundle_after_backoff() {
+    let pid = 5002;
+    let ts = now_ts();
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, ts, b"core that uploads on retry").await;
+
+    let failing = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let recover = failing.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        recover.set_failing(false);
+    });
+
+    let reports = flush(&config, failing, settings(), Duration::from_secs(10)).await;
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].outcome, Outcome::Uploaded);
+    assert!(ready(&config).is_empty());
+}
+
+/// A bundle past the max age that still fails is deleted and reported as a
+/// failed capture.
+#[tokio::test]
+async fn deletes_a_bundle_past_max_age_and_reports_failed() {
+    let pid = 5003;
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    // A crash two hours ago, with a one-hour max age.
+    capture(&config, pid, now_ts() - 7200, b"core that never uploads").await;
+
+    let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let reports = flush(&config, store, settings(), Duration::from_secs(10)).await;
+
+    assert!(ready(&config).is_empty(), "the expired bundle is deleted");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].outcome, Outcome::Failed);
+    assert!(
+        reports[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("upload gave up")),
+        "{:?}",
+        reports[0].error
+    );
+}
+
+/// A bundle a killed handler left in `incoming/` is deleted once it is
+/// stale, and never uploaded.
+#[tokio::test]
+async fn sweeps_stale_incoming_bundles() {
+    let tmp = TempDir::new().unwrap();
+    let config = base_config(tmp.path());
+    let spool = Spool::new(&config.spool_dir);
+    let bundle = spool.create_bundle("1-2-pod-cid").unwrap();
+    bundle.write_file("core.zst", b"partial").unwrap();
+    let fresh = spool.create_bundle("3-4-pod-cid").unwrap();
+    fresh.write_file("core.zst", b"in progress").unwrap();
+    set_mtime(
+        &spool.incoming_dir().join("1-2-pod-cid"),
+        std::time::SystemTime::now() - Duration::from_hours(2),
+    );
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let reports = flush(&config, store.clone(), settings(), Duration::from_secs(10)).await;
+
+    assert!(reports.is_empty());
+    assert_eq!(
+        bundle_names(&spool.incoming_dir()),
+        vec!["3-4-pod-cid".to_string()],
+        "only the stale bundle is swept"
+    );
+    let listed = store.list_with_delimiter(None).await.unwrap();
+    assert!(listed.objects.is_empty() && listed.common_prefixes.is_empty());
+}
+
+fn set_mtime(dir: &Path, mtime: std::time::SystemTime) {
+    std::fs::File::open(dir)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+}

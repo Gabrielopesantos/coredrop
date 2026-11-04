@@ -3,11 +3,14 @@
 //! Flow: handler (kernel-exec'd, clean env) -> `SOCK_DGRAM` unix socket ->
 //! daemon (holds the SA token) -> API server. The handler reports every
 //! capture. The daemon logs each one, because the kernel-exec'd handler has no
-//! stdout to log to, and turns some of them into k8s Events. This keeps the SA
-//! token and a kube client out of the kernel-exec'd handler, which stays
-//! fire-and-forget: a missing socket, a full send buffer, or an unreachable
-//! API server never affects the capture itself. The daemon-side listener and
-//! k8s Event client live in [`crate::k8s_events`].
+//! stdout to log to. A capture that left a spool bundle is reported again by
+//! the daemon's uploader once the bundle is uploaded; that final report, and
+//! every other outcome, can become a k8s Event. This keeps the SA token and a
+//! kube client out of the kernel-exec'd handler, which stays fire-and-forget:
+//! a missing socket, a full send buffer, or an unreachable API server never
+//! affects the capture itself. The spool scan does not depend on the
+//! datagram either. The daemon-side listener and k8s Event client live in
+//! [`crate::k8s_events`].
 
 use std::fmt::Display;
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
@@ -34,6 +37,17 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// Whether the handler left a spool bundle for this capture. The daemon
+    /// reports such a capture once the bundle is uploaded; every other
+    /// outcome is final when the handler reports it.
+    #[must_use]
+    pub fn has_bundle(self) -> bool {
+        matches!(
+            self,
+            Outcome::Spooled | Outcome::SuppressedRateLimit | Outcome::SpoolFull
+        )
+    }
+
     /// The `kebab-case` wire/log representation of this outcome.
     #[must_use]
     pub fn as_str(self) -> &'static str {

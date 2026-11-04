@@ -20,6 +20,7 @@ pub mod redact;
 pub mod snapshot;
 pub mod spool;
 pub mod upload;
+pub mod uploader;
 
 /// Host path the `DaemonSet` installs the binary to, so the kernel can exec it as
 /// the `core_pattern` pipe target. Overridable via `CAPTURE_HANDLER_PATH`.

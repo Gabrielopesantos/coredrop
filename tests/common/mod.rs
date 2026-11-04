@@ -10,6 +10,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_trait::async_trait;
@@ -166,13 +167,15 @@ impl tokio::io::AsyncRead for StallReader {
 
 /// An `ObjectStore` that rejects writes to keys ending in `fail_suffix` and
 /// delegates everything else to an `InMemory`, so a test can fail one stage of
-/// the capture pipeline and inspect what the earlier stages left behind.
+/// an upload and inspect what the earlier stages left behind. The failure can
+/// be switched off to model a store that recovers.
 pub struct FailingStore {
     inner: Arc<InMemory>,
     fail_suffix: &'static str,
     /// Also reject the multipart path. `BufWriter` picks single-put vs
     /// multipart by payload size, so a core (which streams) needs both.
     fail_multipart: bool,
+    failing: AtomicBool,
 }
 
 impl FailingStore {
@@ -182,6 +185,7 @@ impl FailingStore {
             inner,
             fail_suffix: "-manifest.json",
             fail_multipart: false,
+            failing: AtomicBool::new(true),
         }
     }
 
@@ -191,11 +195,17 @@ impl FailingStore {
             inner,
             fail_suffix: "-core.zst",
             fail_multipart: true,
+            failing: AtomicBool::new(true),
         }
     }
 
+    /// Switch the injected failure on or off.
+    pub fn set_failing(&self, failing: bool) {
+        self.failing.store(failing, Ordering::SeqCst);
+    }
+
     fn rejects(&self, location: &ObjectPath) -> bool {
-        location.as_ref().ends_with(self.fail_suffix)
+        self.failing.load(Ordering::SeqCst) && location.as_ref().ends_with(self.fail_suffix)
     }
 
     fn injected_failure(&self) -> object_store::Error {

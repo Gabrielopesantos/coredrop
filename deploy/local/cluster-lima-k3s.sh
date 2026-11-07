@@ -16,7 +16,7 @@ cluster_up() {
     limactl start "$LIMA_INSTANCE" >/dev/null 2>&1 || true
   else
     log "creating lima instance '$LIMA_INSTANCE' (template: k3s, KVM-accelerated)"
-    limactl start --name "$LIMA_INSTANCE" --tty=false template://k3s
+    limactl start --name "$LIMA_INSTANCE" --tty=false template:k3s
   fi
   kube_context
   # Wait for the API server to answer through the forwarded port.

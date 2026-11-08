@@ -97,7 +97,9 @@ then deletes it from the spool. Objects land at:
   the remainder of the stream is drained but not stored.
 - **Spool quota** - the spool is capped (default 10 GiB) and keeps a
   free-space floor on its filesystem (default 15%). A core that does not fit
-  is dropped; its proc snapshot and manifest are still spooled.
+  is dropped; its proc snapshot and manifest are still spooled. The handler
+  checks the spool again while it writes a core, so concurrent crashes count
+  against the cap; each one can pass it by a few MiB.
 - **Rate limit** - per-pod core budget (default 3/hour) so a crash loop
   can't flood the spool or the bucket. Suppressed crashes still get a proc
   snapshot and manifest, just no core. The limiter fails open: a broken

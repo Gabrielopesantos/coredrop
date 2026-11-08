@@ -187,6 +187,8 @@ The handler has no store credentials and makes no network calls.
   which evicts pods under disk pressure, so keep both conservative. A core that
   does not fit is dropped; its snapshot and manifest are still spooled, with
   `skipped_reason: spool_full`, and the pod gets a `CoreDumpSpoolFull` Event.
+  The handler checks the spool again while it writes a core, so concurrent
+  crashes count against the cap; each one can pass it by a few MiB.
 - **Retries.** A capture that fails to upload stays in the spool and is retried
   with exponential backoff (10s, doubling, up to 10 minutes). Past
   `spool.maxAgeSeconds` it is deleted and logged as `outcome="failed"`.

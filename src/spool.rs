@@ -68,6 +68,11 @@ const CORE_READ_CHUNK: usize = 256 * 1024;
 // the current block but keeps the window, so it costs almost no ratio.
 const BUDGET_FLUSH_INTERVAL: u64 = 1024 * 1024;
 
+// While a core is written, check the whole spool again after this many more
+// stored bytes. Concurrent captures and other disk users then count against
+// the cap, and each capture passes it by at most about this much.
+const SPOOL_RECHECK_INTERVAL: u64 = 8 * 1024 * 1024;
+
 /// The spool root and its `incoming/` and `ready/` directories.
 #[derive(Debug, Clone)]
 pub struct Spool {
@@ -284,6 +289,39 @@ impl Bundle {
     }
 }
 
+/// The spool's size cap and free-space floor, checked again while a core is
+/// written. The budget a capture gets before its drain does not see the
+/// bytes that concurrent captures write after it.
+#[derive(Debug, Clone)]
+pub struct SpoolBudget {
+    spool: Spool,
+    max_bytes: u64,
+    min_free_percent: u8,
+    recheck_every: u64,
+}
+
+impl SpoolBudget {
+    /// The cap of `spool`: `max_bytes` in total (`0` = no cap) and a
+    /// `min_free_percent` floor of free space on its filesystem.
+    #[must_use]
+    pub fn new(spool: Spool, max_bytes: u64, min_free_percent: u8) -> Self {
+        Self {
+            spool,
+            max_bytes,
+            min_free_percent,
+            recheck_every: SPOOL_RECHECK_INTERVAL,
+        }
+    }
+
+    /// Whether the spool still has room, counting every bundle, the partial
+    /// cores of running captures included.
+    fn has_room(&self) -> bool {
+        self.spool
+            .core_budget(self.max_bytes, self.min_free_percent)
+            > 0
+    }
+}
+
 /// The spool capture backend: stream the core through zstd into the bundle's
 /// [`CORE_FILE`].
 pub struct SpoolBackend {
@@ -292,18 +330,27 @@ pub struct SpoolBackend {
     max_core_bytes: u64,
     /// Max compressed bytes stored, from [`Spool::core_budget`].
     max_stored_bytes: u64,
+    /// The spool cap, checked again during the write.
+    budget: Option<SpoolBudget>,
 }
 
 impl SpoolBackend {
     /// Build a backend that writes the core to `path`, capped at
     /// `max_core_bytes` uncompressed (`0` = unlimited) and about
-    /// `max_stored_bytes` compressed.
+    /// `max_stored_bytes` compressed. With a `budget`, it also stops storing
+    /// once the spool as a whole is full.
     #[must_use]
-    pub fn new(path: PathBuf, max_core_bytes: u64, max_stored_bytes: u64) -> Self {
+    pub fn new(
+        path: PathBuf,
+        max_core_bytes: u64,
+        max_stored_bytes: u64,
+        budget: Option<SpoolBudget>,
+    ) -> Self {
         Self {
             path,
             max_core_bytes,
             max_stored_bytes,
+            budget,
         }
     }
 }
@@ -329,6 +376,7 @@ impl CaptureBackend for SpoolBackend {
             file,
             self.max_core_bytes,
             self.max_stored_bytes,
+            self.budget.as_ref(),
             deadline,
         )
         .await?;
@@ -364,16 +412,39 @@ async fn encoder_step(
     }
 }
 
+/// Whether `budget` reports the spool full, checked once `stored` has grown
+/// by its recheck interval since `checked_at`.
+fn spool_filled(budget: Option<&SpoolBudget>, stored: u64, checked_at: &mut u64) -> bool {
+    let Some(budget) = budget else {
+        return false;
+    };
+    if stored - *checked_at < budget.recheck_every {
+        return false;
+    }
+    *checked_at = stored;
+    let full = !budget.has_room();
+    if full {
+        warn!(
+            stored,
+            "spool is full - keeping the core so far, draining the rest"
+        );
+    }
+    full
+}
+
 /// Stream `core` through zstd into `sink` until EOF, hashing what is stored.
 /// Past `max_core_bytes` uncompressed or `max_stored_bytes` compressed the
 /// rest of the stream is drained but not stored. The compressed check runs
 /// after each [`BUDGET_FLUSH_INTERVAL`] of input, so the stored size can pass
-/// `max_stored_bytes` by up to that much. Returns the stats and the sink.
+/// `max_stored_bytes` by up to that much. With a `budget`, the whole spool is
+/// checked again after each `recheck_every` stored bytes, and storing stops
+/// when it is full. Returns the stats and the sink.
 pub(crate) async fn stream_core_through_zstd<R, W>(
     core: &mut R,
     sink: W,
     max_core_bytes: u64,
     max_stored_bytes: u64,
+    budget: Option<&SpoolBudget>,
     deadline: Option<Duration>,
 ) -> Result<(CoreStats, W)>
 where
@@ -397,6 +468,7 @@ where
     let mut drained = 0u64;
     let mut written = 0u64;
     let mut unflushed = 0u64;
+    let mut checked_at = 0u64;
     let mut storing = true;
     let mut truncated_reason: Option<String> = None;
     loop {
@@ -435,6 +507,12 @@ where
                     if max_stored_bytes != u64::MAX && unflushed >= BUDGET_FLUSH_INTERVAL {
                         unflushed = 0;
                         encoder_step(encoder.flush(), deadline_at, drained, "flushing").await?;
+                        // The flush put the stored bytes on disk, so the
+                        // spool's usage includes them.
+                        if spool_filled(budget, encoder.get_ref().bytes, &mut checked_at) {
+                            storing = false;
+                            truncated_reason = Some("spool_full".to_string());
+                        }
                     }
                 }
                 if storing && take < n {
@@ -570,9 +648,14 @@ mod tests {
         max_stored_bytes: u64,
         deadline: Option<Duration>,
     ) -> Result<CoreStats> {
-        SpoolBackend::new(bundle.path(CORE_FILE), max_core_bytes, max_stored_bytes)
-            .drain_core(reader, deadline)
-            .await
+        SpoolBackend::new(
+            bundle.path(CORE_FILE),
+            max_core_bytes,
+            max_stored_bytes,
+            None,
+        )
+        .drain_core(reader, deadline)
+        .await
     }
 
     #[tokio::test]
@@ -640,19 +723,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn stops_storing_when_the_spool_budget_is_used_up() {
-        // xorshift output is incompressible, so compressed bytes track the
-        // input closely.
+    /// `len` bytes of xorshift output. It is incompressible, so compressed
+    /// bytes track the input closely.
+    fn incompressible(len: usize) -> Vec<u8> {
         let mut xorshift = 0x2545_f491_4f6c_dd1du64;
-        let core: Vec<u8> = (0..4_000_000)
+        (0..len)
             .map(|_| {
                 xorshift ^= xorshift << 13;
                 xorshift ^= xorshift >> 7;
                 xorshift ^= xorshift << 17;
                 xorshift.to_le_bytes()[0]
             })
-            .collect();
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stops_storing_when_the_spool_budget_is_used_up() {
+        let core = incompressible(4_000_000);
         let (_dir, _spool, bundle) = bundle();
 
         let mut reader: &[u8] = &core;
@@ -669,6 +756,46 @@ mod tests {
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         let prefix = unzstd(&stored).await;
         assert_eq!(prefix, &core[..prefix.len()], "stored core is a prefix");
+    }
+
+    /// Two captures start with the same budget, from the same spool usage.
+    /// The recheck during the write counts each other's bytes, so together
+    /// they stay near the cap instead of each filling it.
+    #[tokio::test]
+    async fn concurrent_drains_share_the_spool_cap() {
+        const MAX: u64 = 4 * 1024 * 1024;
+        let core = incompressible(12 * 1024 * 1024);
+        let dir = TempDir::new().unwrap();
+        let spool = Spool::new(dir.path().join("spool"));
+        let a = spool.create_bundle("1-1-pod-a").unwrap();
+        let b = spool.create_bundle("1-2-pod-b").unwrap();
+        let budget = spool.core_budget(MAX, 0);
+        assert_eq!(budget, MAX);
+        let backend = |bundle: &Bundle| {
+            let mut spool_budget = SpoolBudget::new(spool.clone(), MAX, 0);
+            spool_budget.recheck_every = 0;
+            SpoolBackend::new(bundle.path(CORE_FILE), 0, budget, Some(spool_budget))
+        };
+        let (backend_a, backend_b) = (backend(&a), backend(&b));
+
+        let (mut reader_a, mut reader_b): (&[u8], &[u8]) = (&core, &core);
+        let (stats_a, stats_b) = tokio::join!(
+            backend_a.drain_core(&mut reader_a, None),
+            backend_b.drain_core(&mut reader_b, None),
+        );
+        let (stats_a, stats_b) = (stats_a.unwrap(), stats_b.unwrap());
+
+        for stats in [&stats_a, &stats_b] {
+            assert_eq!(stats.truncated_reason.as_deref(), Some("spool_full"));
+        }
+        // Each capture can pass the cap by one flush interval plus one read
+        // chunk before its next check.
+        let slack = 2 * (BUDGET_FLUSH_INTERVAL + CORE_READ_CHUNK as u64);
+        assert!(
+            spool.usage_bytes() <= MAX + slack,
+            "spool holds {} bytes, cap {MAX}",
+            spool.usage_bytes()
+        );
     }
 
     #[tokio::test(start_paused = true)]

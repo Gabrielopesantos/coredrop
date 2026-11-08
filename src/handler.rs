@@ -40,7 +40,7 @@ use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
 use crate::ratelimit::{RateDecision, RateLimiter};
 use crate::redact::Redactor;
 use crate::snapshot::ProcSnapshot;
-use crate::spool::{self, Bundle, Spool, SpoolBackend};
+use crate::spool::{self, Bundle, Spool, SpoolBackend, SpoolBudget};
 use crate::upload::ObjectKeys;
 
 /// The positional args the kernel passes after the `capture` subcommand,
@@ -277,6 +277,11 @@ pub async fn run(
                 t.bundle.path(spool::CORE_FILE),
                 config.max_core_bytes,
                 core_budget,
+                Some(SpoolBudget::new(
+                    spool.clone(),
+                    config.spool_max_bytes,
+                    config.spool_min_free_percent,
+                )),
             )
             .drain_core(&mut core_in, deadline)
             .await

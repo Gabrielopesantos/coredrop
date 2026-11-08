@@ -30,7 +30,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncRead, ReadBuf};
 use tracing::{info, warn};
 
-use crate::backend::{CaptureBackend, DiscardBackend};
+use crate::backend::{CaptureBackend, CoreStats, DiscardBackend, DrainDeadline};
 use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::crictl;
@@ -280,6 +280,23 @@ pub async fn run(
         .then(|| std::time::Duration::from_secs(config.drain_deadline_secs));
     let drained = backend.drain_core(&mut core_in, deadline).await;
     drop(core_in);
+    // A capture whose core is not kept loses nothing when the discard passes
+    // its deadline: the pipe is released above, and the bundle still gets
+    // its snapshot and manifest.
+    let metadata_only = target.is_some() && (rate_suppressed || spool_full);
+    let drained = match drained {
+        Err(e) if metadata_only => match e.downcast_ref::<DrainDeadline>() {
+            Some(&DrainDeadline { bytes }) => Ok(CoreStats {
+                bytes,
+                stored_bytes: 0,
+                sha256: None,
+                truncated: false,
+                truncated_reason: None,
+            }),
+            None => Err(e),
+        },
+        other => other,
+    };
     let drained =
         drained
             .context("draining core stream")

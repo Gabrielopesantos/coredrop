@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::{Instant, timeout_at};
@@ -34,6 +34,21 @@ pub struct CoreStats {
     /// `None` when not truncated.
     pub truncated_reason: Option<String>,
 }
+
+/// The drain passed its deadline before the core stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainDeadline {
+    /// Bytes drained before the deadline.
+    pub bytes: u64,
+}
+
+impl std::fmt::Display for DrainDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("core drain exceeded the deadline")
+    }
+}
+
+impl std::error::Error for DrainDeadline {}
 
 /// Sink for the kernel's core stream. Implementations must consume `reader`
 /// to completion - the kernel blocks on the core pipe until fully drained.
@@ -75,7 +90,7 @@ impl CaptureBackend for DiscardBackend {
             match read {
                 Err(_elapsed) => {
                     warn!(bytes, "core stream discard exceeded the deadline");
-                    return Err(anyhow!("core drain exceeded the deadline"));
+                    return Err(DrainDeadline { bytes }.into());
                 }
                 Ok(Ok(0)) => {
                     return Ok(CoreStats {
@@ -153,6 +168,7 @@ mod tests {
         let result = DiscardBackend
             .drain_core(&mut reader, Some(Duration::from_secs(1)))
             .await;
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.downcast_ref::<DrainDeadline>().is_some(), "{err:#}");
     }
 }

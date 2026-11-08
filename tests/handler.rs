@@ -475,6 +475,62 @@ async fn run_drain_deadline_drops_stalled_capture_and_refunds_budget() {
     assert!(bundle.join(spool::CORE_FILE).exists());
 }
 
+/// A rate-limited capture whose discard stalls past the deadline still gets
+/// its snapshot and a `rate_limit` manifest: no core was to be kept, so the
+/// deadline loses nothing.
+#[tokio::test(start_paused = true)]
+async fn run_drain_deadline_keeps_metadata_of_a_rate_limited_capture() {
+    let pid = 4247;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let mut config = base_config(tmp.path());
+    config.drain_deadline_secs = 5;
+    config.max_cores_per_hour = 1;
+
+    let core_in: &[u8] = b"core payload that uses the budget";
+    run(capture_args(pid, 11, TS), &config, core_in)
+        .await
+        .unwrap();
+    run(capture_args(pid, 11, TS + 10), &config, StallReader)
+        .await
+        .unwrap();
+
+    let bundle = ready_bundle(&config, CONTAINER_ID, TS + 10, pid);
+    assert!(!bundle.join(spool::CORE_FILE).exists());
+    assert!(bundle.join(spool::SNAPSHOT_FILE).exists());
+    let manifest = read_manifest(&bundle);
+    assert!(!manifest.core.present);
+    assert_eq!(manifest.core.skipped_reason.as_deref(), Some("rate_limit"));
+    assert_eq!(read_capture(&bundle).outcome, Outcome::SuppressedRateLimit);
+}
+
+/// A spool-full capture whose discard stalls past the deadline still gets its
+/// snapshot and a `spool_full` manifest.
+#[tokio::test(start_paused = true)]
+async fn run_drain_deadline_keeps_metadata_of_a_spool_full_capture() {
+    let pid = 4248;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let mut config = base_config(tmp.path());
+    config.drain_deadline_secs = 5;
+    // A 100% free-space floor can never be met.
+    config.spool_min_free_percent = 100;
+
+    run(capture_args(pid, 11, TS), &config, StallReader)
+        .await
+        .unwrap();
+
+    let bundle = ready_bundle(&config, CONTAINER_ID, TS, pid);
+    assert!(!bundle.join(spool::CORE_FILE).exists());
+    assert!(bundle.join(spool::SNAPSHOT_FILE).exists());
+    let manifest = read_manifest(&bundle);
+    assert!(!manifest.core.present);
+    assert_eq!(manifest.core.skipped_reason.as_deref(), Some("spool_full"));
+    assert_eq!(read_capture(&bundle).outcome, Outcome::SpoolFull);
+}
+
 /// An unusable spool still drains the core, so the kernel completes the dump,
 /// and reports the capture as failed.
 #[tokio::test]

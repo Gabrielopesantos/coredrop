@@ -87,6 +87,29 @@ the directory's parent.
 {{- if or (not (isAbs $dir)) (eq $dir "/") -}}
 {{- fail (printf "spool.hostDir must be an absolute path below /: %q" .Values.spool.hostDir) -}}
 {{- end -}}
+{{- include "coredrop.validateInt" (dict "name" "spool.maxBytes" "value" .Values.spool.maxBytes "min" 0) -}}
+{{- include "coredrop.validateInt" (dict "name" "spool.minFreePercent" "value" .Values.spool.minFreePercent "min" 0 "max" 100) -}}
+{{- end -}}
+
+{{/*
+Fail rendering when .value is not a whole number in [.min, .max]; .max is
+optional. The daemon parses these values as unsigned integers and exits on
+anything else. YAML numbers reach the template as float64, --set numbers as
+int64, so a float is accepted only when it has no fraction.
+*/}}
+{{- define "coredrop.validateInt" -}}
+{{- $v := .value -}}
+{{- $whole := or (kindIs "int" $v) (kindIs "int64" $v) (and (kindIs "float64" $v) (eq $v (floor $v))) -}}
+{{- if not $whole -}}
+{{- fail (printf "%s must be a whole number: %v" .name $v) -}}
+{{- end -}}
+{{- $n := int64 $v -}}
+{{- if lt $n (int64 .min) -}}
+{{- fail (printf "%s must be at least %d: %d" .name (int64 .min) $n) -}}
+{{- end -}}
+{{- if and (hasKey . "max") (gt $n (int64 .max)) -}}
+{{- fail (printf "%s must be at most %d: %d" .name (int64 .max) $n) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

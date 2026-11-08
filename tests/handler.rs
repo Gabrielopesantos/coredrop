@@ -24,6 +24,17 @@ const POD_UID: &str = "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98";
 const CONTAINER_ID: &str = "abc123def456abc123def456"; // 24 hex chars -- valid
 const TS: i64 = 1_749_600_000;
 
+/// Run the handler on a core pipe that never yields data. It returns only
+/// when `run()` does not read the pipe.
+async fn run_without_reading(args: CaptureArgs, config: &HandlerConfig) -> anyhow::Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_mins(10),
+        run(args, config, StallReader),
+    )
+    .await
+    .expect("run() read the core pipe")
+}
+
 fn capture_args(pid: i32, signal: i32, timestamp: i64) -> CaptureArgs {
     CaptureArgs {
         host_pid: pid,
@@ -192,8 +203,7 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
 }
 
 /// Each outcome must arrive on the events socket with the correct value. This
-/// test covers spooling, rate-limit suppression and discard when there is no
-/// store.
+/// test covers spooling, rate-limit suppression and the no-store case.
 #[tokio::test]
 async fn run_reports_each_outcome_on_the_events_socket() {
     let pid = 4248;
@@ -215,7 +225,7 @@ async fn run_reports_each_outcome_on_the_events_socket() {
             .unwrap_or_else(|e| panic!("run at {ts} failed: {e}"));
     }
 
-    // Without a store the handler drains the core and discards it. This path
+    // Without a store the handler does not read the core. This path
     // does not use the limiter, so the empty budget does not change the outcome.
     config.store_configured = false;
     let core_in: &[u8] = b"core payload with nowhere to go";
@@ -475,24 +485,23 @@ async fn run_drain_deadline_drops_stalled_capture_and_refunds_budget() {
     assert!(bundle.join(spool::CORE_FILE).exists());
 }
 
-/// A rate-limited capture whose discard stalls past the deadline still gets
-/// its snapshot and a `rate_limit` manifest: no core was to be kept, so the
-/// deadline loses nothing.
+/// A rate-limited capture does not read the core pipe, and still gets its
+/// snapshot and a `rate_limit` manifest.
 #[tokio::test(start_paused = true)]
-async fn run_drain_deadline_keeps_metadata_of_a_rate_limited_capture() {
+async fn run_rate_limited_capture_does_not_read_the_core() {
     let pid = 4247;
 
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.drain_deadline_secs = 5;
+    config.drain_deadline_secs = 0;
     config.max_cores_per_hour = 1;
 
     let core_in: &[u8] = b"core payload that uses the budget";
     run(capture_args(pid, 11, TS), &config, core_in)
         .await
         .unwrap();
-    run(capture_args(pid, 11, TS + 10), &config, StallReader)
+    run_without_reading(capture_args(pid, 11, TS + 10), &config)
         .await
         .unwrap();
 
@@ -502,23 +511,25 @@ async fn run_drain_deadline_keeps_metadata_of_a_rate_limited_capture() {
     let manifest = read_manifest(&bundle);
     assert!(!manifest.core.present);
     assert_eq!(manifest.core.skipped_reason.as_deref(), Some("rate_limit"));
-    assert_eq!(read_capture(&bundle).outcome, Outcome::SuppressedRateLimit);
+    let capture = read_capture(&bundle);
+    assert_eq!(capture.outcome, Outcome::SuppressedRateLimit);
+    assert_eq!(capture.core_bytes, 0);
 }
 
-/// A spool-full capture whose discard stalls past the deadline still gets its
+/// A spool-full capture does not read the core pipe, and still gets its
 /// snapshot and a `spool_full` manifest.
 #[tokio::test(start_paused = true)]
-async fn run_drain_deadline_keeps_metadata_of_a_spool_full_capture() {
+async fn run_spool_full_capture_does_not_read_the_core() {
     let pid = 4248;
 
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.drain_deadline_secs = 5;
+    config.drain_deadline_secs = 0;
     // A 100% free-space floor can never be met.
     config.spool_min_free_percent = 100;
 
-    run(capture_args(pid, 11, TS), &config, StallReader)
+    run_without_reading(capture_args(pid, 11, TS), &config)
         .await
         .unwrap();
 
@@ -531,10 +542,9 @@ async fn run_drain_deadline_keeps_metadata_of_a_spool_full_capture() {
     assert_eq!(read_capture(&bundle).outcome, Outcome::SpoolFull);
 }
 
-/// An unusable spool still drains the core, so the kernel completes the dump,
-/// and reports the capture as failed.
-#[tokio::test]
-async fn run_unusable_spool_drains_and_reports_failed() {
+/// An unusable spool reports the capture as failed without reading the core.
+#[tokio::test(start_paused = true)]
+async fn run_unusable_spool_reports_failed_without_reading_the_core() {
     let pid = 4249;
 
     let tmp = TempDir::new().unwrap();
@@ -546,9 +556,9 @@ async fn run_unusable_spool_drains_and_reports_failed() {
     // A file where the spool directory should be.
     std::fs::write(&config.spool_dir, b"not a directory").unwrap();
 
-    let core_in: &[u8] = b"core payload";
+    config.drain_deadline_secs = 0;
     assert!(
-        run(capture_args(pid, 11, TS), &config, core_in)
+        run_without_reading(capture_args(pid, 11, TS), &config)
             .await
             .is_err()
     );
@@ -566,10 +576,9 @@ async fn run_unusable_spool_drains_and_reports_failed() {
     );
 }
 
-/// No store: the core is drained and discarded so the kernel's pipe completes,
-/// and nothing else runs - no spool, and no rate limiter, which is only
-/// consulted when a core would be kept.
-#[tokio::test]
+/// No store: the core is not read, and nothing else runs - no spool, and no
+/// rate limiter, which is only consulted when a core would be kept.
+#[tokio::test(start_paused = true)]
 async fn run_without_store_discards_silently() {
     let pid = 100;
 
@@ -579,8 +588,8 @@ async fn run_without_store_discards_silently() {
     config.store_configured = false;
     config.max_cores_per_hour = 1;
 
-    let core_in: &[u8] = b"some core bytes";
-    run(capture_args(pid, 6, 1_000_000), &config, core_in)
+    config.drain_deadline_secs = 0;
+    run_without_reading(capture_args(pid, 6, 1_000_000), &config)
         .await
         .unwrap();
 
@@ -595,9 +604,9 @@ async fn run_without_store_discards_silently() {
 }
 
 /// A host process crash has no kubernetes identity, so no object key is
-/// derivable and nothing is spooled - the core is still drained. It is still
+/// derivable and nothing is spooled - the core is not read. It is still
 /// reported, so the daemon can log it, even though no k8s Event can target it.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     let pid = 201;
 
@@ -611,8 +620,8 @@ async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     let mut config = base_config(tmp.path());
     config.event_socket_path = Some(sock_path);
 
-    let core_in: &[u8] = b"core bytes";
-    run(capture_args(pid, 9, 2_000_000), &config, core_in)
+    config.drain_deadline_secs = 0;
+    run_without_reading(capture_args(pid, 9, 2_000_000), &config)
         .await
         .unwrap();
 
@@ -625,5 +634,5 @@ async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     assert_eq!(event.host_pid, pid);
     assert!(event.pod_uid.is_none());
     assert!(event.namespace.is_none());
-    assert_eq!(event.core_bytes, b"core bytes".len() as u64);
+    assert_eq!(event.core_bytes, 0);
 }

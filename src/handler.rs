@@ -7,9 +7,10 @@
 //!
 //! 1. Pre-reap snapshot - snapshot `/proc/<hostpid>` before the kernel
 //!    reaps the PID; must complete while the kernel waits.
-//! 2. Core drain - stream stdin through zstd into the capture's spool bundle
-//!    (or discard it). Then release the kernel's pipe: the kernel reaps the
-//!    crashed process and frees its `core_pipe_limit` slot.
+//! 2. Core drain - stream stdin through zstd into the capture's spool bundle.
+//!    A core that is not kept is not read. Then release the kernel's pipe:
+//!    the kernel reaps the crashed process and frees its `core_pipe_limit`
+//!    slot.
 //! 3. Proc snapshot - write the small tar into the bundle.
 //! 4. Crictl enrichment - best-effort: shell `crictl inspect` for
 //!    human-readable identity (namespace, pod name, container name, image,
@@ -30,7 +31,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncRead, ReadBuf};
 use tracing::{info, warn};
 
-use crate::backend::{CaptureBackend, CoreStats, DiscardBackend, DrainDeadline};
+use crate::backend::{CaptureBackend, CoreStats};
 use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::crictl;
@@ -184,8 +185,8 @@ pub async fn run(
     let spool = Spool::new(&config.spool_dir);
 
     // A bundle needs an identity (for its object keys) and a store to go to.
-    // When the bundle cannot be created the core is still drained, so the
-    // kernel completes the dump, and the capture is reported as failed.
+    // When the bundle cannot be created the core is not read, and the
+    // capture is reported as failed.
     let mut spool_error = None;
     let target = match &identity {
         Some(id) if config.store_configured => {
@@ -261,42 +262,28 @@ pub async fn run(
         refund(t);
     }
 
-    // Step 2: Drain core, then release the kernel's pipe.
-    let backend: Box<dyn CaptureBackend> = match &target {
+    // Step 2: Drain a kept core, then release the kernel's pipe. A core that
+    // is not kept is never read: the closed pipe stops the dump, so the
+    // kernel reaps the crashed process sooner.
+    let deadline = (config.drain_deadline_secs != 0)
+        .then(|| std::time::Duration::from_secs(config.drain_deadline_secs));
+    let drained = match &target {
         Some(t) if !rate_suppressed && !spool_full => {
             info!(bundle = %t.bundle.path("").display(), "spooling core");
-            Box::new(SpoolBackend::new(
+            SpoolBackend::new(
                 t.bundle.path(spool::CORE_FILE),
                 config.max_core_bytes,
                 core_budget,
-            ))
+            )
+            .drain_core(&mut core_in, deadline)
+            .await
         }
         _ => {
-            info!("core is not kept; discarding");
-            Box::new(DiscardBackend)
+            info!("core is not kept; closing the core pipe unread");
+            Ok(CoreStats::default())
         }
     };
-    let deadline = (config.drain_deadline_secs != 0)
-        .then(|| std::time::Duration::from_secs(config.drain_deadline_secs));
-    let drained = backend.drain_core(&mut core_in, deadline).await;
     drop(core_in);
-    // A capture whose core is not kept loses nothing when the discard passes
-    // its deadline: the pipe is released above, and the bundle still gets
-    // its snapshot and manifest.
-    let metadata_only = target.is_some() && (rate_suppressed || spool_full);
-    let drained = match drained {
-        Err(e) if metadata_only => match e.downcast_ref::<DrainDeadline>() {
-            Some(&DrainDeadline { bytes }) => Ok(CoreStats {
-                bytes,
-                stored_bytes: 0,
-                sha256: None,
-                truncated: false,
-                truncated_reason: None,
-            }),
-            None => Err(e),
-        },
-        other => other,
-    };
     let drained =
         drained
             .context("draining core stream")

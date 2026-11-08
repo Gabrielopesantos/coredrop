@@ -237,7 +237,7 @@ The main ones:
 | Flag | Env | Default | Purpose |
 | --- | --- | --- | --- |
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
-| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = drain but store nothing |
+| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = keep no cores |
 | `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |
 | `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot; 0 = no deadline |

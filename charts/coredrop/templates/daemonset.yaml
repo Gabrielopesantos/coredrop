@@ -91,8 +91,8 @@ spec:
             - name: CAPTURE_NO_REDACT
               value: "true"
             {{- end }}
-            - name: CAPTURE_MAX_CORE_BYTES
-              value: {{ .Values.capture.maxCoreBytes | int64 | quote }}
+            - name: CAPTURE_MAX_CORE_SIZE
+              value: {{ include "coredrop.size" (dict "name" "capture.maxCoreSize" "value" .Values.capture.maxCoreSize) | quote }}
             - name: CAPTURE_MAX_CORES_PER_HOUR
               value: {{ .Values.capture.maxCoresPerHour | quote }}
             - name: CAPTURE_DRAIN_DEADLINE_SECS
@@ -110,8 +110,8 @@ spec:
             # spool + upload: the handler writes the spool, the daemon uploads it.
             - name: CAPTURE_SPOOL_DIR
               value: {{ .Values.spool.hostDir | quote }}
-            - name: CAPTURE_SPOOL_MAX_BYTES
-              value: {{ .Values.spool.maxBytes | int64 | quote }}
+            - name: CAPTURE_SPOOL_MAX_SIZE
+              value: {{ include "coredrop.size" (dict "name" "spool.maxSize" "value" .Values.spool.maxSize) | quote }}
             - name: CAPTURE_SPOOL_MIN_FREE_PERCENT
               value: {{ .Values.spool.minFreePercent | quote }}
             - name: CAPTURE_SPOOL_MAX_AGE_SECS

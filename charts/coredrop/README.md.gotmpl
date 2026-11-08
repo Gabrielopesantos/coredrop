@@ -143,7 +143,7 @@ The handler writes only to local disk, so a crash does not wait for the
 network: the kernel reaps the crashed process as soon as the core is on disk.
 The handler has no store credentials and makes no network calls.
 
-- **Size.** `spool.maxBytes` caps the spool, and `spool.minFreePercent` keeps
+- **Size.** `spool.maxSize` caps the spool, and `spool.minFreePercent` keeps
   free space on its filesystem. The spool shares `/var/lib` with the kubelet,
   which evicts pods under disk pressure, so keep both conservative. A core that
   does not fit is dropped; its snapshot and manifest are still spooled, with

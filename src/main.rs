@@ -74,9 +74,10 @@ struct DaemonArgs {
     #[arg(long, env = "CONTAINER_RUNTIME_ENDPOINT")]
     cri_runtime_endpoint: Option<String>,
 
-    /// Max uncompressed core bytes stored per crash; 0 = unlimited. The
-    /// remainder of the stream is drained but not stored.
-    #[arg(long, env = "CAPTURE_MAX_CORE_BYTES", default_value_t = coredrop::config::DEFAULT_MAX_CORE_BYTES)]
+    /// Max uncompressed core size stored per crash, as a quantity (`2Gi`,
+    /// `500M`, bytes without a suffix); 0 = unlimited. The remainder of the
+    /// stream is drained but not stored.
+    #[arg(long = "max-core-size", env = "CAPTURE_MAX_CORE_SIZE", default_value = "2Gi", value_name = "SIZE", value_parser = coredrop::config::parse_size)]
     max_core_bytes: u64,
 
     /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
@@ -95,9 +96,10 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_SPOOL_DIR", default_value = coredrop::spool::DEFAULT_SPOOL_DIR)]
     spool_dir: PathBuf,
 
-    /// Cap on the spool's total size in bytes; 0 = no cap. A core that does
-    /// not fit is dropped; its snapshot and manifest are still spooled.
-    #[arg(long, env = "CAPTURE_SPOOL_MAX_BYTES", default_value_t = coredrop::spool::DEFAULT_SPOOL_MAX_BYTES)]
+    /// Cap on the spool's total size, as a quantity (`10Gi`, `500M`, bytes
+    /// without a suffix); 0 = no cap. A core that does not fit is dropped;
+    /// its snapshot and manifest are still spooled.
+    #[arg(long = "spool-max-size", env = "CAPTURE_SPOOL_MAX_SIZE", default_value = "10Gi", value_name = "SIZE", value_parser = coredrop::config::parse_size)]
     spool_max_bytes: u64,
 
     /// Free-space floor of the spool's filesystem, in percent. The handler

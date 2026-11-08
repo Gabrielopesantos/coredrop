@@ -52,12 +52,12 @@ corePattern:
 # The spool must be on disk, not tmpfs: /run is RAM. The daemon does not start
 # when hostDir is on tmpfs or ramfs. The spool shares the node's
 # filesystem with the kubelet, which evicts pods under disk pressure, so keep
-# maxBytes and minFreePercent conservative.
+# maxSize and minFreePercent conservative.
 spool:
   # -- Host path of the spool.
   hostDir: "/var/lib/coredrop/spool"
-  # -- Cap on the spool's total size in bytes (10 GiB default); a core that does not fit is dropped, its snapshot and manifest are kept. `0` = no cap.
-  maxBytes: 10737418240
+  # -- Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count; a core that does not fit is dropped, its snapshot and manifest are kept. `0` = no cap.
+  maxSize: 10Gi
   # -- Free-space floor of the spool's filesystem, in percent; below it cores are dropped.
   minFreePercent: 15
   # -- Age in seconds past which a capture that still fails to upload is deleted (7 days default).
@@ -77,8 +77,8 @@ upload:
 capture:
   # -- Cluster name - the first segment of every object key.
   cluster: "local"
-  # -- Truncate stored cores at this many bytes (2 GiB default).
-  maxCoreBytes: 2147483648
+  # -- Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit.
+  maxCoreSize: 2Gi
   # -- Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only.
   maxCoresPerHour: 3
   # -- Deadline in seconds for the handler to write a core into the spool; past it the core is dropped. `0` disables.

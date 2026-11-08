@@ -29,6 +29,48 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
+/// Parse a size in Kubernetes quantity form into bytes: a whole number with
+/// an optional binary suffix (`Ki`, `Mi`, `Gi`, `Ti`, `Pi`, `Ei`) or decimal
+/// suffix (`k`, `M`, `G`, `T`, `P`, `E`). No suffix means bytes.
+///
+/// # Errors
+///
+/// Fails on an empty number, an unknown suffix, or a size above `u64::MAX`.
+pub fn parse_size(s: &str) -> Result<u64, String> {
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (digits, suffix) = s.split_at(split);
+    if digits.is_empty() {
+        return Err(format!(
+            "{s:?}: expected a whole number with an optional suffix, e.g. 10Gi or 500M"
+        ));
+    }
+    let multiplier: u64 = match suffix {
+        "" => 1,
+        "Ki" => 1 << 10,
+        "Mi" => 1 << 20,
+        "Gi" => 1 << 30,
+        "Ti" => 1 << 40,
+        "Pi" => 1 << 50,
+        "Ei" => 1 << 60,
+        "k" => 1_000,
+        "M" => 1_000_000,
+        "G" => 1_000_000_000,
+        "T" => 1_000_000_000_000,
+        "P" => 1_000_000_000_000_000,
+        "E" => 1_000_000_000_000_000_000,
+        _ => {
+            return Err(format!(
+                "{s:?}: unknown suffix {suffix:?}; use Ki, Mi, Gi, Ti, Pi, Ei, k, M, G, T, P or E"
+            ));
+        }
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+        .ok_or_else(|| format!("{s:?}: larger than {} bytes", u64::MAX))
+}
+
 /// Default cluster name, the first segment of every object key.
 pub const DEFAULT_CLUSTER: &str = "local";
 
@@ -438,5 +480,35 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn parse_size_reads_quantities() {
+        assert_eq!(parse_size("0"), Ok(0));
+        assert_eq!(parse_size("1536"), Ok(1536));
+        assert_eq!(parse_size("10Gi"), Ok(10 << 30));
+        assert_eq!(parse_size("2Gi"), Ok(DEFAULT_MAX_CORE_BYTES));
+        assert_eq!(parse_size("10Gi"), Ok(spool::DEFAULT_SPOOL_MAX_BYTES));
+        assert_eq!(parse_size("100M"), Ok(100_000_000));
+        assert_eq!(parse_size("4k"), Ok(4_000));
+        assert_eq!(parse_size("15Ei"), Ok(15 << 60));
+    }
+
+    #[test]
+    fn parse_size_rejects_bad_input() {
+        for bad in [
+            "",
+            "Gi",
+            "-1",
+            "1.5Gi",
+            "10GB",
+            "10 Gi",
+            "10gi",
+            "10K",
+            "16Ei",
+            "99999999999999999999",
+        ] {
+            assert!(parse_size(bad).is_err(), "{bad:?} parsed");
+        }
     }
 }

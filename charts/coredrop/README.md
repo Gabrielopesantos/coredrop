@@ -25,7 +25,7 @@ spooled.
 | capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. |
 | capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
 | capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped. `0` disables. |
-| capture.maxCoreBytes | int | `2147483648` | Truncate stored cores at this many bytes (2 GiB default). |
+| capture.maxCoreSize | string | `"2Gi"` | Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit. |
 | capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only. |
 | capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
@@ -52,7 +52,7 @@ spooled.
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
 | spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. |
 | spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default). |
-| spool.maxBytes | int | `10737418240` | Cap on the spool's total size in bytes (10 GiB default); a core that does not fit is dropped, its snapshot and manifest are kept. `0` = no cap. |
+| spool.maxSize | string | `"10Gi"` | Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count; a core that does not fit is dropped, its snapshot and manifest are kept. `0` = no cap. |
 | spool.minFreePercent | int | `15` | Free-space floor of the spool's filesystem, in percent; below it cores are dropped. |
 | tolerations | list | `[{"operator":"Exists"}]` | Pod tolerations (defaults to tolerating everything so it runs on all nodes). |
 | upload.concurrency | int | `2` | Captures uploaded at the same time. |
@@ -182,7 +182,7 @@ The handler writes only to local disk, so a crash does not wait for the
 network: the kernel reaps the crashed process as soon as the core is on disk.
 The handler has no store credentials and makes no network calls.
 
-- **Size.** `spool.maxBytes` caps the spool, and `spool.minFreePercent` keeps
+- **Size.** `spool.maxSize` caps the spool, and `spool.minFreePercent` keeps
   free space on its filesystem. The spool shares `/var/lib` with the kubelet,
   which evicts pods under disk pressure, so keep both conservative. A core that
   does not fit is dropped; its snapshot and manifest are still spooled, with

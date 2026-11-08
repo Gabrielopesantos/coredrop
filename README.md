@@ -117,7 +117,7 @@ then deletes it from the spool. Objects land at:
   the daemon uploads them.
 - **Disk speed sets the pace** - the kernel holds the faulting process until
   the handler has written the whole core to disk.
-- **Size cap truncates** - past `--max-core-bytes` the core is cut, not
+- **Size cap truncates** - past `--max-core-size` the core is cut, not
   selected. The manifest records `truncated`.
 - **Retries end** - a capture that still fails to upload after
   `--spool-max-age-secs` (default 7 days) is deleted and logged as failed.
@@ -230,17 +230,19 @@ bind-mounted sysctl files. See the chart README, "Pod privileges".
 ## Configuration
 
 Every knob is a CLI flag with an env-var fallback (secrets are env-only).
+Sizes take a Kubernetes quantity: a byte count, or a whole number with a
+binary (`Ki`, `Mi`, `Gi`, ...) or decimal (`k`, `M`, `G`, ...) suffix.
 The main ones:
 
 | Flag | Env | Default | Purpose |
 | --- | --- | --- | --- |
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
 | `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = drain but store nothing |
-| `--max-core-bytes` | `CAPTURE_MAX_CORE_BYTES` | 2 GiB | Stored core cap per crash; 0 = unlimited |
+| `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |
 | `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot; 0 = no deadline |
 | `--spool-dir` | `CAPTURE_SPOOL_DIR` | `/var/lib/coredrop/spool` | Spool root on the node |
-| `--spool-max-bytes` | `CAPTURE_SPOOL_MAX_BYTES` | 10 GiB | Spool size cap; 0 = no cap |
+| `--spool-max-size` | `CAPTURE_SPOOL_MAX_SIZE` | `10Gi` | Spool size cap; 0 = no cap |
 | `--spool-min-free-percent` | `CAPTURE_SPOOL_MIN_FREE_PERCENT` | 15 | Free-space floor of the spool's filesystem |
 | `--spool-max-age-secs` | `CAPTURE_SPOOL_MAX_AGE_SECS` | 7 days | Age past which a capture that still fails to upload is deleted |
 | `--upload-concurrency` | `CAPTURE_UPLOAD_CONCURRENCY` | 2 | Captures uploaded at the same time |

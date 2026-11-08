@@ -87,8 +87,25 @@ the directory's parent.
 {{- if or (not (isAbs $dir)) (eq $dir "/") -}}
 {{- fail (printf "spool.hostDir must be an absolute path below /: %q" .Values.spool.hostDir) -}}
 {{- end -}}
-{{- include "coredrop.validateInt" (dict "name" "spool.maxBytes" "value" .Values.spool.maxBytes "min" 0) -}}
 {{- include "coredrop.validateInt" (dict "name" "spool.minFreePercent" "value" .Values.spool.minFreePercent "min" 0 "max" 100) -}}
+{{- end -}}
+
+{{/*
+Render .value, a size, as the string the daemon parses: a whole number of
+bytes, or a whole number with a Kubernetes quantity suffix (binary Ki to Ei,
+decimal k to E). Fail rendering on anything else.
+*/}}
+{{- define "coredrop.size" -}}
+{{- $v := .value -}}
+{{- if kindIs "string" $v -}}
+{{- if not (regexMatch "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$" $v) -}}
+{{- fail (printf "%s must be a size such as 10Gi, 500M or a byte count: %q" .name $v) -}}
+{{- end -}}
+{{- $v -}}
+{{- else -}}
+{{- include "coredrop.validateInt" (dict "name" .name "value" $v "min" 0) -}}
+{{- int64 $v -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

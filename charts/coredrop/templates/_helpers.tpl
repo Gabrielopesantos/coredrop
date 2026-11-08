@@ -138,6 +138,17 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          # The configured paths reach the script as environment variables,
+          # never as script text, so no character in them is shell syntax.
+          env:
+            - name: BIN_DIR
+              value: {{ $binDir | quote }}
+            - name: BIN_BASE
+              value: {{ base $binDir | quote }}
+            - name: RUN_BASE
+              value: {{ base $runDir | quote }}
+            - name: SPOOL_BASE
+              value: {{ base $spoolDir | quote }}
           command:
             - sh
             - -c
@@ -149,7 +160,7 @@ spec:
               # removed, so no crash is routed to a missing handler.
               pattern=$(cat /host/sysctl/core_pattern)
               case "$pattern" in
-                *"{{ $binDir }}/coredrop"*)
+                *"$BIN_DIR/coredrop"*)
                   printf 'core' > /host/sysctl/core_pattern
                   ;;
               esac
@@ -160,9 +171,9 @@ spec:
               # fails with EBUSY - the files would go but the directories would
               # stay. Reaching them through their parent keeps them ordinary
               # subdirectories, so rmdir works.
-              bin_dir=/host/bin-parent/{{ base $binDir }}
-              run_dir=/host/run-parent/{{ base $runDir }}
-              spool_dir=/host/spool-parent/{{ base $spoolDir }}
+              bin_dir="/host/bin-parent/$BIN_BASE"
+              run_dir="/host/run-parent/$RUN_BASE"
+              spool_dir="/host/spool-parent/$SPOOL_BASE"
 
               rm -f "$bin_dir/coredrop"
               rm -f "$run_dir/handler.json"

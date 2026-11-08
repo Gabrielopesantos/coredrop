@@ -31,7 +31,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncRead, ReadBuf};
 use tracing::{info, warn};
 
-use crate::backend::{CaptureBackend, CoreStats};
+use crate::backend::{CaptureBackend, CoreStats, DrainDeadline};
 use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::crictl;
@@ -284,6 +284,28 @@ pub async fn run(
         }
     };
     drop(core_in);
+    // A kept core that passes the drain deadline is dropped. The capture
+    // keeps its snapshot and manifest, like a rate-limited or spool-full one.
+    let drain_deadline = match (&drained, &target) {
+        (Err(e), Some(_)) => e.downcast_ref::<DrainDeadline>().copied(),
+        _ => None,
+    };
+    let drained = match (drain_deadline, &target) {
+        (Some(DrainDeadline { bytes }), Some(t)) => {
+            warn!(
+                bytes,
+                "core drain exceeded the deadline - dropping core, keeping snapshot + manifest"
+            );
+            remove_partial_core(&t.bundle).map(|()| {
+                refund(t);
+                CoreStats {
+                    bytes,
+                    ..CoreStats::default()
+                }
+            })
+        }
+        _ => drained,
+    };
     let drained =
         drained
             .context("draining core stream")
@@ -378,6 +400,8 @@ pub async fn run(
         Some("rate_limit")
     } else if spool_full {
         Some("spool_full")
+    } else if drain_deadline.is_some() {
+        Some("drain_deadline")
     } else {
         None
     };
@@ -413,6 +437,8 @@ pub async fn run(
         Outcome::SuppressedRateLimit
     } else if spool_full {
         Outcome::SpoolFull
+    } else if drain_deadline.is_some() {
+        Outcome::DrainDeadline
     } else {
         Outcome::Spooled
     };
@@ -459,6 +485,17 @@ pub async fn run(
     report(config, &payload);
 
     Ok(())
+}
+
+/// Delete the partial core of a drain that passed its deadline. Its zstd
+/// stream is not finalized, so the file is not a valid core.
+fn remove_partial_core(bundle: &Bundle) -> Result<()> {
+    let path = bundle.path(spool::CORE_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow!(e).context(format!("removing the partial core {}", path.display()))),
+    }
 }
 
 /// Write the manifest and capture event into `bundle` and move it to

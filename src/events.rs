@@ -31,6 +31,9 @@ pub enum Outcome {
     SuppressedRateLimit,
     /// The spool had no room for the core; snapshot and manifest are spooled.
     SpoolFull,
+    /// The core did not drain before the deadline; snapshot and manifest are
+    /// spooled.
+    DrainDeadline,
     SkippedNonK8s,
     NoStoreDiscard,
     Failed,
@@ -44,7 +47,10 @@ impl Outcome {
     pub fn has_bundle(self) -> bool {
         matches!(
             self,
-            Outcome::Spooled | Outcome::SuppressedRateLimit | Outcome::SpoolFull
+            Outcome::Spooled
+                | Outcome::SuppressedRateLimit
+                | Outcome::SpoolFull
+                | Outcome::DrainDeadline
         )
     }
 
@@ -56,6 +62,7 @@ impl Outcome {
             Outcome::Uploaded => "uploaded",
             Outcome::SuppressedRateLimit => "suppressed-rate-limit",
             Outcome::SpoolFull => "spool-full",
+            Outcome::DrainDeadline => "drain-deadline",
             Outcome::SkippedNonK8s => "skipped-non-k8s",
             Outcome::NoStoreDiscard => "no-store-discard",
             Outcome::Failed => "failed",

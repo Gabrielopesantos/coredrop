@@ -436,11 +436,13 @@ async fn run_full_spool_drops_core_keeps_manifest_and_refunds_budget() {
 }
 
 /// Drain deadline: a stalled drain cannot hold the handler (and its
-/// `core_pipe_limit` slot) forever. `run()` errors once the deadline passes,
-/// the partial bundle is deleted, the failure is reported, and the abandoned
-/// crash refunds its rate-limit budget.
+/// `core_pipe_limit` slot) forever. Once the deadline passes, the partial core
+/// is deleted, the snapshot and a `drain_deadline` manifest are spooled, and
+/// the crash refunds its rate-limit budget.
 #[tokio::test(start_paused = true)]
-async fn run_drain_deadline_drops_stalled_capture_and_refunds_budget() {
+async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
+    use tokio::io::AsyncReadExt;
+
     let pid = 4246;
 
     let tmp = TempDir::new().unwrap();
@@ -452,32 +454,32 @@ async fn run_drain_deadline_drops_stalled_capture_and_refunds_budget() {
     config.max_cores_per_hour = 1;
     config.event_socket_path = Some(sock_path);
 
-    assert!(
-        run(capture_args(pid, 11, TS), &config, StallReader)
-            .await
-            .is_err(),
-        "a stalled drain must error at the deadline"
-    );
-    let spool = Spool::new(&config.spool_dir);
-    assert!(bundle_names(&spool.incoming_dir()).is_empty());
-    assert!(bundle_names(&spool.ready_dir()).is_empty());
+    // Some bytes arrive, then the pipe stalls.
+    let core_in = (&b"partial core bytes"[..]).chain(StallReader);
+    run(capture_args(pid, 11, TS), &config, core_in)
+        .await
+        .unwrap();
 
-    let event = recv_event(&listener);
-    assert_eq!(event.outcome, Outcome::Failed);
-    assert_eq!(event.pod_uid.as_deref(), Some(POD_UID));
-    assert_eq!(event.container_id.as_deref(), Some(CONTAINER_ID));
-    assert!(event.namespace.is_none(), "crictl has not run on this path");
+    let bundle = ready_bundle(&config, CONTAINER_ID, TS, pid);
     assert!(
-        event
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("draining core stream")),
-        "{:?}",
-        event.error
+        !bundle.join(spool::CORE_FILE).exists(),
+        "the partial core must be deleted"
     );
+    assert!(bundle.join(spool::SNAPSHOT_FILE).exists());
+    let manifest = read_manifest(&bundle);
+    assert!(!manifest.core.present);
+    assert!(manifest.core.object_key.is_none());
+    assert_eq!(
+        manifest.core.skipped_reason.as_deref(),
+        Some("drain_deadline")
+    );
+    let capture = read_capture(&bundle);
+    assert_eq!(capture.outcome, Outcome::DrainDeadline);
+    assert_eq!(capture.core_bytes, b"partial core bytes".len() as u64);
+    assert_eq!(recv_event(&listener).outcome, Outcome::DrainDeadline);
 
-    // The abandoned crash refunded the budget of 1: the next crash is spooled.
-    let core_in: &[u8] = b"core payload after deadline abort";
+    // The dropped core refunded the budget of 1: the next crash is spooled.
+    let core_in: &[u8] = b"core payload after the deadline";
     run(capture_args(pid, 11, TS + 10), &config, core_in)
         .await
         .unwrap();

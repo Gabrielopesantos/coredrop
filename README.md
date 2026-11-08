@@ -158,6 +158,7 @@ LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
 | Core uploaded | `CoreDumped` |
 | Rate-limit budget exhausted | `CoreDumpSuppressed` |
 | Spool full, core dropped | `CoreDumpSpoolFull` |
+| Drain deadline passed, core dropped | `CoreDumpDrainDeadline` |
 | No object store configured | `CoreDiscardedNoStore` |
 
 A spooled capture gets its Event once it is uploaded, so the manifest key in
@@ -240,7 +241,7 @@ The main ones:
 | `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = keep no cores |
 | `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |
-| `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot; 0 = no deadline |
+| `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled; 0 = no deadline |
 | `--spool-dir` | `CAPTURE_SPOOL_DIR` | `/var/lib/coredrop/spool` | Spool root on the node |
 | `--spool-max-size` | `CAPTURE_SPOOL_MAX_SIZE` | `10Gi` | Spool size cap; 0 = no cap |
 | `--spool-min-free-percent` | `CAPTURE_SPOOL_MIN_FREE_PERCENT` | 15 | Free-space floor of the spool's filesystem |

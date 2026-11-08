@@ -81,7 +81,7 @@ capture:
   maxCoreSize: 2Gi
   # -- Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only.
   maxCoresPerHour: 3
-  # -- Deadline in seconds for the handler to write a core into the spool; past it the core is dropped. `0` disables.
+  # -- Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables.
   drainDeadlineSeconds: 60
   # -- Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
   crictlTimeoutSeconds: 10

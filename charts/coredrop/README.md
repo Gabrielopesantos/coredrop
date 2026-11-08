@@ -24,7 +24,7 @@ spooled.
 |-----|------|---------|-------------|
 | capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. |
 | capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
-| capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped. `0` disables. |
+| capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables. |
 | capture.maxCoreSize | string | `"2Gi"` | Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit. |
 | capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only. |
 | capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |

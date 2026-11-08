@@ -32,7 +32,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
-use crate::backend::{CaptureBackend, CoreStats};
+use crate::backend::{CaptureBackend, CoreStats, DrainDeadline};
 use crate::config::ensure_private_dir;
 
 /// Default spool root on the node. Not under `/run`: that is a tmpfs, so a
@@ -350,7 +350,7 @@ async fn encoder_step(
     match race(fut, deadline_at).await {
         Err(_elapsed) => {
             warn!(drained, "core drain exceeded the deadline while {what}");
-            Err(anyhow!("core drain exceeded the deadline"))
+            Err(DrainDeadline { bytes: drained }.into())
         }
         Ok(result) => result.with_context(|| format!("{what} the zstd stream")),
     }
@@ -395,7 +395,7 @@ where
         match race(core.read(&mut buf), deadline_at).await {
             Err(_elapsed) => {
                 warn!(drained, "core drain exceeded the deadline while reading");
-                return Err(anyhow!("core drain exceeded the deadline"));
+                return Err(DrainDeadline { bytes: drained }.into());
             }
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
@@ -675,7 +675,12 @@ mod tests {
             Some(Duration::from_secs(1)),
         )
         .await;
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<DrainDeadline>(),
+            Some(&DrainDeadline { bytes: 0 }),
+            "{err:#}"
+        );
     }
 
     #[test]

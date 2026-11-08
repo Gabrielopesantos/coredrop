@@ -216,7 +216,10 @@ pub async fn run(
 
     // Rate limit: consult only when a core would be kept.
     let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
-    let mut rate_recorded = false;
+    // Set while this crash holds a rate-limit slot. A refund clears it, so a
+    // slot is never given back twice: a second refund would remove another
+    // crash's entry with the same timestamp.
+    let slot_held = std::cell::Cell::new(false);
     let rate_suppressed = match &target {
         Some(t) => match limiter.check_and_record(&t.identity.pod_uid, args.timestamp) {
             RateDecision::Suppressed { recent } => {
@@ -229,7 +232,7 @@ pub async fn run(
                 true
             }
             RateDecision::Allowed => {
-                rate_recorded = true;
+                slot_held.set(true);
                 false
             }
         },
@@ -253,13 +256,13 @@ pub async fn run(
             "spool is full - discarding core, keeping snapshot + manifest"
         );
     }
-    let refund = |t: &Target<'_>| {
-        if rate_recorded {
-            limiter.refund(&t.identity.pod_uid, args.timestamp);
+    let refund = |pod_uid: &str| {
+        if slot_held.replace(false) {
+            limiter.refund(pod_uid, args.timestamp);
         }
     };
     if spool_full && let Some(t) = &target {
-        refund(t);
+        refund(&t.identity.pod_uid);
     }
 
     // Step 2: Drain a kept core, then release the kernel's pipe. A core that
@@ -297,7 +300,7 @@ pub async fn run(
                 "core drain exceeded the deadline - dropping core, keeping snapshot + manifest"
             );
             remove_partial_core(&t.bundle).map(|()| {
-                refund(t);
+                refund(&t.identity.pod_uid);
                 CoreStats {
                     bytes,
                     ..CoreStats::default()
@@ -319,7 +322,7 @@ pub async fn run(
             // Nothing was kept: give the budget slot back, or a transient
             // disk problem would exhaust the budget with zero cores kept.
             if let Some(t) = target {
-                refund(&t);
+                refund(&t.identity.pod_uid);
                 t.bundle.discard();
             }
             // crictl has not run yet, so only the cgroup identity is known.
@@ -461,9 +464,7 @@ pub async fn run(
     // is deleted: the daemon must never upload part of a capture.
     if let Some(t) = target {
         if let Err(e) = commit_bundle(t.bundle, &manifest, &payload) {
-            if rate_recorded {
-                limiter.refund(&t.identity.pod_uid, args.timestamp);
-            }
+            refund(&t.identity.pod_uid);
             report(
                 config,
                 &CaptureEventPayload {

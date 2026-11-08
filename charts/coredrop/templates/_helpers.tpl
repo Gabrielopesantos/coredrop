@@ -253,7 +253,7 @@ spec:
             type: DirectoryOrCreate
         - name: host-spool-parent
           hostPath:
-            path: {{ dir $spoolDir }}
+            path: {{ dir $spoolDir | quote }}
             type: DirectoryOrCreate
         - name: host-core-pattern
           hostPath:

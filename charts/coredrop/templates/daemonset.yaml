@@ -162,7 +162,7 @@ spec:
             # The spool, at its host path: the handler writes host paths, and
             # the daemon reads the same paths here.
             - name: host-spool
-              mountPath: {{ .Values.spool.hostDir }}
+              mountPath: {{ .Values.spool.hostDir | quote }}
             # Only these two sysctls are writable. The container's own /proc/sys
             # stays read-only. The mount point is outside /proc: the runtime
             # refuses most mounts under it.
@@ -187,7 +187,7 @@ spec:
             type: DirectoryOrCreate
         - name: host-spool
           hostPath:
-            path: {{ .Values.spool.hostDir }}
+            path: {{ .Values.spool.hostDir | quote }}
             type: DirectoryOrCreate
         - name: host-core-pattern
           hostPath:

@@ -248,6 +248,15 @@ impl Bundle {
         f.sync_all()
     }
 
+    /// `fsync` a file the bundle already holds.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be opened or synced.
+    pub fn sync_file(&self, file: &str) -> std::io::Result<()> {
+        std::fs::File::open(self.path(file))?.sync_all()
+    }
+
     /// Move the complete bundle to `ready/`, where the daemon picks it up.
     /// Returns the bundle's new path.
     ///
@@ -313,7 +322,9 @@ impl CaptureBackend for SpoolBackend {
             .open(&self.path)
             .await
             .with_context(|| format!("creating {}", self.path.display()))?;
-        let (stats, file) = stream_core_through_zstd(
+        // The caller syncs the file once it has released the core pipe: a
+        // slow fsync must not hold the kernel's `core_pipe_limit` slot.
+        let (stats, _file) = stream_core_through_zstd(
             reader,
             file,
             self.max_core_bytes,
@@ -321,9 +332,6 @@ impl CaptureBackend for SpoolBackend {
             deadline,
         )
         .await?;
-        file.sync_all()
-            .await
-            .with_context(|| format!("syncing {}", self.path.display()))?;
         Ok(stats)
     }
 }

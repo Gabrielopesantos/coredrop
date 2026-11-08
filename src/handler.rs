@@ -316,6 +316,16 @@ pub async fn run(
                 Some(e) => Err(e),
                 None => Ok(stats),
             });
+    // fsync the stored core only now: the pipe is released, so a slow fsync
+    // does not hold the kernel's `core_pipe_limit` slot.
+    let drained = drained.and_then(|stats| match &target {
+        Some(t) if stats.sha256.is_some() => t
+            .bundle
+            .sync_file(spool::CORE_FILE)
+            .context("syncing the stored core")
+            .map(|()| stats),
+        _ => Ok(stats),
+    });
     let stats = match drained {
         Ok(stats) => stats,
         Err(e) => {

@@ -172,6 +172,44 @@ fn free_headroom(path: &Path, min_free_percent: u8) -> std::io::Result<u64> {
     Ok(available.saturating_sub(floor))
 }
 
+/// `statfs` magic numbers of the filesystems that live in RAM.
+const TMPFS_MAGIC: u64 = 0x0102_1994;
+const RAMFS_MAGIC: u64 = 0x8584_58f6;
+
+/// Whether the spool's filesystem is backed by node memory.
+fn in_memory_fs(path: &Path) -> std::io::Result<bool> {
+    let st = rustix::fs::statfs(path)?;
+    // `f_type` is signed on some targets; keep only the low 32 bits.
+    #[allow(clippy::cast_sign_loss)]
+    let magic = (st.f_type as u64) & 0xffff_ffff;
+    Ok(magic == TMPFS_MAGIC || magic == RAMFS_MAGIC)
+}
+
+impl Spool {
+    /// Create the spool directory and reject a memory-backed filesystem. A
+    /// compressed core on tmpfs or ramfs uses node memory, so a large capture
+    /// causes memory pressure or pod eviction.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory cannot be created or inspected, or when its
+    /// filesystem is tmpfs or ramfs.
+    pub fn ensure_disk_backed(&self) -> Result<()> {
+        ensure_private_dir(&self.root)
+            .with_context(|| format!("creating spool directory {}", self.root.display()))?;
+        let memory = in_memory_fs(&self.root)
+            .with_context(|| format!("inspecting spool filesystem {}", self.root.display()))?;
+        if memory {
+            return Err(anyhow!(
+                "spool directory {} is on a memory-backed filesystem (tmpfs or ramfs); \
+                 set spool.hostDir to a path on node disk",
+                self.root.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The bundle directory name for one capture:
 /// `{timestamp}-{hostPid}-{podUID}-{containerID}`. Sorting by name sorts by
 /// crash time. Every part comes from the kernel or a validated cgroup path, so
@@ -479,6 +517,24 @@ mod tests {
 
     use super::*;
     use crate::testutil::{FlakyReader, StallReader};
+
+    #[test]
+    fn rejects_memory_backed_spool() {
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() || !in_memory_fs(shm).unwrap() {
+            return;
+        }
+        let dir = TempDir::new_in(shm).unwrap();
+        let err = Spool::new(dir.path().join("spool"))
+            .ensure_disk_backed()
+            .unwrap_err();
+        assert!(err.to_string().contains("memory-backed"), "{err}");
+    }
+
+    #[test]
+    fn procfs_is_not_memory_backed() {
+        assert!(!in_memory_fs(Path::new("/proc")).unwrap());
+    }
 
     async fn unzstd(bytes: &[u8]) -> Vec<u8> {
         let mut dec = ZstdDecoder::new(io::Cursor::new(bytes.to_vec()));

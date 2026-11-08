@@ -272,6 +272,12 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     let store = args.object_store();
     let config = args.to_handler_config(store.is_some());
 
+    // Reject a RAM-backed spool before any capture can be routed to it.
+    if let Err(e) = Spool::new(&args.spool_dir).ensure_disk_backed() {
+        error!(error = %e, "unusable spool; exiting for restart");
+        return Err(e);
+    }
+
     // crictl enrichment is best-effort, so a missing socket is not fatal - but
     // it is otherwise invisible until a crash produces a manifest with no
     // namespace/pod/container name.

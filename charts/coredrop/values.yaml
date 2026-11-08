@@ -49,7 +49,8 @@ corePattern:
 
 # The node-local spool. The handler writes each capture (core, /proc snapshot,
 # manifest) here and exits; the daemon uploads the spool to the object store.
-# The spool must be on disk, not tmpfs: /run is RAM. It shares the node's
+# The spool must be on disk, not tmpfs: /run is RAM. The daemon does not start
+# when hostDir is on tmpfs or ramfs. The spool shares the node's
 # filesystem with the kubelet, which evicts pods under disk pressure, so keep
 # maxBytes and minFreePercent conservative.
 spool:

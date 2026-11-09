@@ -91,6 +91,17 @@ struct Pending {
     attempts: u32,
     next_at: Instant,
     in_flight: bool,
+    /// The bundle is uploaded and reported; only its delete failed. It is
+    /// not uploaded or reported again.
+    uploaded: bool,
+}
+
+/// The result of one attempt that did not fail the upload.
+struct Attempt {
+    /// The capture's final event, when this attempt uploaded the bundle.
+    report: Option<CaptureEventPayload>,
+    /// The result of deleting the bundle from the spool.
+    deleted: Result<()>,
 }
 
 impl Uploader {
@@ -121,7 +132,7 @@ impl Uploader {
         flush: Duration,
     ) {
         let mut pending: BTreeMap<String, Pending> = BTreeMap::new();
-        let mut tasks: JoinSet<Result<CaptureEventPayload>> = JoinSet::new();
+        let mut tasks: JoinSet<Result<Attempt>> = JoinSet::new();
         let mut task_names: HashMap<tokio::task::Id, String> = HashMap::new();
         let mut scan = tokio::time::interval(SCAN_INTERVAL);
         scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -177,6 +188,7 @@ impl Uploader {
                 attempts: 0,
                 next_at: now,
                 in_flight: false,
+                uploaded: false,
             });
         }
         sweep_incoming(&self.spool.incoming_dir());
@@ -187,7 +199,7 @@ impl Uploader {
     fn dispatch(
         &self,
         pending: &mut BTreeMap<String, Pending>,
-        tasks: &mut JoinSet<Result<CaptureEventPayload>>,
+        tasks: &mut JoinSet<Result<Attempt>>,
         task_names: &mut HashMap<tokio::task::Id, String>,
     ) {
         let now = Instant::now();
@@ -203,28 +215,45 @@ impl Uploader {
             let dir = self.spool.ready_dir().join(name);
             let store = self.store.clone();
             let deadline_at = self.settings.attempt_timeout.map(|t| now + t);
+            let uploaded = p.uploaded;
             let handle = tasks.spawn(async move {
-                let payload = upload_bundle(&store, &dir, deadline_at).await?;
-                tokio::fs::remove_dir_all(&dir)
+                let report = if uploaded {
+                    None
+                } else {
+                    Some(upload_bundle(&store, &dir, deadline_at).await?)
+                };
+                let deleted = tokio::fs::remove_dir_all(&dir)
                     .await
-                    .with_context(|| format!("removing uploaded bundle {}", dir.display()))?;
-                Ok(payload)
+                    .with_context(|| format!("removing uploaded bundle {}", dir.display()));
+                Ok(Attempt { report, deleted })
             });
             task_names.insert(handle.id(), name.clone());
         }
     }
 
     /// Record the result of one upload attempt.
-    fn finish(
-        &self,
-        name: &str,
-        result: Result<CaptureEventPayload>,
-        pending: &mut BTreeMap<String, Pending>,
-    ) {
+    fn finish(&self, name: &str, result: Result<Attempt>, pending: &mut BTreeMap<String, Pending>) {
         match result {
-            Ok(payload) => {
-                pending.remove(name);
-                let _ = self.reports.send(payload);
+            Ok(Attempt { report, deleted }) => {
+                if let Some(payload) = report {
+                    let _ = self.reports.send(payload);
+                }
+                let Err(e) = deleted else {
+                    pending.remove(name);
+                    return;
+                };
+                // Keep the entry, so the next scan does not upload and report
+                // the bundle again. Only the delete is retried, past max age
+                // too: the capture is safe in the bucket.
+                let Some(p) = pending.get_mut(name) else {
+                    return;
+                };
+                p.in_flight = false;
+                p.uploaded = true;
+                p.attempts += 1;
+                let backoff = backoff(self.settings.retry_backoff, p.attempts);
+                p.next_at = Instant::now() + backoff;
+                warn!(bundle = name, attempts = p.attempts, retry_in_secs = backoff.as_secs(), error = %format!("{e:#}"), "deleting an uploaded bundle failed; will retry");
             }
             Err(e) => {
                 let Some(p) = pending.get_mut(name) else {
@@ -232,8 +261,8 @@ impl Uploader {
                 };
                 p.in_flight = false;
                 p.attempts += 1;
-                let age = bundle_age(name);
-                if age.is_some_and(|age| age > self.settings.max_age) {
+                let age = bundle_age(&self.spool.ready_dir(), name);
+                if !p.uploaded && age.is_some_and(|age| age > self.settings.max_age) {
                     warn!(bundle = name, attempts = p.attempts, error = %format!("{e:#}"), "bundle is past the spool max age; deleting it");
                     pending.remove(name);
                     self.drop_bundle(name, &e);
@@ -354,12 +383,18 @@ fn newest_mtime(bundle: &Path) -> Option<std::time::SystemTime> {
     Some(files.fold(dir, std::cmp::max))
 }
 
-/// Time since the crash a bundle holds, from the timestamp its name starts
-/// with (see [`spool::bundle_name`]).
-fn bundle_age(name: &str) -> Option<Duration> {
-    let ts: u64 = name.split('-').next()?.parse().ok()?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
-    Some(now.saturating_sub(Duration::from_secs(ts)))
+/// Age of the bundle `name` in `ready_dir`: the time since the crash, from
+/// the timestamp its name starts with (see [`spool::bundle_name`]). A name
+/// without one, which the handler never writes, is aged by its newest
+/// mtime, so it cannot be retried forever.
+fn bundle_age(ready_dir: &Path, name: &str) -> Option<Duration> {
+    let crash = name
+        .split('-')
+        .next()
+        .and_then(|ts| ts.parse::<u64>().ok())
+        .map(|ts| UNIX_EPOCH + Duration::from_secs(ts));
+    let born = crash.or_else(|| newest_mtime(&ready_dir.join(name)))?;
+    Some(SystemTime::now().duration_since(born).unwrap_or_default())
 }
 
 fn backoff(base: Duration, attempts: u32) -> Duration {
@@ -390,8 +425,12 @@ mod tests {
 
     #[test]
     fn bundle_age_reads_the_crash_time_from_the_name() {
-        let age = bundle_age("1000-4242-pod-cid").unwrap();
+        let dir = Path::new("/no/such/spool/ready");
+        let age = bundle_age(dir, "1000-4242-pod-cid").unwrap();
         assert!(age > Duration::from_secs(1_000_000_000));
-        assert!(bundle_age("not-a-bundle").is_none());
+        assert!(
+            bundle_age(dir, "not-a-bundle").is_none(),
+            "no timestamp and no directory to age by"
+        );
     }
 }

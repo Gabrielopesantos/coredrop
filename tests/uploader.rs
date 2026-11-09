@@ -218,6 +218,81 @@ async fn deletes_a_bundle_past_max_age_and_reports_failed() {
     );
 }
 
+/// An entry in `ready/` without a timestamp name is aged by its mtime, so a
+/// stale one that never uploads is deleted instead of retried forever.
+#[tokio::test]
+async fn deletes_a_stale_unnamed_ready_entry() {
+    let tmp = TempDir::new().unwrap();
+    let config = base_config(tmp.path());
+    let spool = Spool::new(&config.spool_dir);
+    spool.create_bundle("seed").unwrap().commit().unwrap();
+    let junk = spool.ready_dir().join("junk");
+    std::fs::create_dir(&junk).unwrap();
+    std::fs::write(junk.join("stray"), b"not a bundle").unwrap();
+    let two_hours_ago = std::time::SystemTime::now() - Duration::from_hours(2);
+    for dir in ["seed", "junk"] {
+        set_mtime(&spool.ready_dir().join(dir), two_hours_ago);
+    }
+    set_mtime(&junk.join("stray"), two_hours_ago);
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let reports = flush(&config, store, settings(), Duration::from_secs(10)).await;
+
+    assert!(ready(&config).is_empty(), "stale entries are deleted");
+    assert!(
+        reports.is_empty(),
+        "an entry with no capture event has no report"
+    );
+}
+
+/// A bundle whose delete fails after a good upload is reported once, as
+/// uploaded. Only the delete is retried, past max age too: the capture is in
+/// the bucket, so it is never reported as failed.
+#[tokio::test]
+async fn retries_only_the_delete_of_an_uploaded_bundle() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let pid = 5004;
+    let ts = now_ts();
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    // Past the one-hour max age, so a delete failure that counted as an
+    // upload failure would give up and report the capture as failed.
+    let ts = ts - 7200;
+    capture(&config, pid, ts, b"core whose bundle sticks").await;
+    let bundle = Spool::new(&config.spool_dir)
+        .ready_dir()
+        .join(&ready(&config)[0]);
+
+    // A read-only bundle dir: its files can be read but not removed.
+    let mode = |m| std::fs::set_permissions(&bundle, std::fs::Permissions::from_mode(m));
+    mode(0o500).unwrap();
+    if std::fs::write(bundle.join("probe"), b"").is_ok() {
+        // Root ignores the mode; the delete cannot be made to fail.
+        mode(0o700).unwrap();
+        return;
+    }
+    let restore = bundle.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        std::fs::set_permissions(&restore, std::fs::Permissions::from_mode(0o700)).unwrap();
+    });
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let reports = flush(&config, store.clone(), settings(), Duration::from_secs(10)).await;
+
+    assert_eq!(
+        reports.len(),
+        1,
+        "the capture is reported once: {reports:?}"
+    );
+    assert_eq!(reports[0].outcome, Outcome::Uploaded);
+    assert!(ready(&config).is_empty(), "the delete is retried");
+    let keys = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
+    get_object(&store, &keys.manifest()).await;
+}
+
 /// A bundle a killed handler left in `incoming/` is deleted once it is
 /// stale, and never uploaded.
 #[tokio::test]

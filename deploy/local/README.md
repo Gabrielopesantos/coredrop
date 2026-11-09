@@ -44,20 +44,22 @@ coredrop installed.
    with `core.skipped_reason=rate_limit` and no core object.
 7. The crash pod has a `CoreDumped` Event, and a `CoreDumpSuppressed` Event
    whose `series.count` grows.
-8. The daemon log has a `capture complete` line for the crash pod with
-   outcome `uploaded`, and one with `suppressed-rate-limit`.
+8. The daemon log has a `capture spooled` line for the crash pod, and
+   `capture complete` lines with outcome `uploaded` and
+   `suppressed-rate-limit`.
+9. The handler config on the node holds no store credentials.
 
 ## What the lifecycle test asserts
 
 1. Clean uninstall: `helm uninstall` succeeds (the post-delete hook
    finished). The node's `core_pattern` is restored to its pre-install value,
-   recorded when coredrop was installed. Both hostPath directories are gone
-   from the node.
+   recorded when coredrop was installed. The three hostPath directories
+   (binary, runtime, spool) are gone from the node.
 2. Unclean uninstall: the daemon is frozen with `SIGSTOP` on the node, then
    the release is uninstalled. SIGTERM stays pending, and the kubelet kills
    the daemon with SIGKILL after the 30s grace period, so the daemon never
    restores `core_pattern`. The post-delete hook's cleanup worker must reset
-   it to `core`. Both hostPath directories are gone.
+   it to `core`. The three hostPath directories are gone.
 3. After each phase, coredrop is reinstalled, and `core_pattern` points at
    the handler again. If a phase fails, the exit trap thaws the daemon and
    reinstalls.
@@ -79,10 +81,8 @@ coredrop installed.
 
 ## Gotchas baked into the scripts
 
-- The kernel-exec'd handler runs in the host network namespace, so it
-  can't resolve cluster DNS. `install_coredrop` (`lib.sh`) injects MinIO's numeric ClusterIP as the
-  upload endpoint (the node's root netns can reach a ClusterIP via
-  kube-proxy's DNAT rules).
+- `install_coredrop` (`lib.sh`) injects MinIO's numeric ClusterIP as the
+  upload endpoint. The daemon uploads from its pod network, which reaches it.
 - k3s runs its own containerd, with its CRI socket under `/run/k3s/containerd/`
   rather than `/run/containerd/`. The chart default for `cri.runtimeEndpoint`
   is empty. The overlay sets it to the k3s socket, so the smoke test covers the

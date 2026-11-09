@@ -2,154 +2,62 @@
 //!
 //! The pre-reap `/proc` snapshot is backend-independent; only the core's
 //! destination differs - that is this interface boundary. The
-//! [`StandaloneBackend`](crate::upload::StandaloneBackend) (zstd-in-stream
-//! multipart upload to the object store) is the primary backend;
-//! [`DiscardBackend`] is the fallback when no store is configured: it drains
-//! the pipe so the kernel completes the dump but stores nothing.
+//! [`SpoolBackend`](crate::spool::SpoolBackend) (zstd-in-stream write to the
+//! node-local spool) is the backend. A core that is not kept is never read:
+//! the handler closes the pipe, and the kernel stops the dump.
 
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::time::{Instant, timeout_at};
-use tracing::warn;
+use tokio::io::AsyncRead;
 
-/// Integrity stats for a drained core. The byte count and truncation flag come
-/// from every backend; the streaming `StandaloneBackend` also fills the stored
-/// (compressed) size and the sha256 of the stored object.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Integrity stats for a drained core. The default value describes a core
+/// that was not read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CoreStats {
     /// Uncompressed bytes drained from the kernel's core pipe.
     pub bytes: u64,
-    /// Bytes stored in the object store (zstd-compressed). `0` for
-    /// `DiscardBackend`, which stores nothing.
+    /// Bytes stored (zstd-compressed).
     pub stored_bytes: u64,
-    /// sha256 (hex) of the *stored* object - the zstd-compressed bytes.
-    /// `None` when nothing was stored (`DiscardBackend`).
+    /// sha256 (hex) of the *stored* bytes - the zstd-compressed core.
+    /// `None` when nothing was stored.
     pub sha256: Option<String>,
     /// The stored core is incomplete (stream error or size cap).
     pub truncated: bool,
-    /// Why the core is truncated: `size_cap` | `stream_error`. `None` when
-    /// not truncated.
+    /// Why the core is truncated: `size_cap` | `spool_full` | `stream_error`.
+    /// `None` when not truncated.
     pub truncated_reason: Option<String>,
 }
 
-/// Sink for the kernel's core stream. Implementations must consume `reader`
-/// to completion - the kernel blocks on the core pipe until fully drained.
+/// The drain passed its deadline before the core stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainDeadline {
+    /// Bytes drained before the deadline.
+    pub bytes: u64,
+}
+
+impl std::fmt::Display for DrainDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("core drain exceeded the deadline")
+    }
+}
+
+impl std::error::Error for DrainDeadline {}
+
+/// Sink for the kernel's core stream. The kernel writes the core until the
+/// stream ends or the handler closes the pipe.
 ///
 /// `deadline`, when set, bounds the entire drain: the handler holds a
 /// `core_pipe_limit` slot while this call runs.
 #[async_trait]
 pub trait CaptureBackend: Send + Sync {
+    /// Drain `reader` to completion and store the core. Errors with
+    /// [`DrainDeadline`] when `deadline` passes, and otherwise only on an
+    /// unrecoverable backend failure.
     async fn drain_core(
         &self,
         reader: &mut (dyn AsyncRead + Unpin + Send),
         deadline: Option<Duration>,
     ) -> Result<CoreStats>;
-}
-
-/// Fallback core sink: count and discard the core so the kernel's pipe still
-/// completes when no object store is configured or identity is unresolved.
-pub struct DiscardBackend;
-
-#[async_trait]
-impl CaptureBackend for DiscardBackend {
-    async fn drain_core(
-        &self,
-        reader: &mut (dyn AsyncRead + Unpin + Send),
-        deadline: Option<Duration>,
-    ) -> Result<CoreStats> {
-        // Nothing is stored, so a timeout needs no cleanup.
-        let deadline_at = deadline.map(|d| Instant::now() + d);
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut bytes = 0u64;
-        loop {
-            let read = match deadline_at {
-                Some(dl) => timeout_at(dl, reader.read(&mut buf)).await,
-                None => Ok(reader.read(&mut buf).await),
-            };
-            match read {
-                Err(_elapsed) => {
-                    warn!(bytes, "core stream discard exceeded the upload deadline");
-                    return Err(anyhow!("core drain exceeded the upload deadline"));
-                }
-                Ok(Ok(0)) => {
-                    return Ok(CoreStats {
-                        bytes,
-                        stored_bytes: 0,
-                        sha256: None,
-                        truncated: false,
-                        truncated_reason: None,
-                    });
-                }
-                Ok(Ok(n)) => bytes += n as u64,
-                Ok(Err(e)) => {
-                    warn!(error = %e, bytes, "core stream read error - marking truncated");
-                    return Ok(CoreStats {
-                        bytes,
-                        stored_bytes: 0,
-                        sha256: None,
-                        truncated: true,
-                        truncated_reason: Some("stream_error".to_string()),
-                    });
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use crate::testutil::{FlakyReader, StallReader};
-
-    #[tokio::test]
-    async fn discard_counts_every_byte() {
-        let data = vec![0xABu8; 200_000];
-        let mut reader: &[u8] = &data;
-        let stats = DiscardBackend.drain_core(&mut reader, None).await.unwrap();
-        assert_eq!(stats.bytes, 200_000);
-        assert_eq!(stats.stored_bytes, 0);
-        assert_eq!(stats.sha256, None);
-        assert!(!stats.truncated);
-    }
-
-    #[tokio::test]
-    async fn discard_handles_an_empty_core() {
-        // Immediate EOF: the kernel can hand over a zero-length core, and the
-        // loop must terminate on the first read rather than treat it as an error.
-        let mut reader: &[u8] = &[];
-        let stats = DiscardBackend.drain_core(&mut reader, None).await.unwrap();
-        assert_eq!(stats.bytes, 0);
-        assert_eq!(stats.stored_bytes, 0);
-        assert!(!stats.truncated);
-    }
-
-    #[tokio::test]
-    async fn discard_marks_truncated_on_a_read_error() {
-        // A read error does not stop the drain. The drain counts the bytes that
-        // arrived and reports that the stream ended early.
-        let mut reader = FlakyReader {
-            chunk: vec![0x5Au8; 50_000],
-            sent: false,
-        };
-        let stats = DiscardBackend.drain_core(&mut reader, None).await.unwrap();
-
-        assert_eq!(stats.bytes, 50_000, "bytes drained before the error");
-        assert!(stats.truncated);
-        assert_eq!(stats.truncated_reason.as_deref(), Some("stream_error"));
-        assert_eq!(stats.stored_bytes, 0);
-        assert_eq!(stats.sha256, None);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn discard_errors_when_the_deadline_elapses() {
-        let mut reader = StallReader;
-        let result = DiscardBackend
-            .drain_core(&mut reader, Some(Duration::from_secs(1)))
-            .await;
-        assert!(result.is_err());
-    }
 }

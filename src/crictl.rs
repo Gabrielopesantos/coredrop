@@ -51,6 +51,7 @@ pub fn unix_socket_path(endpoint: &str) -> Option<&str> {
 
 /// Kubernetes identity enriched from `crictl inspect`. All fields best-effort.
 #[derive(Debug, Clone, Default)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct ContainerInfo {
     pub namespace: Option<String>,
     pub pod_name: Option<String>,

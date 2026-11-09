@@ -31,10 +31,12 @@ SEGFAULT_IMAGE="${SEGFAULT_IMAGE:-docker.io/library/coredrop-segfault:dev}"
 # values.yaml and in helm-values/coredrop.local.yaml.
 CLEANUP_IMAGE="${CLEANUP_IMAGE:-docker.io/rancher/kubectl:v1.35.6}"
 
-# The node paths the chart's post-delete hook is supposed to remove; smoke.sh
-# asserts they are gone. Must match `corePattern.hostBinDir`/`hostRunDir`.
+# The node paths the chart's post-delete hook is supposed to remove; lifecycle.sh
+# asserts they are gone. Must match `corePattern.hostBinDir`/`hostRunDir` and
+# `spool.hostDir`.
 HOST_BIN_DIR="${HOST_BIN_DIR:-/opt/coredrop/bin}"
 HOST_RUN_DIR="${HOST_RUN_DIR:-/run/coredrop}"
+HOST_SPOOL_DIR="${HOST_SPOOL_DIR:-/var/lib/coredrop/spool}"
 
 # Helm release name and the object-store bucket the overlay points at.
 RELEASE="${RELEASE:-coredrop}"
@@ -73,11 +75,9 @@ require_release() {
 # Install (or upgrade) the coredrop release against the in-cluster MinIO and
 # wait for it. Records the node's pre-install core_pattern to $ORIG_FILE.
 install_coredrop() {
-  # The capture handler is kernel-exec'd in the HOST network namespace (no cluster
-  # DNS), so it can't reach `minio` by name - but the node's root netns CAN reach a
-  # ClusterIP (kube-proxy's DNAT rules live there). Point coredrop's upload endpoint
-  # at MinIO's numeric ClusterIP. (The smoke test reaches the same MinIO from the
-  # host via a port-forward.)
+  # The daemon uploads from its pod network, so a ClusterIP is reachable. Point
+  # coredrop's upload endpoint at MinIO's numeric ClusterIP. (The smoke test
+  # reaches the same MinIO from the host via a port-forward.)
   local minio_cluster_ip orig_core_pattern
   minio_cluster_ip="$(kubectl -n "$NAMESPACE" get svc minio -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
   [ -n "$minio_cluster_ip" ] || die "could not read minio ClusterIP"

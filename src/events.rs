@@ -3,11 +3,14 @@
 //! Flow: handler (kernel-exec'd, clean env) -> `SOCK_DGRAM` unix socket ->
 //! daemon (holds the SA token) -> API server. The handler reports every
 //! capture. The daemon logs each one, because the kernel-exec'd handler has no
-//! stdout to log to, and turns some of them into k8s Events. This keeps the SA
-//! token and a kube client out of the kernel-exec'd handler, which stays
-//! fire-and-forget: a missing socket, a full send buffer, or an unreachable
-//! API server never affects the capture itself. The daemon-side listener and
-//! k8s Event client live in [`crate::k8s_events`].
+//! stdout to log to. A capture that left a spool bundle is reported again by
+//! the daemon's uploader once the bundle is uploaded; that final report, and
+//! every other outcome, can become a k8s Event. This keeps the SA token and a
+//! kube client out of the kernel-exec'd handler, which stays fire-and-forget:
+//! a missing socket, a full send buffer, or an unreachable API server never
+//! affects the capture itself. The spool scan does not depend on the
+//! datagram either. The daemon-side listener and k8s Event client live in
+//! [`crate::k8s_events`].
 
 use std::fmt::Display;
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
@@ -20,20 +23,46 @@ use tracing::warn;
 /// log line and the capture-event payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[allow(missing_docs)] // DTO: variant names are self-explanatory.
 pub enum Outcome {
+    /// The handler wrote the core into the spool; the daemon uploads it.
+    Spooled,
     Uploaded,
     SuppressedRateLimit,
+    /// The spool had no room for the core; snapshot and manifest are spooled.
+    SpoolFull,
+    /// The core did not drain before the deadline; snapshot and manifest are
+    /// spooled.
+    DrainDeadline,
     SkippedNonK8s,
     NoStoreDiscard,
     Failed,
 }
 
 impl Outcome {
+    /// Whether the handler left a spool bundle for this capture. The daemon
+    /// reports such a capture once the bundle is uploaded; every other
+    /// outcome is final when the handler reports it.
+    #[must_use]
+    pub fn has_bundle(self) -> bool {
+        matches!(
+            self,
+            Outcome::Spooled
+                | Outcome::SuppressedRateLimit
+                | Outcome::SpoolFull
+                | Outcome::DrainDeadline
+        )
+    }
+
+    /// The `kebab-case` wire/log representation of this outcome.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Outcome::Spooled => "spooled",
             Outcome::Uploaded => "uploaded",
             Outcome::SuppressedRateLimit => "suppressed-rate-limit",
+            Outcome::SpoolFull => "spool-full",
+            Outcome::DrainDeadline => "drain-deadline",
             Outcome::SkippedNonK8s => "skipped-non-k8s",
             Outcome::NoStoreDiscard => "no-store-discard",
             Outcome::Failed => "failed",
@@ -56,6 +85,7 @@ impl Display for Outcome {
 /// The fields added after the first release have a serde default, so the
 /// daemon still parses a datagram from an older handler during an upgrade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs)] // DTO: undocumented fields are self-explanatory.
 pub struct CaptureEventPayload {
     pub namespace: Option<String>,
     pub pod_name: Option<String>,
@@ -73,7 +103,8 @@ pub struct CaptureEventPayload {
     pub signal_name: Option<String>,
     pub outcome: Outcome,
     pub manifest_key: Option<String>,
-    /// Uncompressed core bytes the handler read from the kernel.
+    /// Uncompressed core bytes the handler read from the kernel; `0` when
+    /// the core is not kept, because the handler does not read it.
     #[serde(default)]
     pub core_bytes: u64,
     pub stored_bytes: Option<u64>,

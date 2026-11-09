@@ -90,7 +90,7 @@ uninstall_and_wait() {
 # directories are gone, so check them on the node.
 assert_node_clean() {
   local d
-  for d in "$HOST_BIN_DIR" "$HOST_RUN_DIR"; do
+  for d in "$HOST_BIN_DIR" "$HOST_RUN_DIR" "$HOST_SPOOL_DIR"; do
     if node_exec test -e "$d"; then
       warn "  leftover on the node after uninstall: $d"; fail=1
     else

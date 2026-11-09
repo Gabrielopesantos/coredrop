@@ -1,4 +1,6 @@
 {{- include "coredrop.validateStoreOpts" . }}
+{{- include "coredrop.validateSpool" . }}
+{{- include "coredrop.validateUpload" . }}
 {{- $criUnixSocket := "" }}
 {{- if hasPrefix "unix://" .Values.cri.runtimeEndpoint }}
 {{- $criUnixSocket = clean (trimPrefix "unix://" .Values.cri.runtimeEndpoint) }}
@@ -22,6 +24,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
+      # The daemon keeps uploading the spool for shutdownFlushSeconds after
+      # SIGTERM; the margin covers restoring core_pattern and exiting.
+      terminationGracePeriodSeconds: {{ add .Values.upload.shutdownFlushSeconds 5 }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -87,12 +92,12 @@ spec:
             - name: CAPTURE_NO_REDACT
               value: "true"
             {{- end }}
-            - name: CAPTURE_MAX_CORE_BYTES
-              value: {{ .Values.capture.maxCoreBytes | int64 | quote }}
+            - name: CAPTURE_MAX_CORE_SIZE
+              value: {{ include "coredrop.size" (dict "name" "capture.maxCoreSize" "value" .Values.capture.maxCoreSize) | quote }}
             - name: CAPTURE_MAX_CORES_PER_HOUR
               value: {{ .Values.capture.maxCoresPerHour | quote }}
-            - name: CAPTURE_UPLOAD_DEADLINE_SECS
-              value: {{ .Values.capture.uploadDeadlineSeconds | quote }}
+            - name: CAPTURE_DRAIN_DEADLINE_SECS
+              value: {{ .Values.capture.drainDeadlineSeconds | quote }}
             - name: CRICTL_TIMEOUT_SECS
               value: {{ .Values.capture.crictlTimeoutSeconds | quote }}
             {{- if .Values.capture.objectStore.url }}
@@ -103,6 +108,21 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
             {{- end }}
+            # spool + upload: the handler writes the spool, the daemon uploads it.
+            - name: CAPTURE_SPOOL_DIR
+              value: {{ .Values.spool.hostDir | quote }}
+            - name: CAPTURE_SPOOL_MAX_SIZE
+              value: {{ include "coredrop.size" (dict "name" "spool.maxSize" "value" .Values.spool.maxSize) | quote }}
+            - name: CAPTURE_SPOOL_MIN_FREE_PERCENT
+              value: {{ .Values.spool.minFreePercent | quote }}
+            - name: CAPTURE_SPOOL_MAX_AGE_SECS
+              value: {{ .Values.spool.maxAgeSeconds | int64 | quote }}
+            - name: CAPTURE_UPLOAD_CONCURRENCY
+              value: {{ .Values.upload.concurrency | quote }}
+            - name: CAPTURE_UPLOAD_TIMEOUT_SECS
+              value: {{ .Values.upload.timeoutSeconds | quote }}
+            - name: CAPTURE_SHUTDOWN_FLUSH_SECS
+              value: {{ .Values.upload.shutdownFlushSeconds | quote }}
             {{- if not .Values.events.enabled }}
             - name: CAPTURE_NO_EVENTS
               value: "true"
@@ -140,6 +160,10 @@ spec:
             # install dir (the handler reads the config path from here).
             - name: host-run
               mountPath: {{ .Values.corePattern.hostRunDir }}
+            # The spool, at its host path: the handler writes host paths, and
+            # the daemon reads the same paths here.
+            - name: host-spool
+              mountPath: {{ .Values.spool.hostDir | quote }}
             # Only these two sysctls are writable. The container's own /proc/sys
             # stays read-only. The mount point is outside /proc: the runtime
             # refuses most mounts under it.
@@ -161,6 +185,10 @@ spec:
         - name: host-run
           hostPath:
             path: {{ .Values.corePattern.hostRunDir }}
+            type: DirectoryOrCreate
+        - name: host-spool
+          hostPath:
+            path: {{ .Values.spool.hostDir | quote }}
             type: DirectoryOrCreate
         - name: host-core-pattern
           hostPath:

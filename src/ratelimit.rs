@@ -26,9 +26,11 @@ pub const RATE_WINDOW_SECS: i64 = 3600;
 /// Whether a core upload may proceed for a container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RateDecision {
+    /// Within budget; the upload may proceed.
     Allowed,
     /// Budget exhausted; `recent` uploads already happened in the window.
     Suppressed {
+        /// Uploads already recorded in the current window.
         recent: u32,
     },
 }
@@ -39,12 +41,15 @@ struct RateState {
     events: BTreeMap<String, Vec<i64>>,
 }
 
+/// Per-pod upload budget, backed by a flock-guarded JSON state file.
 pub struct RateLimiter {
     state_path: PathBuf,
     max_per_hour: u32,
 }
 
 impl RateLimiter {
+    /// Create a limiter backed by `state_path`, allowing up to
+    /// `max_per_hour` uploads per pod (`0` disables the limiter).
     pub fn new(state_path: impl Into<PathBuf>, max_per_hour: u32) -> Self {
         Self {
             state_path: state_path.into(),

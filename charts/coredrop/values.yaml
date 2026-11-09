@@ -47,23 +47,51 @@ corePattern:
   # -- Host path for the handler config and rate-limit state.
   hostRunDir: "/run/coredrop"
 
+# The node-local spool. The handler writes each capture (core, /proc snapshot,
+# manifest) here and exits; the daemon uploads the spool to the object store.
+# The spool must be on disk, not tmpfs: /run is RAM. The daemon does not start
+# when hostDir is on tmpfs or ramfs. The spool shares the node's
+# filesystem with the kubelet, which evicts pods under disk pressure, so keep
+# maxSize and minFreePercent conservative.
+spool:
+  # -- Host path of the spool. Use a directory for coredrop only: the handler creates `incoming/` and `ready/` in it, and `helm uninstall` deletes them.
+  hostDir: "/var/lib/coredrop/spool"
+  # -- Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap.
+  maxSize: 10Gi
+  # -- Free-space floor of the spool's filesystem, in percent; below it cores are dropped.
+  minFreePercent: 15
+  # -- Age in seconds past which a capture that still fails to upload is deleted (7 days default).
+  maxAgeSeconds: 604800
+
+# How the daemon uploads the spool.
+upload:
+  # -- Captures uploaded at the same time.
+  concurrency: 2
+  # -- Time limit in seconds for one upload attempt of one capture; it is retried after. `0` = no limit.
+  timeoutSeconds: 600
+  # -- On pod shutdown, seconds the daemon keeps uploading the spool. The pod's termination grace period is this plus 5.
+  shutdownFlushSeconds: 25
+
 # What happens to a crash once the handler captures it: where it's counted
 # against, how much of it is kept, and where it's uploaded.
 capture:
   # -- Cluster name - the first segment of every object key.
   cluster: "local"
-  # -- Truncate stored cores at this many bytes (2 GiB default).
-  maxCoreBytes: 2147483648
+  # -- Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit.
+  maxCoreSize: 2Gi
   # -- Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only.
   maxCoresPerHour: 3
-  # -- Core upload deadline in seconds; past it the upload is abandoned. 0 disables.
-  uploadDeadlineSeconds: 300
+  # -- Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables.
+  drainDeadlineSeconds: 60
   # -- Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
   crictlTimeoutSeconds: 10
   # -- Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing.
   noRedact: false
-  # S3-compatible/GCS/Azure object store for the core + proc-snapshot + manifest.
-  # Leave `url` empty to run with no upload (cores discarded, pipe still drains).
+  # S3-compatible/GCS/Azure object store the daemon uploads the core +
+  # proc-snapshot + manifest to. Only the daemon pod gets these settings and
+  # credentials; the handler never does. Leave `url` empty to run
+  # observe-only: crashes are logged and reported as Events, and nothing is
+  # written to the spool.
   # Both maps below take allowlisted keys only (listed in the chart README); an
   # unknown key fails chart rendering with the valid set rather than being
   # dropped silently at runtime.

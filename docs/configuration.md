@@ -1,0 +1,49 @@
+# Configuration
+
+Every knob is a CLI flag with an env-var fallback (secrets are env-only).
+Sizes take a Kubernetes quantity: a byte count, or a whole number with a
+binary (`Ki`, `Mi`, `Gi`, ...) or decimal (`k`, `M`, `G`, ...) suffix.
+For the Helm values that set these flags, see the
+[chart README](../charts/coredrop/README.md#values).
+
+| Flag | Env | Default | Purpose |
+| --- | --- | --- | --- |
+| `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
+| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = observe-only: crashes are logged and reported, no cores are kept |
+| `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
+| `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |
+| `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled; 0 = no deadline |
+| `--spool-dir` | `CAPTURE_SPOOL_DIR` | `/var/lib/coredrop/spool` | Spool root on the node |
+| `--spool-max-size` | `CAPTURE_SPOOL_MAX_SIZE` | `10Gi` | Spool size cap; 0 = no cap |
+| `--spool-min-free-percent` | `CAPTURE_SPOOL_MIN_FREE_PERCENT` | 15 | Free-space floor of the spool's filesystem |
+| `--spool-max-age-secs` | `CAPTURE_SPOOL_MAX_AGE_SECS` | 7 days | Age past which a capture that still fails to upload is deleted |
+| `--upload-concurrency` | `CAPTURE_UPLOAD_CONCURRENCY` | 2 | Captures uploaded at the same time |
+| `--upload-timeout-secs` | `CAPTURE_UPLOAD_TIMEOUT_SECS` | 600 | Time limit for one upload attempt of one capture; 0 = no limit |
+| `--shutdown-flush-secs` | `CAPTURE_SHUTDOWN_FLUSH_SECS` | 25 | Time the daemon keeps uploading after SIGTERM |
+| `--crictl-timeout-secs` | `CRICTL_TIMEOUT_SECS` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
+| `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
+| `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
+| `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
+| `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture; captures are still logged |
+
+## Observe-only mode
+
+Without `--store-url`, coredrop runs **observe-only**. The handler writes
+nothing to the spool and does not read the core. Each crash is still logged
+(`outcome="no-store-discard"`). It is also reported as a
+`CoreDiscardedNoStore` Event when crictl resolves the pod's namespace and
+name; without that identity, the daemon skips the Event.
+Set a store URL to keep cores. A store URL that is set but unusable (not a
+URL, an unknown scheme, a store that cannot be built) stops the daemon at
+startup.
+
+## Credentials
+
+Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
+`AZURE_STORAGE_ACCESS_KEY`, ...) are read from the environment only - never
+flags - and only an allowlist of keys is read (`src/upload.rs`,
+`ALLOWED_STORE_OPTS`). Only the daemon reads them: the handler config file
+holds no credentials. The daemon writes that file mode `0600` in a `0700`
+directory and rewrites it on startup. On `helm uninstall`, the post-delete
+hook removes it, the capture-event socket, the rate-limit state and the
+spool.

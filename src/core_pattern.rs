@@ -85,6 +85,8 @@ impl CorePatternGuard {
         })
     }
 
+    /// Restore the previous `core_pattern`/pipe-limit sysctl values. A write
+    /// failure is logged, not fatal.
     pub fn restore(&self) {
         if let Err(e) = std::fs::write(&self.pattern_path, &self.prev_pattern) {
             warn!(error = %e, "failed to restore core_pattern");

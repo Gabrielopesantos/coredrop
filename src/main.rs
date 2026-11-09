@@ -3,25 +3,40 @@
 //! The binary runs in three modes:
 //!   - capture handler (`coredrop capture %P %s %t %E`): the short-lived
 //!     process the kernel exec's per fault. Snapshots `/proc`, drains the core
-//!     to the object store, enriches identity via crictl, writes a JSON
+//!     into the node-local spool, enriches identity via crictl, writes a JSON
 //!     manifest sidecar.
 //!   - daemon (`coredrop`): the long-running `DaemonSet` container. Installs
 //!     `core_pattern` so faults route to the handler, writes the handler
 //!     config to a hostPath the kernel-exec'd handler can read (the kernel
-//!     exec's with a clean environment), and holds the restore guard until
-//!     shutdown.
+//!     exec's with a clean environment), uploads the spool, and holds the
+//!     restore guard until shutdown.
 //!   - health check (`coredrop check`): what the chart's readiness and
 //!     liveness probes exec. Exits non-zero when the capture path has drifted.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use object_store::ObjectStore;
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use coredrop::config::HandlerConfig;
 use coredrop::core_pattern::CorePatternGuard;
-use coredrop::handler::{CaptureArgs, run as run_handler};
+use coredrop::handler::{CaptureArgs, KernelPipe, run as run_handler};
+use coredrop::spool::Spool;
+use coredrop::uploader::{UploadSettings, Uploader};
+
+/// Default time the daemon keeps uploading the spool after SIGTERM. The
+/// chart's termination grace period adds a margin on top.
+const DEFAULT_SHUTDOWN_FLUSH_SECS: u64 = 25;
+
+/// On shutdown, how long the daemon waits for the event listener to report
+/// the uploads that finished during the flush. It fits in the 5 s the pod's
+/// termination grace period leaves after the flush.
+const LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// `coredrop` daemon config. Every knob is a flag with an env-var fallback.
 /// Secrets (store creds) stay env-only - never flags (leak via `ps`/cmdline).
@@ -50,8 +65,9 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = coredrop::config::DEFAULT_PROC_ROOT)]
     proc_root: PathBuf,
 
-    /// Object-store URL for the streamed core (e.g. `s3://crash-artifacts`);
-    /// unset disables upload. Store creds come from env (`AWS_*` etc.), not flags.
+    /// Object-store URL the daemon uploads spooled captures to (e.g.
+    /// `s3://crash-artifacts`); unset disables upload. Store creds come from
+    /// env (`AWS_*` etc.), not flags.
     #[arg(long, env = "CAPTURE_STORE_URL")]
     store_url: Option<String>,
 
@@ -63,9 +79,10 @@ struct DaemonArgs {
     #[arg(long, env = "CONTAINER_RUNTIME_ENDPOINT")]
     cri_runtime_endpoint: Option<String>,
 
-    /// Max uncompressed core bytes stored per crash; 0 = unlimited. The
-    /// remainder of the stream is drained but not stored.
-    #[arg(long, env = "CAPTURE_MAX_CORE_BYTES", default_value_t = coredrop::config::DEFAULT_MAX_CORE_BYTES)]
+    /// Max uncompressed core size stored per crash, as a quantity (`2Gi`,
+    /// `500M`, bytes without a suffix); 0 = unlimited. The remainder of the
+    /// stream is drained but not stored.
+    #[arg(long = "max-core-size", env = "CAPTURE_MAX_CORE_SIZE", default_value = "2Gi", value_name = "SIZE", value_parser = coredrop::config::parse_size)]
     max_core_bytes: u64,
 
     /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
@@ -73,11 +90,46 @@ struct DaemonArgs {
     #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = coredrop::config::DEFAULT_MAX_CORES_PER_HOUR)]
     max_cores_per_hour: u32,
 
-    /// Wall-clock deadline (seconds) for draining/uploading one core; 0 = no
-    /// deadline. On expiry the handler abandons the upload and exits, freeing
-    /// its `core_pipe_limit` slot instead of letting a slow store hold it.
-    #[arg(long, env = "CAPTURE_UPLOAD_DEADLINE_SECS", default_value_t = coredrop::config::DEFAULT_UPLOAD_DEADLINE_SECS)]
-    upload_deadline_secs: u64,
+    /// Wall-clock deadline (seconds) for draining one core into the spool;
+    /// 0 = no deadline. On expiry the handler drops the core and exits,
+    /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
+    #[arg(long, env = "CAPTURE_DRAIN_DEADLINE_SECS", default_value_t = coredrop::config::DEFAULT_DRAIN_DEADLINE_SECS)]
+    drain_deadline_secs: u64,
+
+    /// Spool root on the node: the handler writes capture bundles here and
+    /// the daemon uploads them.
+    #[arg(long, env = "CAPTURE_SPOOL_DIR", default_value = coredrop::spool::DEFAULT_SPOOL_DIR)]
+    spool_dir: PathBuf,
+
+    /// Cap on the spool's total size, as a quantity (`10Gi`, `500M`, bytes
+    /// without a suffix); 0 = no cap. A core that does not fit is dropped;
+    /// its snapshot and manifest are still spooled.
+    #[arg(long = "spool-max-size", env = "CAPTURE_SPOOL_MAX_SIZE", default_value = "10Gi", value_name = "SIZE", value_parser = coredrop::config::parse_size)]
+    spool_max_bytes: u64,
+
+    /// Free-space floor of the spool's filesystem, in percent. The handler
+    /// stops writing cores below it.
+    #[arg(long, env = "CAPTURE_SPOOL_MIN_FREE_PERCENT", default_value_t = coredrop::spool::DEFAULT_SPOOL_MIN_FREE_PERCENT, value_parser = clap::value_parser!(u8).range(0..=100))]
+    spool_min_free_percent: u8,
+
+    /// Age in seconds past which a spooled capture that still fails to
+    /// upload is deleted.
+    #[arg(long, env = "CAPTURE_SPOOL_MAX_AGE_SECS", default_value_t = coredrop::uploader::DEFAULT_SPOOL_MAX_AGE_SECS)]
+    spool_max_age_secs: u64,
+
+    /// Spooled captures the daemon uploads at the same time.
+    #[arg(long, env = "CAPTURE_UPLOAD_CONCURRENCY", default_value_t = coredrop::uploader::DEFAULT_UPLOAD_CONCURRENCY, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64))]
+    upload_concurrency: usize,
+
+    /// Time limit in seconds for one upload attempt of one spooled capture;
+    /// 0 = no limit. A timed-out capture is retried later.
+    #[arg(long, env = "CAPTURE_UPLOAD_TIMEOUT_SECS", default_value_t = coredrop::uploader::DEFAULT_UPLOAD_TIMEOUT_SECS)]
+    upload_timeout_secs: u64,
+
+    /// On SIGTERM, how long in seconds the daemon keeps uploading the spool
+    /// before it exits. Keep it below the pod's termination grace period.
+    #[arg(long, env = "CAPTURE_SHUTDOWN_FLUSH_SECS", default_value_t = DEFAULT_SHUTDOWN_FLUSH_SECS)]
+    shutdown_flush_secs: u64,
 
     /// Timeout in seconds for `crictl inspect` in the handler; 0 = no timeout.
     #[arg(long, env = "CRICTL_TIMEOUT_SECS", default_value_t = coredrop::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
@@ -114,20 +166,58 @@ struct DaemonArgs {
 }
 
 impl DaemonArgs {
-    fn to_handler_config(&self) -> HandlerConfig {
+    /// The object store the daemon uploads to, built from `--store-url` and
+    /// the store env vars. Only the daemon holds store credentials; the
+    /// handler learns only whether there is a store to spool for. `None`
+    /// when no URL is set (observe-only).
+    ///
+    /// # Errors
+    ///
+    /// Fails when a URL is set but the store cannot be built from it: a
+    /// daemon that silently discarded every core would look healthy.
+    fn object_store(&self) -> Result<Option<Arc<dyn ObjectStore>>> {
+        let Some(url) = self.store_url.as_deref().filter(|url| !url.is_empty()) else {
+            info!("no object store configured; the handler discards cores");
+            return Ok(None);
+        };
         let store_options = coredrop::upload::store_options_from_env();
+        if coredrop::upload::is_plaintext_endpoint(&store_options) {
+            warn!(
+                "object-store endpoint is plaintext HTTP; cores traverse the network unencrypted"
+            );
+        }
+        coredrop::upload::object_store_from_url_opts(url, store_options)
+            .map(Some)
+            .with_context(|| {
+                format!("--store-url {url} is set, but the object store cannot be built")
+            })
+    }
+
+    fn upload_settings(&self) -> UploadSettings {
+        UploadSettings {
+            concurrency: self.upload_concurrency,
+            attempt_timeout: (self.upload_timeout_secs != 0)
+                .then(|| Duration::from_secs(self.upload_timeout_secs)),
+            max_age: Duration::from_secs(self.spool_max_age_secs),
+            ..UploadSettings::default()
+        }
+    }
+
+    fn to_handler_config(&self, store_configured: bool) -> HandlerConfig {
         HandlerConfig {
             cluster: self.cluster.clone(),
             no_redact: self.no_redact,
             proc_root: self.proc_root.clone(),
-            store_url: self.store_url.clone().filter(|s| !s.is_empty()),
-            store_options,
+            store_configured,
             crictl_path: self.crictl_path.clone(),
             cri_runtime_endpoint: self.cri_runtime_endpoint.clone(),
             max_core_bytes: self.max_core_bytes,
             max_cores_per_hour: self.max_cores_per_hour,
-            upload_deadline_secs: self.upload_deadline_secs,
+            drain_deadline_secs: self.drain_deadline_secs,
             crictl_timeout_secs: self.crictl_timeout_secs,
+            spool_dir: self.spool_dir.clone(),
+            spool_max_bytes: self.spool_max_bytes,
+            spool_min_free_percent: self.spool_min_free_percent,
             rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
             event_socket_path: Some(coredrop::config::event_socket_path_for(&self.config_path)),
         }
@@ -160,8 +250,7 @@ async fn main() -> Result<()> {
             let config_path =
                 env_path("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH);
             let config = HandlerConfig::read(&config_path).unwrap_or_default();
-            let mut stdin = tokio::io::stdin();
-            run_handler(capture_args, &config, &mut stdin, None).await
+            run_handler(capture_args, &config, KernelPipe::stdin()).await
         }
         // Run by the readiness/liveness probes. Reads the same env the daemon
         // container is configured with; the error is the probe's failure reason.
@@ -191,11 +280,18 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         "coredrop starting"
     );
 
-    let config = args.to_handler_config();
+    let store = args.object_store().inspect_err(|e| {
+        error!(error = %format!("{e:#}"), "unusable object store; exiting for restart");
+    })?;
+    let config = args.to_handler_config(store.is_some());
 
-    if config.store_url.is_some() && coredrop::upload::is_plaintext_endpoint(&config.store_options)
+    // Reject a RAM-backed spool before any capture can be routed to it.
+    // Without a store the handler writes nothing to the spool.
+    if store.is_some()
+        && let Err(e) = Spool::new(&args.spool_dir).ensure_disk_backed()
     {
-        warn!("object-store endpoint is plaintext HTTP; cores traverse the network unencrypted");
+        error!(error = %e, "unusable spool; exiting for restart");
+        return Err(e);
     }
 
     // crictl enrichment is best-effort, so a missing socket is not fatal - but
@@ -243,7 +339,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         return Err(e);
     }
 
-    let _guard = match CorePatternGuard::install_at(
+    let guard = match CorePatternGuard::install_at(
         &args.handler_path,
         args.pipe_limit,
         args.core_pattern_path.clone(),
@@ -268,17 +364,74 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         .clone()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(coredrop::handler::node_hostname);
-    tokio::spawn(coredrop::k8s_events::run_listener(
+    let wake = Arc::new(Notify::new());
+    let (reports_tx, reports_rx) = mpsc::unbounded_channel();
+    let (listener_stop_tx, listener_stop_rx) = oneshot::channel::<()>();
+    let listener = tokio::spawn(coredrop::k8s_events::run_listener(
         events_socket,
+        reports_rx,
+        wake.clone(),
         node,
         !args.no_events,
+        listener_stop_rx,
     ));
+
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let uploader = store.map(|store| spawn_uploader(&args, store, wake, reports_tx, stop_rx));
 
     shutdown_signal().await?;
     info!("shutdown signal received");
 
-    // `_guard` drops here -> core_pattern/core_pipe_limit restored.
+    // Stop new captures first, then give the spool the rest of the grace
+    // period. Bundles not uploaded by then stay for the next daemon.
+    drop(guard);
+    if let Some(uploader) = uploader {
+        let _ = stop_tx.send(());
+        if let Err(e) = uploader.await {
+            warn!(error = %e, "spool uploader task failed");
+        }
+    }
+    stop_listener(listener_stop_tx, listener).await;
     Ok(())
+}
+
+/// Stop the event listener once it has reported the uploads that finished
+/// during the flush. It gets at most [`LISTENER_DRAIN_TIMEOUT`].
+async fn stop_listener(stop: oneshot::Sender<()>, listener: tokio::task::JoinHandle<()>) {
+    let _ = stop.send(());
+    if tokio::time::timeout(LISTENER_DRAIN_TIMEOUT, listener)
+        .await
+        .is_err()
+    {
+        warn!(
+            "reporting the last uploads took too long; some captures have no completion log or Event"
+        );
+    }
+}
+
+/// Start the spool uploader. It runs until `stop` fires, then flushes for
+/// `--shutdown-flush-secs`.
+fn spawn_uploader(
+    args: &DaemonArgs,
+    store: Arc<dyn ObjectStore>,
+    wake: Arc<Notify>,
+    reports: mpsc::UnboundedSender<coredrop::events::CaptureEventPayload>,
+    stop: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    let settings = args.upload_settings();
+    info!(
+        spool = %args.spool_dir.display(),
+        concurrency = settings.concurrency,
+        "spool uploader started"
+    );
+    let uploader = Uploader::new(Spool::new(&args.spool_dir), store, settings, reports);
+    tokio::spawn(uploader.run(
+        wake,
+        async {
+            let _ = stop.await;
+        },
+        Duration::from_secs(args.shutdown_flush_secs),
+    ))
 }
 
 /// Wait for a termination signal. Kubernetes sends SIGTERM on pod shutdown
@@ -319,7 +472,14 @@ mod tests {
             cri_runtime_endpoint: None,
             max_core_bytes: 0,
             max_cores_per_hour: 0,
-            upload_deadline_secs: 0,
+            drain_deadline_secs: 0,
+            spool_dir: config_path.with_file_name("spool"),
+            spool_max_bytes: 0,
+            spool_min_free_percent: 0,
+            spool_max_age_secs: 0,
+            upload_concurrency: 1,
+            upload_timeout_secs: 0,
+            shutdown_flush_secs: 0,
             crictl_timeout_secs: 0,
             no_events: true,
             pipe_limit: 16,
@@ -355,6 +515,47 @@ mod tests {
 
         // The sysctls must not have been touched - install runs after the write.
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
+    }
+
+    /// Without a store the handler writes nothing to the spool, so a spool on
+    /// tmpfs does not stop the daemon: the run gets past the spool check and
+    /// fails later, on the unwritable config.
+    #[tokio::test]
+    async fn accepts_a_tmpfs_spool_without_a_store() {
+        let shm = std::path::Path::new("/dev/shm");
+        if !shm.is_dir() {
+            return;
+        }
+        let spool = TempDir::new_in(shm).unwrap();
+        let dir = TempDir::new().unwrap();
+        let (pattern, pipe) = sysctls(dir.path());
+        let config_path = dir.path().join("run").join("handler.json");
+        std::fs::create_dir_all(&config_path).unwrap();
+        let mut daemon_args = args(&config_path, &pattern, &pipe);
+        daemon_args.spool_dir = spool.path().join("spool");
+
+        let err = run_daemon(daemon_args).await.unwrap_err();
+        let err = format!("{err:#}");
+        assert!(!err.contains("memory-backed"), "{err}");
+        assert!(err.contains("handler.json"), "{err}");
+    }
+
+    /// A set but unusable store URL stops the daemon before it routes any
+    /// crash to the handler: running on would discard every core.
+    #[tokio::test]
+    async fn errors_when_the_store_url_is_unusable() {
+        for url in ["not a url", "memory://bucket"] {
+            let dir = TempDir::new().unwrap();
+            let (pattern, pipe) = sysctls(dir.path());
+            let config_path = dir.path().join("run").join("handler.json");
+            let mut daemon_args = args(&config_path, &pattern, &pipe);
+            daemon_args.store_url = Some(url.into());
+
+            let err = run_daemon(daemon_args).await.unwrap_err();
+            assert!(format!("{err:#}").contains("--store-url"), "{url}: {err:#}");
+            assert!(!config_path.exists(), "{url}: no handler config is written");
+            assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
+        }
     }
 
     #[tokio::test]

@@ -33,6 +33,7 @@ const SIMPLE_FILES: &[&str] = &["maps", "smaps", "status", "limits", "stack"];
 
 /// One captured `/proc` file, named by its basename.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct SnapshotFile {
     pub name: String,
     pub bytes: Vec<u8>,
@@ -42,6 +43,7 @@ pub struct SnapshotFile {
 
 /// The in-memory pre-reap snapshot of one faulting process.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct ProcSnapshot {
     pub host_pid: i32,
     pub build_id: Option<String>,

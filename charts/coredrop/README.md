@@ -17,7 +17,8 @@ helm install coredrop oci://ghcr.io/gabrielopesantos/charts/coredrop \
 Leaving `capture.objectStore.url` empty runs coredrop **observe-only**. The
 handler writes nothing to the spool and does not read the core. Each crash is
 still logged (`outcome="no-store-discard"`) and reported as a
-`CoreDiscardedNoStore` Event.
+`CoreDiscardedNoStore` Event. A URL that is set but unusable stops the daemon
+at startup.
 
 ## Values
 

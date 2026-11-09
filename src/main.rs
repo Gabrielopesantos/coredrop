@@ -168,25 +168,29 @@ struct DaemonArgs {
 impl DaemonArgs {
     /// The object store the daemon uploads to, built from `--store-url` and
     /// the store env vars. Only the daemon holds store credentials; the
-    /// handler learns only whether there is a store to spool for.
-    fn object_store(&self) -> Option<Arc<dyn ObjectStore>> {
-        let store_options = coredrop::upload::store_options_from_env();
-        let store = self
-            .store_url
-            .as_deref()
-            .filter(|url| !url.is_empty())
-            .and_then(|url| {
-                if coredrop::upload::is_plaintext_endpoint(&store_options) {
-                    warn!(
-                        "object-store endpoint is plaintext HTTP; cores traverse the network unencrypted"
-                    );
-                }
-                coredrop::upload::object_store_from_url_opts(url, store_options)
-            });
-        if store.is_none() {
+    /// handler learns only whether there is a store to spool for. `None`
+    /// when no URL is set (observe-only).
+    ///
+    /// # Errors
+    ///
+    /// Fails when a URL is set but the store cannot be built from it: a
+    /// daemon that silently discarded every core would look healthy.
+    fn object_store(&self) -> Result<Option<Arc<dyn ObjectStore>>> {
+        let Some(url) = self.store_url.as_deref().filter(|url| !url.is_empty()) else {
             info!("no object store configured; the handler discards cores");
+            return Ok(None);
+        };
+        let store_options = coredrop::upload::store_options_from_env();
+        if coredrop::upload::is_plaintext_endpoint(&store_options) {
+            warn!(
+                "object-store endpoint is plaintext HTTP; cores traverse the network unencrypted"
+            );
         }
-        store
+        coredrop::upload::object_store_from_url_opts(url, store_options)
+            .map(Some)
+            .with_context(|| {
+                format!("--store-url {url} is set, but the object store cannot be built")
+            })
     }
 
     fn upload_settings(&self) -> UploadSettings {
@@ -276,7 +280,9 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         "coredrop starting"
     );
 
-    let store = args.object_store();
+    let store = args.object_store().inspect_err(|e| {
+        error!(error = %format!("{e:#}"), "unusable object store; exiting for restart");
+    })?;
     let config = args.to_handler_config(store.is_some());
 
     // Reject a RAM-backed spool before any capture can be routed to it.
@@ -532,6 +538,24 @@ mod tests {
         let err = format!("{err:#}");
         assert!(!err.contains("memory-backed"), "{err}");
         assert!(err.contains("handler.json"), "{err}");
+    }
+
+    /// A set but unusable store URL stops the daemon before it routes any
+    /// crash to the handler: running on would discard every core.
+    #[tokio::test]
+    async fn errors_when_the_store_url_is_unusable() {
+        for url in ["not a url", "memory://bucket"] {
+            let dir = TempDir::new().unwrap();
+            let (pattern, pipe) = sysctls(dir.path());
+            let config_path = dir.path().join("run").join("handler.json");
+            let mut daemon_args = args(&config_path, &pattern, &pipe);
+            daemon_args.store_url = Some(url.into());
+
+            let err = run_daemon(daemon_args).await.unwrap_err();
+            assert!(format!("{err:#}").contains("--store-url"), "{url}: {err:#}");
+            assert!(!config_path.exists(), "{url}: no handler config is written");
+            assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
+        }
     }
 
     #[tokio::test]

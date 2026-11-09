@@ -206,8 +206,7 @@ fn retry_config() -> object_store::RetryConfig {
 
 /// Build an object store from a store URL (e.g. `s3://crash-artifacts`) plus
 /// `object_store` config options. `None` when the URL is invalid or the store
-/// can't be built - the handler is then told no store is configured and
-/// discards cores.
+/// can't be built; the reason is logged.
 ///
 /// Dispatches on scheme rather than `parse_url_opts` because retry config is
 /// builder-only; opts are folded the same way `parse_url_opts` does (lowercase
@@ -219,14 +218,14 @@ pub fn object_store_from_url_opts(
     let url = match url::Url::parse(raw_url) {
         Ok(u) => u,
         Err(e) => {
-            warn!(error = %e, url = %raw_url, "store url is not a valid URL; core upload disabled");
+            warn!(error = %e, url = %raw_url, "store url is not a valid URL");
             return None;
         }
     };
     let scheme = match object_store::ObjectStoreScheme::parse(&url) {
         Ok((scheme, _path)) => scheme,
         Err(e) => {
-            warn!(error = %e, url = %raw_url, "unrecognized store url scheme; core upload disabled");
+            warn!(error = %e, url = %raw_url, "unrecognized store url scheme");
             return None;
         }
     };
@@ -273,14 +272,14 @@ pub fn object_store_from_url_opts(
                 .map(|s| Arc::new(s) as _)
         }
         other => {
-            warn!(scheme = ?other, url = %raw_url, "unsupported store url scheme; core upload disabled");
+            warn!(scheme = ?other, url = %raw_url, "unsupported store url scheme");
             return None;
         }
     };
     match built {
         Ok(store) => Some(store),
         Err(e) => {
-            warn!(error = %e, url = %raw_url, "building object store failed; core upload disabled");
+            warn!(error = %e, url = %raw_url, "building object store failed");
             None
         }
     }

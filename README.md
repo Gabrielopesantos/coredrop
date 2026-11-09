@@ -264,7 +264,9 @@ The main ones:
 Without `--store-url`, coredrop runs **observe-only**. The handler writes
 nothing to the spool and does not read the core. Each crash is still logged
 (`outcome="no-store-discard"`) and reported as a `CoreDiscardedNoStore` Event.
-Set a store URL to keep cores.
+Set a store URL to keep cores. A store URL that is set but unusable (not a
+URL, an unknown scheme, a store that cannot be built) stops the daemon at
+startup.
 
 Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
 `AZURE_STORAGE_ACCESS_KEY`, ...) are read from the environment only - never

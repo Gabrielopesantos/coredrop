@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::cgroup::is_pod_uid;
@@ -377,12 +377,17 @@ async fn api_result(resp: reqwest::Response, what: &str) -> Result<()> {
 ///
 /// Even when no events arrive, the aggregator is swept periodically so stale
 /// entries do not accumulate indefinitely.
+///
+/// When `stop` fires, the listener handles the reports still queued, then
+/// returns. Uploads that finish during the shutdown flush are reported this
+/// way, and their bundles are already gone.
 pub async fn run_listener(
     socket: tokio::net::UnixDatagram,
     mut reports: mpsc::UnboundedReceiver<CaptureEventPayload>,
     wake: Arc<Notify>,
     node: String,
     post_events: bool,
+    mut stop: oneshot::Receiver<()>,
 ) {
     let client = if post_events {
         let client = EventClient::from_env();
@@ -436,8 +441,29 @@ pub async fn run_listener(
             _ = sweep_interval.tick() => {
                 aggregator.sweep(Instant::now());
             }
+            _ = &mut stop => {
+                drain_reports(&mut reports, client.as_ref(), &mut aggregator, &node).await;
+                return;
+            }
         }
     }
+}
+
+/// Handle every report already queued in `reports`. Returns how many there
+/// were.
+async fn drain_reports(
+    reports: &mut mpsc::UnboundedReceiver<CaptureEventPayload>,
+    client: Option<&EventClient>,
+    aggregator: &mut Aggregator,
+    node: &str,
+) -> usize {
+    let mut handled = 0;
+    while let Ok(payload) = reports.try_recv() {
+        log_capture(&payload, Stage::Complete);
+        handle_payload(client, aggregator, node, &payload).await;
+        handled += 1;
+    }
+    handled
 }
 
 /// Which log line a capture gets.
@@ -649,6 +675,43 @@ mod tests {
             error: None,
             timestamp: 1_749_600_000,
         }
+    }
+
+    #[tokio::test]
+    async fn drain_reports_handles_every_queued_report() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(payload("default", "abc-123")).unwrap();
+        tx.send(payload("default", "def-456")).unwrap();
+        let mut aggregator = Aggregator::default();
+
+        let handled = drain_reports(&mut rx, None, &mut aggregator, "node-1").await;
+
+        assert_eq!(handled, 2);
+        assert!(rx.try_recv().is_err(), "the queue is empty");
+    }
+
+    #[tokio::test]
+    async fn listener_returns_after_stop() {
+        let dir = TempDir::new().unwrap();
+        let socket = bind_socket(&dir.path().join("events.sock")).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(payload("default", "abc-123")).unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let listener = tokio::spawn(run_listener(
+            socket,
+            rx,
+            Arc::new(Notify::new()),
+            "node-1".into(),
+            false,
+            stop_rx,
+        ));
+
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), listener)
+            .await
+            .expect("the listener returns after stop")
+            .unwrap();
+        assert!(tx.is_closed(), "the listener dropped its receiver");
     }
 
     fn agg_key(pod_uid: &str, reason: Reason) -> AggKey {

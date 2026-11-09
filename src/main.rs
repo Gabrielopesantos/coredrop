@@ -33,6 +33,11 @@ use coredrop::uploader::{UploadSettings, Uploader};
 /// chart's termination grace period adds a margin on top.
 const DEFAULT_SHUTDOWN_FLUSH_SECS: u64 = 25;
 
+/// On shutdown, how long the daemon waits for the event listener to report
+/// the uploads that finished during the flush. It fits in the 5 s the pod's
+/// termination grace period leaves after the flush.
+const LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// `coredrop` daemon config. Every knob is a flag with an env-var fallback.
 /// Secrets (store creds) stay env-only - never flags (leak via `ps`/cmdline).
 /// The kernel-exec'd `capture` subcommand reads the daemon-written hostPath
@@ -355,12 +360,14 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         .unwrap_or_else(coredrop::handler::node_hostname);
     let wake = Arc::new(Notify::new());
     let (reports_tx, reports_rx) = mpsc::unbounded_channel();
-    tokio::spawn(coredrop::k8s_events::run_listener(
+    let (listener_stop_tx, listener_stop_rx) = oneshot::channel::<()>();
+    let listener = tokio::spawn(coredrop::k8s_events::run_listener(
         events_socket,
         reports_rx,
         wake.clone(),
         node,
         !args.no_events,
+        listener_stop_rx,
     ));
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -378,7 +385,22 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
             warn!(error = %e, "spool uploader task failed");
         }
     }
+    stop_listener(listener_stop_tx, listener).await;
     Ok(())
+}
+
+/// Stop the event listener once it has reported the uploads that finished
+/// during the flush. It gets at most [`LISTENER_DRAIN_TIMEOUT`].
+async fn stop_listener(stop: oneshot::Sender<()>, listener: tokio::task::JoinHandle<()>) {
+    let _ = stop.send(());
+    if tokio::time::timeout(LISTENER_DRAIN_TIMEOUT, listener)
+        .await
+        .is_err()
+    {
+        warn!(
+            "reporting the last uploads took too long; some captures have no completion log or Event"
+        );
+    }
 }
 
 /// Start the spool uploader. It runs until `stop` fires, then flushes for

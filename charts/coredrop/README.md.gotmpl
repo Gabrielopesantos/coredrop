@@ -14,9 +14,10 @@ helm install coredrop oci://ghcr.io/gabrielopesantos/charts/coredrop \
   --set capture.objectStore.config.AWS_REGION=us-east-1
 ```
 
-Leaving `capture.objectStore.url` empty runs coredrop with no upload: cores
-are drained (so the kernel completes the dump) but nothing is stored or
-spooled.
+Leaving `capture.objectStore.url` empty runs coredrop **observe-only**. The
+handler writes nothing to the spool and does not read the core. Each crash is
+still logged (`outcome="no-store-discard"`) and reported as a
+`CoreDiscardedNoStore` Event.
 
 {{ template "chart.valuesSection" . }}
 

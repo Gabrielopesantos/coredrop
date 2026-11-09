@@ -89,8 +89,9 @@ capture:
   noRedact: false
   # S3-compatible/GCS/Azure object store the daemon uploads the core +
   # proc-snapshot + manifest to. Only the daemon pod gets these settings and
-  # credentials; the handler never does. Leave `url` empty to run with no
-  # upload (cores are not read or kept).
+  # credentials; the handler never does. Leave `url` empty to run
+  # observe-only: crashes are logged and reported as Events, and nothing is
+  # written to the spool.
   # Both maps below take allowlisted keys only (listed in the chart README); an
   # unknown key fails chart rendering with the valid set rather than being
   # dropped silently at runtime.

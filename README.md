@@ -244,7 +244,7 @@ The main ones:
 | Flag | Env | Default | Purpose |
 | --- | --- | --- | --- |
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
-| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = keep no cores |
+| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = observe-only: crashes are logged and reported, no cores are kept |
 | `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |
 | `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled; 0 = no deadline |
@@ -260,6 +260,11 @@ The main ones:
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
 | `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
 | `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture; captures are still logged |
+
+Without `--store-url`, coredrop runs **observe-only**. The handler writes
+nothing to the spool and does not read the core. Each crash is still logged
+(`outcome="no-store-discard"`) and reported as a `CoreDiscardedNoStore` Event.
+Set a store URL to keep cores.
 
 Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
 `AZURE_STORAGE_ACCESS_KEY`, ...) are read from the environment only - never

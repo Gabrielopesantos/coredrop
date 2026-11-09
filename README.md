@@ -119,7 +119,8 @@ reported, no cores are kept.
 
 ```sh
 kubectl get events --field-selector reason=CoreDumped
-aws s3 cp s3://crash-artifacts/<prefix>-core.zst core.zst && zstd -d core.zst
+prefix='local/<podUID>/<containerID>/1717000000-4242'  # manifest key without -manifest.json
+aws s3 cp "s3://crash-artifacts/${prefix}-core.zst" core.zst && zstd -d core.zst
 ```
 
 The Event message holds the manifest key. coredrop never deletes artifacts:

@@ -13,7 +13,12 @@ WARN coredrop::k8s_events: capture complete outcome="failed" ... error="draining
 ```
 
 A failed upload is logged as `bundle upload failed; will retry` with the
-store's error; the capture stays in the spool until it uploads.
+store's error. The uploader retries with exponential backoff, so a transient
+failure (a network fault, a short store outage) recovers on a later attempt.
+A bundle that is still not uploaded when it is older than
+`--spool-max-age-secs` (default 7 days) is deleted, logged as `bundle is past
+the spool max age; deleting it`, and its capture completes as
+`outcome="failed"`. The core is then lost.
 
 A crash the handler never sees, for example because the handler binary is
 missing, shows up only in the node's kernel log (`dmesg`: `coredump: ...

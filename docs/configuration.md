@@ -30,7 +30,9 @@ For the Helm values that set these flags, see the
 
 Without `--store-url`, coredrop runs **observe-only**. The handler writes
 nothing to the spool and does not read the core. Each crash is still logged
-(`outcome="no-store-discard"`) and reported as a `CoreDiscardedNoStore` Event.
+(`outcome="no-store-discard"`). It is also reported as a
+`CoreDiscardedNoStore` Event when crictl resolves the pod's namespace and
+name; without that identity, the daemon skips the Event.
 Set a store URL to keep cores. A store URL that is set but unusable (not a
 URL, an unknown scheme, a store that cannot be built) stops the daemon at
 startup.

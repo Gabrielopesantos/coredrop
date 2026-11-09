@@ -91,6 +91,18 @@ the directory's parent.
 {{- end -}}
 
 {{/*
+Fail rendering on an upload or deadline value the daemon would reject at
+startup.
+*/}}
+{{- define "coredrop.validateUpload" -}}
+{{- include "coredrop.validateInt" (dict "name" "upload.concurrency" "value" .Values.upload.concurrency "min" 1 "max" 64) -}}
+{{- include "coredrop.validateInt" (dict "name" "upload.timeoutSeconds" "value" .Values.upload.timeoutSeconds "min" 0) -}}
+{{- include "coredrop.validateInt" (dict "name" "upload.shutdownFlushSeconds" "value" .Values.upload.shutdownFlushSeconds "min" 0) -}}
+{{- include "coredrop.validateInt" (dict "name" "spool.maxAgeSeconds" "value" .Values.spool.maxAgeSeconds "min" 0) -}}
+{{- include "coredrop.validateInt" (dict "name" "capture.drainDeadlineSeconds" "value" .Values.capture.drainDeadlineSeconds "min" 0) -}}
+{{- end -}}
+
+{{/*
 Render .value, a size, as the string the daemon parses: a whole number of
 bytes, or a whole number with a Kubernetes quantity suffix (binary Ki to Ei,
 decimal k to E). Fail rendering on anything else.

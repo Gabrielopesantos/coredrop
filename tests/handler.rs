@@ -25,10 +25,12 @@ const CONTAINER_ID: &str = "abc123def456abc123def456"; // 24 hex chars -- valid
 const TS: i64 = 1_749_600_000;
 
 /// Run the handler on a core pipe that never yields data. It returns only
-/// when `run()` does not read the pipe.
+/// when `run()` does not read the pipe. Call it with real time, not a paused
+/// clock: a paused clock jumps to the guard while `run()` waits on a crictl
+/// child process.
 async fn run_without_reading(args: CaptureArgs, config: &HandlerConfig) -> anyhow::Result<()> {
     tokio::time::timeout(
-        std::time::Duration::from_mins(10),
+        std::time::Duration::from_secs(10),
         run(args, config, StallReader),
     )
     .await
@@ -489,7 +491,7 @@ async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
 
 /// A rate-limited capture does not read the core pipe, and still gets its
 /// snapshot and a `rate_limit` manifest.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn run_rate_limited_capture_does_not_read_the_core() {
     let pid = 4247;
 
@@ -520,7 +522,7 @@ async fn run_rate_limited_capture_does_not_read_the_core() {
 
 /// A spool-full capture does not read the core pipe, and still gets its
 /// snapshot and a `spool_full` manifest.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn run_spool_full_capture_does_not_read_the_core() {
     let pid = 4248;
 
@@ -545,7 +547,7 @@ async fn run_spool_full_capture_does_not_read_the_core() {
 }
 
 /// An unusable spool reports the capture as failed without reading the core.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn run_unusable_spool_reports_failed_without_reading_the_core() {
     let pid = 4249;
 
@@ -580,7 +582,7 @@ async fn run_unusable_spool_reports_failed_without_reading_the_core() {
 
 /// No store: the core is not read, and nothing else runs - no spool, and no
 /// rate limiter, which is only consulted when a core would be kept.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn run_without_store_discards_silently() {
     let pid = 100;
 
@@ -608,7 +610,7 @@ async fn run_without_store_discards_silently() {
 /// A host process crash has no kubernetes identity, so no object key is
 /// derivable and nothing is spooled - the core is not read. It is still
 /// reported, so the daemon can log it, even though no k8s Event can target it.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     let pid = 201;
 

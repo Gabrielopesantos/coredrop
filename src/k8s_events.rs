@@ -1,22 +1,27 @@
-//! Daemon side: listener for [`crate::events::CaptureEventPayload`] datagrams
-//! plus a minimal k8s Event client. The listener logs one `capture complete`
-//! line per capture, so `kubectl logs` shows every capture, and posts a k8s
-//! Event for the ones that target a pod, so `kubectl describe pod`/
+//! Daemon side: listener for [`crate::events::CaptureEventPayload`]s plus a
+//! minimal k8s Event client. The listener logs one `capture complete` line
+//! per capture, so `kubectl logs` shows every capture, and posts a k8s Event
+//! for the ones that target a pod, so `kubectl describe pod`/
 //! `kubectl get events` can surface them.
 //!
-//! The handler sends the payload (see [`crate::events`]); this module owns
-//! everything downstream of that socket - logging, aggregation and the API
-//! calls - which needs the projected `ServiceAccount` token and only ever runs
-//! in the long-lived daemon.
+//! Payloads come from two places: the handler's datagrams (see
+//! [`crate::events`]) and the uploader's reports (see [`crate::uploader`]).
+//! A datagram for a capture that left a spool bundle is logged as
+//! `capture spooled` and wakes the uploader; the capture is complete once the
+//! uploader reports the uploaded bundle. This module owns logging,
+//! aggregation and the API calls - which need the projected `ServiceAccount`
+//! token and only ever run in the long-lived daemon.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::cgroup::is_pod_uid;
@@ -62,19 +67,23 @@ pub fn bind_socket(path: &Path) -> std::io::Result<tokio::net::UnixDatagram> {
 enum Reason {
     CoreDumped,
     CoreDumpSuppressed,
+    CoreDumpSpoolFull,
+    CoreDumpDrainDeadline,
     CoreDiscardedNoStore,
 }
 
 impl Reason {
-    /// Map a capture outcome to its Event reason. Outcomes that never reach
-    /// this point (`skipped-non-k8s`, `failed`) yield `None` - the caller
-    /// drops the payload.
+    /// Map a capture outcome to its Event reason. Outcomes with no Event
+    /// (`spooled`, which is not final, `skipped-non-k8s`, `failed`) yield
+    /// `None` - the caller drops the payload.
     fn from_outcome(outcome: Outcome) -> Option<Self> {
         match outcome {
             Outcome::Uploaded => Some(Self::CoreDumped),
             Outcome::SuppressedRateLimit => Some(Self::CoreDumpSuppressed),
+            Outcome::SpoolFull => Some(Self::CoreDumpSpoolFull),
+            Outcome::DrainDeadline => Some(Self::CoreDumpDrainDeadline),
             Outcome::NoStoreDiscard => Some(Self::CoreDiscardedNoStore),
-            Outcome::SkippedNonK8s | Outcome::Failed => None,
+            Outcome::Spooled | Outcome::SkippedNonK8s | Outcome::Failed => None,
         }
     }
 
@@ -83,6 +92,8 @@ impl Reason {
         match self {
             Self::CoreDumped => "CoreDumped",
             Self::CoreDumpSuppressed => "CoreDumpSuppressed",
+            Self::CoreDumpSpoolFull => "CoreDumpSpoolFull",
+            Self::CoreDumpDrainDeadline => "CoreDumpDrainDeadline",
             Self::CoreDiscardedNoStore => "CoreDiscardedNoStore",
         }
     }
@@ -92,6 +103,8 @@ impl Reason {
         match self {
             Self::CoreDumped => "coredumped",
             Self::CoreDumpSuppressed => "coredumpsuppressed",
+            Self::CoreDumpSpoolFull => "coredumpspoolfull",
+            Self::CoreDumpDrainDeadline => "coredumpdraindeadline",
             Self::CoreDiscardedNoStore => "corediscardednostore",
         }
     }
@@ -356,14 +369,26 @@ async fn api_result(resp: reqwest::Response, what: &str) -> Result<()> {
     Err(anyhow!("{what}: HTTP {status}: {body}"))
 }
 
-/// Listen for capture-event datagrams until the socket is closed: log each
-/// capture, and post/patch k8s Events when `post_events` is set. Every failure
-/// path is best-effort: logged and swallowed, never propagated - a broken API
-/// server must never crash the daemon.
+/// Listen for capture-event datagrams and uploader reports: log each capture,
+/// and post/patch k8s Events when `post_events` is set. A datagram for a
+/// capture with a spool bundle wakes the uploader through `wake`. Every
+/// failure path is best-effort: logged and swallowed, never propagated - a
+/// broken API server must never crash the daemon.
 ///
 /// Even when no events arrive, the aggregator is swept periodically so stale
 /// entries do not accumulate indefinitely.
-pub async fn run_listener(socket: tokio::net::UnixDatagram, node: String, post_events: bool) {
+///
+/// When `stop` fires, the listener handles the reports still queued, then
+/// returns. Uploads that finish during the shutdown flush are reported this
+/// way, and their bundles are already gone.
+pub async fn run_listener(
+    socket: tokio::net::UnixDatagram,
+    mut reports: mpsc::UnboundedReceiver<CaptureEventPayload>,
+    wake: Arc<Notify>,
+    node: String,
+    post_events: bool,
+    mut stop: oneshot::Receiver<()>,
+) {
     let client = if post_events {
         let client = EventClient::from_env();
         if client.is_none() {
@@ -401,22 +426,61 @@ pub async fn run_listener(socket: tokio::net::UnixDatagram, node: String, post_e
                         continue;
                     }
                 };
-                log_capture(&payload);
+                if payload.outcome.has_bundle() {
+                    log_capture(&payload, Stage::Spooled);
+                    wake.notify_one();
+                } else {
+                    log_capture(&payload, Stage::Complete);
+                    handle_payload(client.as_ref(), &mut aggregator, &node, &payload).await;
+                }
+            }
+            Some(payload) = reports.recv() => {
+                log_capture(&payload, Stage::Complete);
                 handle_payload(client.as_ref(), &mut aggregator, &node, &payload).await;
             }
             _ = sweep_interval.tick() => {
                 aggregator.sweep(Instant::now());
             }
+            _ = &mut stop => {
+                drain_reports(&mut reports, client.as_ref(), &mut aggregator, &node).await;
+                return;
+            }
         }
     }
 }
 
-/// The daemon's copy of the handler's `capture complete` line. The kernel
-/// gives the handler no stdout, so this is the one operators see.
-fn log_capture(p: &CaptureEventPayload) {
+/// Handle every report already queued in `reports`. Returns how many there
+/// were.
+async fn drain_reports(
+    reports: &mut mpsc::UnboundedReceiver<CaptureEventPayload>,
+    client: Option<&EventClient>,
+    aggregator: &mut Aggregator,
+    node: &str,
+) -> usize {
+    let mut handled = 0;
+    while let Ok(payload) = reports.try_recv() {
+        log_capture(&payload, Stage::Complete);
+        handle_payload(client, aggregator, node, &payload).await;
+        handled += 1;
+    }
+    handled
+}
+
+/// Which log line a capture gets.
+#[derive(Clone, Copy)]
+enum Stage {
+    /// The handler wrote a spool bundle; the uploader has it next.
+    Spooled,
+    /// The capture is done: uploaded, or ended without a bundle to upload.
+    Complete,
+}
+
+/// The daemon's copy of the handler's capture line. The kernel gives the
+/// handler no stdout, so this is the one operators see.
+fn log_capture(p: &CaptureEventPayload, stage: Stage) {
     let none = "<none>";
     macro_rules! line {
-        ($level:ident) => {
+        ($level:ident, $msg:literal) => {
             $level!(
                 outcome = p.outcome.as_str(),
                 namespace = p.namespace.as_deref().unwrap_or(none),
@@ -431,14 +495,14 @@ fn log_capture(p: &CaptureEventPayload) {
                 stored_bytes = p.stored_bytes.unwrap_or(0),
                 truncated = p.truncated,
                 error = p.error.as_deref().unwrap_or(""),
-                "capture complete"
+                $msg
             )
         };
     }
-    if p.outcome == Outcome::Failed {
-        line!(warn);
-    } else {
-        line!(info);
+    match stage {
+        Stage::Spooled => line!(info, "capture spooled"),
+        Stage::Complete if p.outcome == Outcome::Failed => line!(warn, "capture complete"),
+        Stage::Complete => line!(info, "capture complete"),
     }
 }
 
@@ -613,6 +677,43 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn drain_reports_handles_every_queued_report() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(payload("default", "abc-123")).unwrap();
+        tx.send(payload("default", "def-456")).unwrap();
+        let mut aggregator = Aggregator::default();
+
+        let handled = drain_reports(&mut rx, None, &mut aggregator, "node-1").await;
+
+        assert_eq!(handled, 2);
+        assert!(rx.try_recv().is_err(), "the queue is empty");
+    }
+
+    #[tokio::test]
+    async fn listener_returns_after_stop() {
+        let dir = TempDir::new().unwrap();
+        let socket = bind_socket(&dir.path().join("events.sock")).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(payload("default", "abc-123")).unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let listener = tokio::spawn(run_listener(
+            socket,
+            rx,
+            Arc::new(Notify::new()),
+            "node-1".into(),
+            false,
+            stop_rx,
+        ));
+
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), listener)
+            .await
+            .expect("the listener returns after stop")
+            .unwrap();
+        assert!(tx.is_closed(), "the listener dropped its receiver");
+    }
+
     fn agg_key(pod_uid: &str, reason: Reason) -> AggKey {
         AggKey {
             namespace: "default".into(),
@@ -643,6 +744,8 @@ mod tests {
         let cases = [
             (Outcome::Uploaded, "CoreDumped"),
             (Outcome::SuppressedRateLimit, "CoreDumpSuppressed"),
+            (Outcome::SpoolFull, "CoreDumpSpoolFull"),
+            (Outcome::DrainDeadline, "CoreDumpDrainDeadline"),
             (Outcome::NoStoreDiscard, "CoreDiscardedNoStore"),
         ];
         for (outcome, reason) in cases {
@@ -651,8 +754,9 @@ mod tests {
             // The name slug is the reason lowercased.
             assert_eq!(got.slug(), reason.to_lowercase());
         }
-        // These two never reach the listener: `skipped-non-k8s` has no pod to
-        // target, and `failed` returns before the event is sent.
+        // No Event: `spooled` is not final, `skipped-non-k8s` has no pod to
+        // target, and a failed capture has no artifacts to point at.
+        assert_eq!(Reason::from_outcome(Outcome::Spooled), None);
         assert_eq!(Reason::from_outcome(Outcome::SkippedNonK8s), None);
         assert_eq!(Reason::from_outcome(Outcome::Failed), None);
     }

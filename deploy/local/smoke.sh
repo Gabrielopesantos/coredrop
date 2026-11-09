@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Live smoke test. Asserts the full kernel-to-bucket path on a real
 # node: the DaemonSet repoints core_pattern at the handler, a faulting workload
-# produces a core, and coredrop streams a valid core + redacted proc-snapshot +
-# manifest to MinIO. Non-destructive and repeatable: coredrop stays installed
+# produces a core, the handler spools it, and the daemon uploads a valid core +
+# redacted proc-snapshot + manifest to MinIO. Non-destructive and repeatable: coredrop stays installed
 # (lifecycle.sh tests the uninstall paths). coredrop has no control plane, so
 # every assertion is made directly against the bucket (mc over a port-forward),
 # not a REST API. See README.md.
@@ -96,9 +96,9 @@ crash_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods \
            | select(.metadata.deletionTimestamp == null)
            | .metadata.name' | head -n1)"
 [ -n "$crash_pod" ] || die "could not resolve a running crash-segfault pod in $DEMO_NAMESPACE"
-# Object keys start with {cluster}/{podUID}/. Match only this pod's objects: a
-# handler still uploading for the previous (rate-limited) pod can write a
-# manifest after the purge above.
+# Object keys start with {cluster}/{podUID}/. Match only this pod's objects: the
+# daemon can still be uploading a spooled capture of the previous
+# (rate-limited) pod after the purge above.
 crash_uid="$(kubectl -n "$DEMO_NAMESPACE" get pod "$crash_pod" -o jsonpath='{.metadata.uid}')"
 [ -n "$crash_uid" ] || die "could not read the UID of $crash_pod"
 log "crash workload pod: $crash_pod (replicaset $active_hash, uid $crash_uid)"
@@ -163,7 +163,7 @@ if [ -s "$WORKDIR/core.zst" ] && zstd -t "$WORKDIR/core.zst" >/dev/null 2>&1; th
   log "  core.zst is a valid zstd frame ($(wc -c < "$WORKDIR/core.zst") compressed bytes)"
 
   # The manifest sha256 is the hash of the stored object (after zstd). The
-  # handler calculates it during the upload.
+  # handler calculates it while it writes the core to the spool.
   want_sha="$(jq -r '.core.sha256 // empty' "$WORKDIR/manifest.json" 2>/dev/null)"
   got_sha="$(sha256sum "$WORKDIR/core.zst" | awk '{print $1}')"
   if [ -z "$want_sha" ]; then
@@ -334,17 +334,31 @@ fi
 
 # --- 9. the daemon logs every capture ----------------------------------------
 # The kernel gives the handler no stdout. The handler reports each capture over
-# events.sock, and the daemon logs one `capture complete` line for it.
+# events.sock, and the daemon logs `capture spooled` for it, then one
+# `capture complete` line once the uploader is done with it.
 log "checking the daemon log for this pod's captures"
 daemon_log="$(kubectl -n "$NAMESPACE" logs "$daemon_pod" -c coredrop 2>/dev/null \
-  | sed 's/\x1b\[[0-9;]*m//g' | grep -F 'capture complete' | grep -F "$crash_pod" || true)"
-for outcome in uploaded suppressed-rate-limit; do
-  if printf '%s\n' "$daemon_log" | grep -q "outcome=\"\?$outcome\"\?[ ]"; then
-    log "  daemon logged a capture: outcome=$outcome pod=$crash_pod"
+  | sed 's/\x1b\[[0-9;]*m//g' | grep -F "$crash_pod" || true)"
+for line in "capture spooled:spooled" "capture complete:uploaded" "capture complete:suppressed-rate-limit"; do
+  msg="${line%%:*}" outcome="${line#*:}"
+  if printf '%s\n' "$daemon_log" | grep -F "$msg" | grep "outcome=\"\?$outcome\"\?[ ]" >/dev/null; then
+    log "  daemon logged '$msg' outcome=$outcome pod=$crash_pod"
   else
-    warn "  no 'capture complete outcome=$outcome' line for $crash_pod in $daemon_pod's log"; fail=1
+    warn "  no '$msg outcome=$outcome' line for $crash_pod in $daemon_pod's log"; fail=1
   fi
 done
+
+# --- 10. the handler config carries no store credentials ---------------------
+# Only the daemon talks to the object store; the hostPath config the
+# kernel-exec'd handler reads must hold no credentials.
+handler_config="$(node_exec cat "$HOST_RUN_DIR/handler.json" 2>/dev/null || true)"
+if [ -z "$handler_config" ]; then
+  warn "  could not read $HOST_RUN_DIR/handler.json on the node"; fail=1
+elif printf '%s\n' "$handler_config" | grep -q 'AWS_'; then
+  warn "  handler.json contains AWS_ keys"; fail=1
+else
+  log "  handler.json carries no store credentials"
+fi
 
 if [ "$fail" -ne 0 ]; then
   die "smoke test FAILED"

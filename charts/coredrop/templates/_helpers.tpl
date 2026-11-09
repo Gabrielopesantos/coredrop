@@ -78,6 +78,70 @@ filter would drop it silently at runtime, leaving no error anywhere.
 {{- end -}}
 
 {{/*
+Fail rendering on a spool directory that is not an absolute path below the
+root. The handler only accepts absolute paths, and the cleanup worker mounts
+the directory's parent.
+*/}}
+{{- define "coredrop.validateSpool" -}}
+{{- $dir := clean .Values.spool.hostDir -}}
+{{- if or (not (isAbs $dir)) (eq $dir "/") -}}
+{{- fail (printf "spool.hostDir must be an absolute path below /: %q" .Values.spool.hostDir) -}}
+{{- end -}}
+{{- include "coredrop.validateInt" (dict "name" "spool.minFreePercent" "value" .Values.spool.minFreePercent "min" 0 "max" 100) -}}
+{{- end -}}
+
+{{/*
+Fail rendering on an upload or deadline value the daemon would reject at
+startup.
+*/}}
+{{- define "coredrop.validateUpload" -}}
+{{- include "coredrop.validateInt" (dict "name" "upload.concurrency" "value" .Values.upload.concurrency "min" 1 "max" 64) -}}
+{{- include "coredrop.validateInt" (dict "name" "upload.timeoutSeconds" "value" .Values.upload.timeoutSeconds "min" 0) -}}
+{{- include "coredrop.validateInt" (dict "name" "upload.shutdownFlushSeconds" "value" .Values.upload.shutdownFlushSeconds "min" 0) -}}
+{{- include "coredrop.validateInt" (dict "name" "spool.maxAgeSeconds" "value" .Values.spool.maxAgeSeconds "min" 0) -}}
+{{- include "coredrop.validateInt" (dict "name" "capture.drainDeadlineSeconds" "value" .Values.capture.drainDeadlineSeconds "min" 0) -}}
+{{- end -}}
+
+{{/*
+Render .value, a size, as the string the daemon parses: a whole number of
+bytes, or a whole number with a Kubernetes quantity suffix (binary Ki to Ei,
+decimal k to E). Fail rendering on anything else.
+*/}}
+{{- define "coredrop.size" -}}
+{{- $v := .value -}}
+{{- if kindIs "string" $v -}}
+{{- if not (regexMatch "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$" $v) -}}
+{{- fail (printf "%s must be a size such as 10Gi, 500M or a byte count: %q" .name $v) -}}
+{{- end -}}
+{{- $v -}}
+{{- else -}}
+{{- include "coredrop.validateInt" (dict "name" .name "value" $v "min" 0) -}}
+{{- int64 $v -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Fail rendering when .value is not a whole number in [.min, .max]; .max is
+optional. The daemon parses these values as unsigned integers and exits on
+anything else. YAML numbers reach the template as float64, --set numbers as
+int64, so a float is accepted only when it has no fraction.
+*/}}
+{{- define "coredrop.validateInt" -}}
+{{- $v := .value -}}
+{{- $whole := or (kindIs "int" $v) (kindIs "int64" $v) (and (kindIs "float64" $v) (eq $v (floor $v))) -}}
+{{- if not $whole -}}
+{{- fail (printf "%s must be a whole number: %v" .name $v) -}}
+{{- end -}}
+{{- $n := int64 $v -}}
+{{- if lt $n (int64 .min) -}}
+{{- fail (printf "%s must be at least %d: %d" .name (int64 .min) $n) -}}
+{{- end -}}
+{{- if and (hasKey . "max") (gt $n (int64 .max)) -}}
+{{- fail (printf "%s must be at most %d: %d" .name (int64 .max) $n) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The post-delete cleanup worker: a DaemonSet that removes the handler binary,
 runtime config/state, and hostPath directories from every node.
 Rendered here (rather than inline in cleanup-hook.yaml) so it can be shipped
@@ -87,6 +151,7 @@ cleanup-hook.yaml for why a Job has to be the thing driving it.
 {{- define "coredrop.cleanupWorkerManifest" -}}
 {{- $binDir := clean .Values.corePattern.hostBinDir -}}
 {{- $runDir := clean .Values.corePattern.hostRunDir -}}
+{{- $spoolDir := clean .Values.spool.hostDir -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -125,6 +190,17 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          # The configured paths reach the script as environment variables,
+          # never as script text, so no character in them is shell syntax.
+          env:
+            - name: BIN_DIR
+              value: {{ $binDir | quote }}
+            - name: BIN_BASE
+              value: {{ base $binDir | quote }}
+            - name: RUN_BASE
+              value: {{ base $runDir | quote }}
+            - name: SPOOL_BASE
+              value: {{ base $spoolDir | quote }}
           command:
             - sh
             - -c
@@ -136,7 +212,7 @@ spec:
               # removed, so no crash is routed to a missing handler.
               pattern=$(cat /host/sysctl/core_pattern)
               case "$pattern" in
-                *"{{ $binDir }}/coredrop"*)
+                *"$BIN_DIR/coredrop"*)
                   printf 'core' > /host/sysctl/core_pattern
                   ;;
               esac
@@ -147,15 +223,20 @@ spec:
               # fails with EBUSY - the files would go but the directories would
               # stay. Reaching them through their parent keeps them ordinary
               # subdirectories, so rmdir works.
-              bin_dir=/host/bin-parent/{{ base $binDir }}
-              run_dir=/host/run-parent/{{ base $runDir }}
+              bin_dir="/host/bin-parent/$BIN_BASE"
+              run_dir="/host/run-parent/$RUN_BASE"
+              spool_dir="/host/spool-parent/$SPOOL_BASE"
 
               rm -f "$bin_dir/coredrop"
               rm -f "$run_dir/handler.json"
               rm -f "$run_dir/events.sock"
               rm -f "$run_dir/recent.json"
+              # Only the spool's own subdirectories, never the configured
+              # directory's other contents: spool.hostDir is user input.
+              rm -rf "$spool_dir/incoming" "$spool_dir/ready"
               rmdir "$bin_dir" 2>/dev/null || true
               rmdir "$run_dir" 2>/dev/null || true
+              rmdir "$spool_dir" 2>/dev/null || true
 
               # Keep the pod alive so the orchestrator Job can observe the
               # DaemonSet's rollout as ready - cleanup already ran above by
@@ -168,6 +249,8 @@ spec:
               mountPath: /host/bin-parent
             - name: host-run-parent
               mountPath: /host/run-parent
+            - name: host-spool-parent
+              mountPath: /host/spool-parent
             # The node's core_pattern sysctl, writable; /proc/sys stays read-only.
             - name: host-core-pattern
               mountPath: /host/sysctl/core_pattern
@@ -179,6 +262,10 @@ spec:
         - name: host-run-parent
           hostPath:
             path: {{ dir $runDir }}
+            type: DirectoryOrCreate
+        - name: host-spool-parent
+          hostPath:
+            path: {{ dir $spoolDir | quote }}
             type: DirectoryOrCreate
         - name: host-core-pattern
           hostPath:

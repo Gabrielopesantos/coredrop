@@ -1,6 +1,6 @@
 # Local overlay for the live smoke test: locally-built image + in-cluster MinIO.
-# The object-store endpoint is injected by up.sh as a numeric ClusterIP (the
-# kernel-exec'd handler runs in the host netns and can't use cluster DNS).
+# The object-store endpoint is injected by up.sh as MinIO's numeric ClusterIP,
+# which the daemon reaches from its pod network.
 image:
   repository: docker.io/library/coredrop
   tag: dev

@@ -275,7 +275,10 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     let config = args.to_handler_config(store.is_some());
 
     // Reject a RAM-backed spool before any capture can be routed to it.
-    if let Err(e) = Spool::new(&args.spool_dir).ensure_disk_backed() {
+    // Without a store the handler writes nothing to the spool.
+    if store.is_some()
+        && let Err(e) = Spool::new(&args.spool_dir).ensure_disk_backed()
+    {
         error!(error = %e, "unusable spool; exiting for restart");
         return Err(e);
     }
@@ -484,6 +487,29 @@ mod tests {
 
         // The sysctls must not have been touched - install runs after the write.
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
+    }
+
+    /// Without a store the handler writes nothing to the spool, so a spool on
+    /// tmpfs does not stop the daemon: the run gets past the spool check and
+    /// fails later, on the unwritable config.
+    #[tokio::test]
+    async fn accepts_a_tmpfs_spool_without_a_store() {
+        let shm = std::path::Path::new("/dev/shm");
+        if !shm.is_dir() {
+            return;
+        }
+        let spool = TempDir::new_in(shm).unwrap();
+        let dir = TempDir::new().unwrap();
+        let (pattern, pipe) = sysctls(dir.path());
+        let config_path = dir.path().join("run").join("handler.json");
+        std::fs::create_dir_all(&config_path).unwrap();
+        let mut daemon_args = args(&config_path, &pattern, &pipe);
+        daemon_args.spool_dir = spool.path().join("spool");
+
+        let err = run_daemon(daemon_args).await.unwrap_err();
+        let err = format!("{err:#}");
+        assert!(!err.contains("memory-backed"), "{err}");
+        assert!(err.contains("handler.json"), "{err}");
     }
 
     #[tokio::test]

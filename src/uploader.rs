@@ -331,9 +331,7 @@ fn list_names(dir: &Path) -> Vec<String> {
 fn sweep_incoming(dir: &Path) {
     for name in list_names(dir) {
         let path = dir.join(&name);
-        let stale = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
+        let stale = newest_mtime(&path)
             .and_then(|mtime| mtime.elapsed().ok())
             .is_some_and(|age| age > INCOMING_MAX_AGE);
         if stale {
@@ -343,6 +341,17 @@ fn sweep_incoming(dir: &Path) {
             }
         }
     }
+}
+
+/// The newest modification time of `bundle` and the files in it. A running
+/// drain moves its core file's mtime, not the directory's.
+fn newest_mtime(bundle: &Path) -> Option<std::time::SystemTime> {
+    let dir = std::fs::metadata(bundle).and_then(|m| m.modified()).ok()?;
+    let files = std::fs::read_dir(bundle)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok()?.metadata().ok()?.modified().ok());
+    Some(files.fold(dir, std::cmp::max))
 }
 
 /// Time since the crash a bundle holds, from the timestamp its name starts

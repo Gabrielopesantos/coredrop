@@ -229,10 +229,9 @@ async fn sweeps_stale_incoming_bundles() {
     bundle.write_file("core.zst", b"partial").unwrap();
     let fresh = spool.create_bundle("3-4-pod-cid").unwrap();
     fresh.write_file("core.zst", b"in progress").unwrap();
-    set_mtime(
-        &spool.incoming_dir().join("1-2-pod-cid"),
-        std::time::SystemTime::now() - Duration::from_hours(2),
-    );
+    let two_hours_ago = std::time::SystemTime::now() - Duration::from_hours(2);
+    set_mtime(&bundle.path("core.zst"), two_hours_ago);
+    set_mtime(&spool.incoming_dir().join("1-2-pod-cid"), two_hours_ago);
 
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let reports = flush(&config, store.clone(), settings(), Duration::from_secs(10)).await;
@@ -245,6 +244,30 @@ async fn sweeps_stale_incoming_bundles() {
     );
     let listed = store.list_with_delimiter(None).await.unwrap();
     assert!(listed.objects.is_empty() && listed.common_prefixes.is_empty());
+}
+
+/// A long drain writes its core file but not the bundle directory, so the
+/// directory's mtime goes stale. The bundle stays while its core file is fresh.
+#[tokio::test]
+async fn keeps_an_incoming_bundle_whose_core_is_still_written() {
+    let tmp = TempDir::new().unwrap();
+    let config = base_config(tmp.path());
+    let spool = Spool::new(&config.spool_dir);
+    let bundle = spool.create_bundle("1-2-pod-cid").unwrap();
+    bundle.write_file("core.zst", b"still draining").unwrap();
+    set_mtime(
+        &spool.incoming_dir().join("1-2-pod-cid"),
+        std::time::SystemTime::now() - Duration::from_hours(2),
+    );
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    flush(&config, store, settings(), Duration::from_secs(10)).await;
+
+    assert_eq!(
+        bundle_names(&spool.incoming_dir()),
+        vec!["1-2-pod-cid".to_string()],
+        "a bundle with a fresh core file is not swept"
+    );
 }
 
 fn set_mtime(dir: &Path, mtime: std::time::SystemTime) {

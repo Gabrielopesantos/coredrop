@@ -107,7 +107,7 @@ impl Spool {
     /// Fails when the spool directories or the bundle directory cannot be
     /// created.
     pub fn create_bundle(&self, name: &str) -> std::io::Result<Bundle> {
-        ensure_private_dir(&self.root)?;
+        self.ensure_root()?;
         ensure_private_dir(&self.incoming_dir())?;
         ensure_private_dir(&self.ready_dir())?;
         let dir = self.incoming_dir().join(name);
@@ -122,6 +122,18 @@ impl Spool {
             dir,
             ready: self.ready_dir().join(name),
         })
+    }
+
+    /// Create the spool root, mode `0700`, when it is missing. The mode of a
+    /// root that exists is not changed: `spool.hostDir` is user input and
+    /// can be a shared directory. The bundles (`0700`) and their files
+    /// (`0600`) keep the cores private.
+    fn ensure_root(&self) -> std::io::Result<()> {
+        match std::fs::metadata(&self.root) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ensure_private_dir(&self.root),
+            Err(e) => Err(e),
+        }
     }
 
     /// Total size of the files in all bundles, `incoming/` and `ready/`.
@@ -200,7 +212,7 @@ impl Spool {
     /// Fails when the directory cannot be created or inspected, or when its
     /// filesystem is tmpfs or ramfs.
     pub fn ensure_disk_backed(&self) -> Result<()> {
-        ensure_private_dir(&self.root)
+        self.ensure_root()
             .with_context(|| format!("creating spool directory {}", self.root.display()))?;
         let memory = in_memory_fs(&self.root)
             .with_context(|| format!("inspecting spool filesystem {}", self.root.display()))?;
@@ -263,13 +275,21 @@ impl Bundle {
     }
 
     /// Move the complete bundle to `ready/`, where the daemon picks it up.
-    /// Returns the bundle's new path.
+    /// Returns the bundle's new path. The bundle directory is synced first,
+    /// so after a node crash a bundle in `ready/` still holds its files.
     ///
     /// # Errors
     ///
-    /// Fails when the rename fails; the bundle then stays in `incoming/`.
+    /// Fails when the sync or the rename fails; the bundle is then deleted,
+    /// so it does not count against the spool cap.
     pub fn commit(self) -> std::io::Result<PathBuf> {
-        std::fs::rename(&self.dir, &self.ready)?;
+        let moved = std::fs::File::open(&self.dir)
+            .and_then(|d| d.sync_all())
+            .and_then(|()| std::fs::rename(&self.dir, &self.ready));
+        if let Err(e) = moved {
+            self.discard();
+            return Err(e);
+        }
         // Make the rename itself durable, so a node crash cannot lose a
         // bundle the handler already reported. Best-effort: the rename is done.
         if let Some(parent) = self.ready.parent()
@@ -856,6 +876,41 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn keeps_the_mode_of_an_existing_spool_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spool = Spool::new(&root);
+
+        spool.create_bundle("1-2-pod-cid").unwrap();
+        spool.ensure_disk_backed().unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().mode() & 0o777;
+        assert_eq!(mode(&root), 0o755, "an existing root keeps its mode");
+        assert_eq!(mode(&spool.incoming_dir()), 0o700);
+        assert_eq!(mode(&spool.ready_dir()), 0o700);
+        assert_eq!(mode(&spool.incoming_dir().join("1-2-pod-cid")), 0o700);
+    }
+
+    #[test]
+    fn a_failed_commit_deletes_the_bundle() {
+        let (_dir, spool, bundle) = bundle();
+        bundle.write_file(MANIFEST_FILE, b"{}").unwrap();
+        // A non-empty directory at the target makes the rename fail.
+        let taken = spool.ready_dir().join("1-2-pod-cid");
+        std::fs::create_dir(&taken).unwrap();
+        std::fs::write(taken.join("other"), b"x").unwrap();
+
+        assert!(bundle.commit().is_err());
+        assert!(
+            !spool.incoming_dir().join("1-2-pod-cid").exists(),
+            "the failed bundle is deleted"
+        );
+        assert!(taken.join("other").exists(), "the target is not touched");
     }
 
     #[test]

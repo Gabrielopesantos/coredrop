@@ -52,7 +52,7 @@ at startup.
 | resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | DaemonSet resource requests/limits. |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}` | Daemon container securityContext. |
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
-| spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. |
+| spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. Use a directory for coredrop only: the handler creates `incoming/` and `ready/` in it, and `helm uninstall` deletes them. |
 | spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default). |
 | spool.maxSize | string | `"10Gi"` | Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap. |
 | spool.minFreePercent | int | `15` | Free-space floor of the spool's filesystem, in percent; below it cores are dropped. |

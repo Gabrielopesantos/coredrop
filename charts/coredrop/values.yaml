@@ -54,7 +54,7 @@ corePattern:
 # filesystem with the kubelet, which evicts pods under disk pressure, so keep
 # maxSize and minFreePercent conservative.
 spool:
-  # -- Host path of the spool.
+  # -- Host path of the spool. Use a directory for coredrop only: the handler creates `incoming/` and `ready/` in it, and `helm uninstall` deletes them.
   hostDir: "/var/lib/coredrop/spool"
   # -- Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap.
   maxSize: 10Gi

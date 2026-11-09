@@ -22,8 +22,8 @@ kernel --core pipe--> handler --> spool on node disk --> daemon --> object store
   a crash never waits for the network: the kernel reaps the crashed process
   as soon as the core is on disk. The daemon uploads a bounded number of
   captures at a time and retries failures with backoff. The uncompressed core
-  never lands on disk or in memory: it goes stdin -> zstd -> spool in one
-  pass.
+  never lands on disk: it goes stdin -> zstd -> spool in one pass, and only
+  one 256 KiB read chunk of it is in memory at a time.
 - **Credentials stay in the daemon** - the kernel-exec'd handler has no store
   credentials and makes no network calls.
 - **Pre-reap `/proc` snapshot** - process state is captured while the kernel
@@ -96,10 +96,14 @@ then deletes it from the spool. Objects land at:
 - **Size cap** - stored core bytes are capped per crash (default 2 GiB);
   the remainder of the stream is drained but not stored.
 - **Spool quota** - the spool is capped (default 10 GiB) and keeps a
-  free-space floor on its filesystem (default 15%). A core that does not fit
-  is dropped; its proc snapshot and manifest are still spooled. The handler
-  checks the spool again while it writes a core, so concurrent crashes count
-  against the cap; each one can pass it by a few MiB.
+  free-space floor on its filesystem (default 15%). Only core writes check
+  them: proc snapshots and manifests are still written when the spool is
+  full. When the spool is full before a core starts, the core is dropped and
+  the capture is marked `spool_full`. When it fills while a core is written,
+  the core is kept up to that point and marked truncated with
+  `truncated_reason: spool_full`. The handler checks the spool again while it
+  writes a core, so concurrent crashes count against the cap; each one can
+  pass it by a few MiB.
 - **Rate limit** - per-pod core budget (default 3/hour) so a crash loop
   can't flood the spool or the bucket. Suppressed crashes still get a proc
   snapshot and manifest, just no core. The limiter fails open: a broken

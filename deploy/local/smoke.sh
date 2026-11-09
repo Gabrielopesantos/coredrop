@@ -341,7 +341,7 @@ daemon_log="$(kubectl -n "$NAMESPACE" logs "$daemon_pod" -c coredrop 2>/dev/null
   | sed 's/\x1b\[[0-9;]*m//g' | grep -F "$crash_pod" || true)"
 for line in "capture spooled:spooled" "capture complete:uploaded" "capture complete:suppressed-rate-limit"; do
   msg="${line%%:*}" outcome="${line#*:}"
-  if printf '%s\n' "$daemon_log" | grep -F "$msg" | grep -q "outcome=\"\?$outcome\"\?[ ]"; then
+  if printf '%s\n' "$daemon_log" | grep -F "$msg" | grep "outcome=\"\?$outcome\"\?[ ]" >/dev/null; then
     log "  daemon logged '$msg' outcome=$outcome pod=$crash_pod"
   else
     warn "  no '$msg outcome=$outcome' line for $crash_pod in $daemon_pod's log"; fail=1

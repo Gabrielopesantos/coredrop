@@ -52,7 +52,7 @@ spooled.
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
 | spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. |
 | spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default). |
-| spool.maxSize | string | `"10Gi"` | Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count; a core that does not fit is dropped, its snapshot and manifest are kept. `0` = no cap. |
+| spool.maxSize | string | `"10Gi"` | Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap. |
 | spool.minFreePercent | int | `15` | Free-space floor of the spool's filesystem, in percent; below it cores are dropped. |
 | tolerations | list | `[{"operator":"Exists"}]` | Pod tolerations (defaults to tolerating everything so it runs on all nodes). |
 | upload.concurrency | int | `2` | Captures uploaded at the same time. |
@@ -184,11 +184,15 @@ The handler has no store credentials and makes no network calls.
 
 - **Size.** `spool.maxSize` caps the spool, and `spool.minFreePercent` keeps
   free space on its filesystem. The spool shares `/var/lib` with the kubelet,
-  which evicts pods under disk pressure, so keep both conservative. A core that
-  does not fit is dropped; its snapshot and manifest are still spooled, with
+  which evicts pods under disk pressure, so keep both conservative. Only core
+  writes check them: snapshots and manifests are still written when the spool
+  is full. When the spool is full before a core starts, the core is dropped;
+  its snapshot and manifest are still spooled, with
   `skipped_reason: spool_full`, and the pod gets a `CoreDumpSpoolFull` Event.
-  The handler checks the spool again while it writes a core, so concurrent
-  crashes count against the cap; each one can pass it by a few MiB.
+  When the spool fills while a core is written, the core is kept up to that
+  point, marked `truncated_reason: spool_full`, and uploaded as usual. The
+  handler checks the spool again while it writes a core, so concurrent crashes
+  count against the cap; each one can pass it by a few MiB.
 - **Retries.** A capture that fails to upload stays in the spool and is retried
   with exponential backoff (10s, doubling, up to 10 minutes). Past
   `spool.maxAgeSeconds` it is deleted and logged as `outcome="failed"`.

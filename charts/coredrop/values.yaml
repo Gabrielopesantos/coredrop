@@ -56,7 +56,7 @@ corePattern:
 spool:
   # -- Host path of the spool.
   hostDir: "/var/lib/coredrop/spool"
-  # -- Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count; a core that does not fit is dropped, its snapshot and manifest are kept. `0` = no cap.
+  # -- Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap.
   maxSize: 10Gi
   # -- Free-space floor of the spool's filesystem, in percent; below it cores are dropped.
   minFreePercent: 15

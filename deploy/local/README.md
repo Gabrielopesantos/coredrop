@@ -48,6 +48,8 @@ coredrop installed.
    `capture complete` lines with outcome `uploaded` and
    `suppressed-rate-limit`.
 9. The handler config on the node holds no store credentials.
+10. The daemon's `/metrics` shows `coredrop_captures_total` above 0 for the
+    outcomes `uploaded` and `suppressed-rate-limit`.
 
 ## What the lifecycle test asserts
 

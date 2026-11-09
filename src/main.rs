@@ -13,6 +13,7 @@
 //!   - health check (`coredrop check`): what the chart's readiness and
 //!     liveness probes exec. Exits non-zero when the capture path has drifted.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,7 @@ use tracing::{error, info, warn};
 use coredrop::config::HandlerConfig;
 use coredrop::core_pattern::CorePatternGuard;
 use coredrop::handler::{CaptureArgs, KernelPipe, run as run_handler};
+use coredrop::metrics::Metrics;
 use coredrop::spool::Spool;
 use coredrop::uploader::{UploadSettings, Uploader};
 
@@ -163,6 +165,25 @@ struct DaemonArgs {
     /// approach as `core_pattern_path`.
     #[arg(long, env = "CAPTURE_CORE_PIPE_LIMIT_PATH", default_value = coredrop::core_pattern::CORE_PIPE_LIMIT_PATH)]
     core_pipe_limit_path: PathBuf,
+
+    /// Address of the Prometheus `/metrics` endpoint (`host:port`); empty
+    /// turns the endpoint off.
+    #[arg(long, env = "CAPTURE_METRICS_ADDR", default_value = coredrop::metrics::DEFAULT_METRICS_ADDR, value_parser = parse_metrics_addr)]
+    metrics_addr: MetricsAddr,
+}
+
+/// `--metrics-addr`: the endpoint's address; `None` = no endpoint. A newtype,
+/// because clap reads an `Option` field as "flag may be absent".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetricsAddr(Option<SocketAddr>);
+
+fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
+    if s.is_empty() {
+        return Ok(MetricsAddr(None));
+    }
+    s.parse()
+        .map(|addr| MetricsAddr(Some(addr)))
+        .map_err(|e| format!("{s:?} is not a host:port socket address: {e}"))
 }
 
 impl DaemonArgs {
@@ -364,6 +385,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         .clone()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(coredrop::handler::node_hostname);
+    let metrics = start_metrics(args.metrics_addr.0).await;
     let wake = Arc::new(Notify::new());
     let (reports_tx, reports_rx) = mpsc::unbounded_channel();
     let (listener_stop_tx, listener_stop_rx) = oneshot::channel::<()>();
@@ -373,11 +395,13 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         wake.clone(),
         node,
         !args.no_events,
+        metrics.clone(),
         listener_stop_rx,
     ));
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let uploader = store.map(|store| spawn_uploader(&args, store, wake, reports_tx, stop_rx));
+    let uploader =
+        store.map(|store| spawn_uploader(&args, store, wake, reports_tx, metrics, stop_rx));
 
     shutdown_signal().await?;
     info!("shutdown signal received");
@@ -393,6 +417,27 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     }
     stop_listener(listener_stop_tx, listener).await;
     Ok(())
+}
+
+/// The daemon's metrics, served on `addr` when it is set. A bind failure is
+/// logged and the daemon runs on without the endpoint: capture must not
+/// depend on it. The endpoint runs until the runtime stops.
+async fn start_metrics(addr: Option<SocketAddr>) -> Arc<Metrics> {
+    let metrics = Arc::new(Metrics::new());
+    let Some(addr) = addr else {
+        info!("metrics endpoint disabled (--metrics-addr is empty)");
+        return metrics;
+    };
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            info!(%addr, "metrics endpoint listening on /metrics");
+            tokio::spawn(coredrop::metrics::serve(listener, metrics.clone()));
+        }
+        Err(e) => {
+            error!(error = %e, %addr, "failed to bind the metrics endpoint; running without metrics");
+        }
+    }
+    metrics
 }
 
 /// Stop the event listener once it has reported the uploads that finished
@@ -416,6 +461,7 @@ fn spawn_uploader(
     store: Arc<dyn ObjectStore>,
     wake: Arc<Notify>,
     reports: mpsc::UnboundedSender<coredrop::events::CaptureEventPayload>,
+    metrics: Arc<Metrics>,
     stop: oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     let settings = args.upload_settings();
@@ -424,7 +470,13 @@ fn spawn_uploader(
         concurrency = settings.concurrency,
         "spool uploader started"
     );
-    let uploader = Uploader::new(Spool::new(&args.spool_dir), store, settings, reports);
+    let uploader = Uploader::new(
+        Spool::new(&args.spool_dir),
+        store,
+        settings,
+        reports,
+        metrics,
+    );
     tokio::spawn(uploader.run(
         wake,
         async {
@@ -486,7 +538,25 @@ mod tests {
             node_name: None,
             core_pattern_path: pattern.to_path_buf(),
             core_pipe_limit_path: pipe.to_path_buf(),
+            metrics_addr: MetricsAddr(None),
         }
+    }
+
+    #[test]
+    fn metrics_addr_is_a_socket_address_or_empty() {
+        assert!(parse_metrics_addr("9464").is_err());
+        let parse = |argv: &[&str]| DaemonArgs::try_parse_from(argv).unwrap().metrics_addr;
+        assert_eq!(
+            parse(&["coredrop"]),
+            MetricsAddr(Some(
+                coredrop::metrics::DEFAULT_METRICS_ADDR.parse().unwrap()
+            ))
+        );
+        assert_eq!(
+            parse(&["coredrop", "--metrics-addr", "127.0.0.1:9000"]),
+            MetricsAddr(Some("127.0.0.1:9000".parse().unwrap()))
+        );
+        assert_eq!(parse(&["coredrop", "--metrics-addr="]), MetricsAddr(None));
     }
 
     /// Temp stand-ins for the two kernel sysctls, seeded with plausible

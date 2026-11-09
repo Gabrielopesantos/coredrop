@@ -21,10 +21,11 @@ use object_store::ObjectStore;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::events::{CaptureEventPayload, Outcome};
 use crate::manifest::Manifest;
+use crate::metrics::Metrics;
 use crate::spool::{self, Spool};
 use crate::upload;
 
@@ -83,6 +84,7 @@ pub struct Uploader {
     store: Arc<dyn ObjectStore>,
     settings: UploadSettings,
     reports: mpsc::UnboundedSender<CaptureEventPayload>,
+    metrics: Arc<Metrics>,
 }
 
 /// A ready bundle the uploader knows about.
@@ -112,12 +114,14 @@ impl Uploader {
         store: Arc<dyn ObjectStore>,
         settings: UploadSettings,
         reports: mpsc::UnboundedSender<CaptureEventPayload>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             spool,
             store,
             settings,
             reports,
+            metrics,
         }
     }
 
@@ -177,10 +181,12 @@ impl Uploader {
         }
     }
 
-    /// Track every bundle in `ready/`, forget bundles that are gone, and
-    /// delete stale bundles from `incoming/`.
+    /// Track every bundle in `ready/`, forget bundles that are gone, delete
+    /// stale bundles from `incoming/`, and update the spool gauges.
     fn scan(&self, pending: &mut BTreeMap<String, Pending>) {
         let ready = list_names(&self.spool.ready_dir());
+        self.metrics
+            .set_spool(ready.len(), self.spool.usage_bytes());
         let now = Instant::now();
         pending.retain(|name, p| p.in_flight || ready.contains(name));
         for name in ready {
@@ -236,6 +242,7 @@ impl Uploader {
         match result {
             Ok(Attempt { report, deleted }) => {
                 if let Some(payload) = report {
+                    self.metrics.upload_attempt(true);
                     let _ = self.reports.send(payload);
                 }
                 let Err(e) = deleted else {
@@ -253,7 +260,27 @@ impl Uploader {
                 p.attempts += 1;
                 let backoff = backoff(self.settings.retry_backoff, p.attempts);
                 p.next_at = Instant::now() + backoff;
-                warn!(bundle = name, attempts = p.attempts, retry_in_secs = backoff.as_secs(), error = %format!("{e:#}"), "deleting an uploaded bundle failed; will retry");
+                // The first failure is a warning; the retries after it are
+                // debug, and the metrics count them.
+                let (attempts, retry_in_secs, error) =
+                    (p.attempts, backoff.as_secs(), format!("{e:#}"));
+                if attempts == 1 {
+                    warn!(
+                        bundle = name,
+                        attempts,
+                        retry_in_secs,
+                        error,
+                        "deleting an uploaded bundle failed; will retry"
+                    );
+                } else {
+                    debug!(
+                        bundle = name,
+                        attempts,
+                        retry_in_secs,
+                        error,
+                        "deleting an uploaded bundle failed; will retry"
+                    );
+                }
             }
             Err(e) => {
                 let Some(p) = pending.get_mut(name) else {
@@ -261,16 +288,34 @@ impl Uploader {
                 };
                 p.in_flight = false;
                 p.attempts += 1;
+                // An entry marked uploaded only retries its delete, which
+                // cannot fail the task.
+                if !p.uploaded {
+                    self.metrics.upload_attempt(false);
+                }
                 let age = bundle_age(&self.spool.ready_dir(), name);
                 if !p.uploaded && age.is_some_and(|age| age > self.settings.max_age) {
                     warn!(bundle = name, attempts = p.attempts, error = %format!("{e:#}"), "bundle is past the spool max age; deleting it");
                     pending.remove(name);
+                    self.metrics.bundle_expired();
                     self.drop_bundle(name, &e);
                     return;
                 }
                 let backoff = backoff(self.settings.retry_backoff, p.attempts);
                 p.next_at = Instant::now() + backoff;
-                warn!(bundle = name, attempts = p.attempts, retry_in_secs = backoff.as_secs(), error = %format!("{e:#}"), "bundle upload failed; will retry");
+                let (attempts, retry_in_secs, error) =
+                    (p.attempts, backoff.as_secs(), format!("{e:#}"));
+                if attempts == 1 {
+                    warn!(
+                        bundle = name,
+                        attempts, retry_in_secs, error, "bundle upload failed; will retry"
+                    );
+                } else {
+                    debug!(
+                        bundle = name,
+                        attempts, retry_in_secs, error, "bundle upload failed; will retry"
+                    );
+                }
             }
         }
     }

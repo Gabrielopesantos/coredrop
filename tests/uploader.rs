@@ -16,6 +16,7 @@ use coredrop::config::HandlerConfig;
 use coredrop::events::{CaptureEventPayload, Outcome};
 use coredrop::handler::{CaptureArgs, run};
 use coredrop::manifest::Manifest;
+use coredrop::metrics::Metrics;
 use coredrop::spool::Spool;
 use coredrop::upload::ObjectKeys;
 use coredrop::uploader::{UploadSettings, Uploader};
@@ -60,8 +61,25 @@ async fn flush(
     settings: UploadSettings,
     flush: Duration,
 ) -> Vec<CaptureEventPayload> {
+    flush_metered(config, store, settings, flush).await.0
+}
+
+/// [`flush`], and also return the uploader's metrics in the text format.
+async fn flush_metered(
+    config: &HandlerConfig,
+    store: Arc<dyn ObjectStore>,
+    settings: UploadSettings,
+    flush: Duration,
+) -> (Vec<CaptureEventPayload>, String) {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let uploader = Uploader::new(Spool::new(&config.spool_dir), store, settings, tx);
+    let metrics = Arc::new(Metrics::new());
+    let uploader = Uploader::new(
+        Spool::new(&config.spool_dir),
+        store,
+        settings,
+        tx,
+        metrics.clone(),
+    );
     uploader
         .run(Arc::new(Notify::new()), std::future::ready(()), flush)
         .await;
@@ -69,7 +87,7 @@ async fn flush(
     while let Ok(report) = rx.try_recv() {
         reports.push(report);
     }
-    reports
+    (reports, metrics.encode())
 }
 
 fn ready(config: &HandlerConfig) -> Vec<String> {
@@ -142,7 +160,7 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
     let inner = Arc::new(InMemory::new());
     let failing = Arc::new(FailingStore::core(inner.clone()));
     let store: Arc<dyn ObjectStore> = failing.clone();
-    let reports = flush(
+    let (reports, metrics) = flush_metered(
         &config,
         store.clone(),
         settings(),
@@ -152,6 +170,15 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
 
     assert!(reports.is_empty(), "a retried bundle is not reported yet");
     assert_eq!(ready(&config).len(), 1, "the bundle stays in the spool");
+    assert!(
+        metrics.contains("coredrop_upload_attempts_total{result=\"ok\"} 0"),
+        "{metrics}"
+    );
+    assert!(
+        !metrics.contains("coredrop_upload_attempts_total{result=\"error\"} 0"),
+        "the failed attempts are counted: {metrics}"
+    );
+    assert!(metrics.contains("coredrop_spool_bundles 1"), "{metrics}");
     let keys = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
     let inner: Arc<dyn ObjectStore> = inner;
     assert!(
@@ -160,9 +187,14 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
     );
 
     failing.set_failing(false);
-    let reports = flush(&config, store, settings(), Duration::from_secs(10)).await;
+    let (reports, metrics) =
+        flush_metered(&config, store, settings(), Duration::from_secs(10)).await;
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].outcome, Outcome::Uploaded);
+    assert!(
+        metrics.contains("coredrop_upload_attempts_total{result=\"ok\"} 1"),
+        "{metrics}"
+    );
     assert!(ready(&config).is_empty());
     get_object(&inner, &keys.core()).await;
     get_object(&inner, &keys.manifest()).await;
@@ -203,9 +235,14 @@ async fn deletes_a_bundle_past_max_age_and_reports_failed() {
     capture(&config, pid, now_ts() - 7200, b"core that never uploads").await;
 
     let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
-    let reports = flush(&config, store, settings(), Duration::from_secs(10)).await;
+    let (reports, metrics) =
+        flush_metered(&config, store, settings(), Duration::from_secs(10)).await;
 
     assert!(ready(&config).is_empty(), "the expired bundle is deleted");
+    assert!(
+        metrics.contains("coredrop_bundles_expired_total 1"),
+        "{metrics}"
+    );
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].outcome, Outcome::Failed);
     assert!(

@@ -65,8 +65,8 @@ The daemon logs a warning at startup when it is configured with one.
 `ClusterRoleBinding` granting `create`/`patch` on `events` in the
 `events.k8s.io` API group, bound to the DaemonSet's `ServiceAccount`. It's
 cluster-scoped because a crash can happen in any namespace the node hosts
-pods for - see the main [README](../../README.md#capture-log-and-events) for what gets
-posted. Set `events.enabled: false` to skip both the RBAC objects and the
+pods for - see [Capture log and Events](../../docs/capture-log-and-events.md)
+for what gets posted. Set `events.enabled: false` to skip both the RBAC objects and the
 daemon's socket listener; the handler then skips the report with no error.
 
 ## Retention
@@ -140,10 +140,6 @@ crash --> handler --> spool.hostDir/incoming/<capture>/   (being written)
                   --> spool.hostDir/ready/<capture>/      (complete)
 daemon --> uploads ready/ (upload.concurrency at a time) --> deletes the capture
 ```
-
-The handler writes only to local disk, so a crash does not wait for the
-network: the kernel reaps the crashed process as soon as the core is on disk.
-The handler has no store credentials and makes no network calls.
 
 - **Size.** `spool.maxSize` caps the spool, and `spool.minFreePercent` keeps
   free space on its filesystem. The spool shares `/var/lib` with the kubelet,
@@ -302,12 +298,12 @@ node, then deletes it. On each node that worker removes the handler binary,
 `handler.json`, `events.sock` and `recent.json`, the spool's `incoming/` and
 `ready/` directories, then the `corePattern.hostBinDir`,
 `corePattern.hostRunDir` and `spool.hostDir` directories themselves.
+If the daemon was killed without a clean shutdown, the worker also resets
+`core_pattern` to the kernel default `core` if it still points at the handler.
 
 Uninstalling deletes every capture still in the spool. Wait for the spool to
 drain first if those captures matter: the daemon logs `capture complete` for
 each upload.
-If the daemon was killed without a clean shutdown, it also resets
-`core_pattern` to the kernel default `core` if it still points at the handler.
 
 Two details:
 

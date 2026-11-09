@@ -22,8 +22,9 @@ kernel --core pipe--> handler --> spool on node disk --> daemon --> object store
   a crash never waits for the network: the kernel reaps the crashed process
   as soon as the core is on disk. The daemon uploads a bounded number of
   captures at a time and retries failures with backoff. The uncompressed core
-  never lands on disk: it goes stdin -> zstd -> spool in one pass, and only
-  one 256 KiB read chunk of it is in memory at a time.
+  never lands on disk: it goes stdin -> zstd -> spool in one pass. The
+  handler holds only one 256 KiB read chunk and the zstd encoder's buffers
+  (a few MiB) in memory.
 - **Credentials stay in the daemon** - the kernel-exec'd handler has no store
   credentials and makes no network calls.
 - **Pre-reap `/proc` snapshot** - process state is captured while the kernel

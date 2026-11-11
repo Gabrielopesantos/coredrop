@@ -301,6 +301,11 @@ This is defense in depth, not a security boundary. A process that can write
 hostPath volumes also put the namespace at the Pod Security `privileged`
 level.
 
+The chart renders the daemon's settings into the `<release>-config`
+ConfigMap, mounted at `/etc/coredrop/config.yaml`; a change restarts the
+daemons through the `checksum/config` pod annotation. Store credentials stay
+in the Secret.
+
 The kernel-exec'd handler does not see env vars on the pod, so its config
 and the rate-limit state live on a hostPath (`corePattern.hostRunDir`). The
 config holds no credentials. The handler never reaches the network; the

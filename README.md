@@ -131,7 +131,7 @@ expire them with a bucket lifecycle policy.
 
 ## Documentation
 
-- [Configuration](docs/configuration.md) - flags, env vars, credentials.
+- [Configuration](docs/configuration.md) - flags, env vars, config file, credentials.
 - [Capture log and Events](docs/capture-log-and-events.md) - log lines and
   Event reasons.
 - [Metrics](docs/metrics.md) - Prometheus metrics, example alerts and the Grafana dashboard.

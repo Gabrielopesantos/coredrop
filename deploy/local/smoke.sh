@@ -61,7 +61,7 @@ daemon_pod="$(kubectl -n "$NAMESPACE" get pods \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
 if [ -z "$daemon_pod" ]; then
   warn "no running coredrop daemon pod found"; fail=1
-elif check_out="$(kubectl -n "$NAMESPACE" exec "$daemon_pod" -- /bin/coredrop check 2>&1)"; then
+elif check_out="$(kubectl -n "$NAMESPACE" exec "$daemon_pod" -- /bin/coredrop check --config /etc/coredrop/config.yaml 2>&1)"; then
   log "health check (readiness/liveness probe) passes on $daemon_pod"
 else
   warn "health check FAILED on $daemon_pod: $check_out"; fail=1

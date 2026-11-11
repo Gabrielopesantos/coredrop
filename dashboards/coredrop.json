@@ -165,7 +165,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "count(coredrop_build_info{cluster=~\"$cluster\",namespace=~\"$namespace\",pod=~\"$pod\"})",
+          "expr": "count(coredrop_build_info{cluster=~\"$cluster\",namespace=~\"$namespace\",pod=~\"$pod\"}) or vector(0)",
           "refId": "A",
           "legendFormat": "__auto",
           "instant": true,

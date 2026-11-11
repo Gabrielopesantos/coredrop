@@ -102,7 +102,7 @@ panels.append(row("Overview", y)); y += 1
 panels += [
     stat("Daemons reporting",
          "Number of coredrop daemon pods that Prometheus scrapes now. Expect one for each node.",
-         f"count(coredrop_build_info{{{S}}})", 0, y, w=3),
+         f"count(coredrop_build_info{{{S}}}) or vector(0)", 0, y, w=3),
     stat("core_pattern lost",
          "Daemons whose node core_pattern did not route cores to coredrop at some time in the time range. Another tool wrote core_pattern, and crashes were not captured until the daemon installed it again. Expect 0.",
          f"count(min_over_time(coredrop_core_pattern_installed{{{S}}}[$__range]) == 0) or vector(0)", 3, y, w=3, red_above=1),

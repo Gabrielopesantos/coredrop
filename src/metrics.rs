@@ -15,7 +15,7 @@ use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_TYPE, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -24,12 +24,23 @@ use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::Registry;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 use crate::events::{CaptureEventPayload, Outcome};
 
 /// Default address of the `/metrics` endpoint.
 pub const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9464";
+
+/// Time a client has to send a full request head, also on an idle
+/// keep-alive connection. Past it the server closes the connection, so an
+/// idle or slow client cannot hold a socket. Prometheus opens a new
+/// connection on its next scrape.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connections the endpoint serves at the same time. More clients wait in
+/// the listen backlog, so they cannot use up the daemon's file descriptors.
+const MAX_CONNECTIONS: usize = 32;
 
 const OPENMETRICS_CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
 
@@ -270,7 +281,22 @@ fn result(ok: bool) -> &'static str {
 /// Serve `GET /metrics` on `listener` until the task is dropped. A failed
 /// connection is logged and does not stop the server.
 pub async fn serve(listener: TcpListener, metrics: Arc<Metrics>) {
+    serve_with(listener, metrics, HEADER_READ_TIMEOUT, MAX_CONNECTIONS).await;
+}
+
+async fn serve_with(
+    listener: TcpListener,
+    metrics: Arc<Metrics>,
+    header_read_timeout: Duration,
+    max_connections: usize,
+) {
+    let slots = Arc::new(Semaphore::new(max_connections));
     loop {
+        // Take a slot before the accept, so a client past the limit waits in
+        // the backlog and holds no file descriptor of the daemon.
+        let Ok(slot) = slots.clone().acquire_owned().await else {
+            return;
+        };
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
             Err(e) => {
@@ -281,11 +307,14 @@ pub async fn serve(listener: TcpListener, metrics: Arc<Metrics>) {
         };
         let metrics = metrics.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             let service = hyper::service::service_fn(move |req| {
                 let metrics = metrics.clone();
                 async move { Ok::<_, Infallible>(respond(&req, &metrics)) }
             });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(header_read_timeout)
                 .serve_connection(TokioIo::new(stream), service)
                 .await
             {
@@ -310,7 +339,7 @@ fn respond(req: &Request<Incoming>, metrics: &Metrics) -> Response<Full<Bytes>> 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -429,6 +458,64 @@ mod tests {
 
         let missing = client.get(format!("http://{addr}/x")).send().await.unwrap();
         assert_eq!(missing.status(), 404);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn closes_a_connection_that_sends_no_request() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_with(
+            listener,
+            Arc::new(Metrics::new()),
+            Duration::from_millis(200),
+            MAX_CONNECTIONS,
+        ));
+
+        // `read_to_end` returns only when the server closes the connection
+        // (EOF, or a reset); any response bytes before it do not matter.
+        let mut idle = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), idle.read_to_end(&mut buf))
+            .await
+            .expect("the server kept an idle connection open");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn serves_at_most_max_connections_at_a_time() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_with(
+            listener,
+            Arc::new(Metrics::new()),
+            Duration::from_secs(30),
+            1,
+        ));
+
+        // An idle client holds the one slot.
+        let idle = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/metrics");
+        let blocked = client
+            .get(&url)
+            .timeout(Duration::from_millis(500))
+            .send()
+            .await;
+        assert!(blocked.is_err(), "a second connection was served");
+
+        drop(idle);
+        let ok = client
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
 
         server.abort();
     }

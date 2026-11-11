@@ -32,7 +32,7 @@ daemon, and the daemon counts it.
 | `coredrop_bundles_expired_total` | counter | - | Spooled captures deleted because they were past `--spool-max-age-secs` |
 | `coredrop_spool_bundles` | gauge | - | Captures in the spool waiting for upload |
 | `coredrop_spool_bytes` | gauge | - | Size of the spool, `incoming/` and `ready/` |
-| `coredrop_spool_oldest_bundle_age_seconds` | gauge | - | Age of the oldest capture waiting for upload; 0 when the spool is empty |
+| `coredrop_spool_oldest_bundle_age_seconds` | gauge | - | Age of the oldest capture waiting for upload; 0 when none waits. A capture that is uploaded but not yet deleted does not wait |
 | `coredrop_spool_max_bytes` | gauge | - | `--spool-max-size`; 0 = no limit |
 | `coredrop_core_pattern_installed` | gauge | - | 1 when the node's `core_pattern` routes cores to the handler, else 0 |
 | `coredrop_events_posted_total` | counter | `result` = `ok`/`error` | k8s Event create and patch requests |
@@ -140,3 +140,8 @@ the label `cluster` to every series.
 Turn the endpoint off with `--metrics-addr=` (empty) or the chart's
 `metrics.enabled: false`. If the daemon cannot bind the address, it logs an
 error and runs on without the endpoint: capture does not depend on it.
+
+The endpoint has no authentication. It serves at most 32 connections at the
+same time; more clients wait. A client that sends no full request within 10
+seconds, also on an idle keep-alive connection, is disconnected. Prometheus
+then opens a new connection on its next scrape.

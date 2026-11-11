@@ -419,3 +419,101 @@ fn set_mtime(dir: &Path, mtime: std::time::SystemTime) {
         .set_modified(mtime)
         .unwrap();
 }
+
+/// Make `bundle` read-only, so its files can be read but not removed.
+/// Returns `false` when the mode has no effect (the tests run as root).
+fn make_undeletable(bundle: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(bundle, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(bundle.join("probe"), b"").is_ok() {
+        make_deletable(bundle);
+        return false;
+    }
+    true
+}
+
+fn make_deletable(bundle: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(bundle, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// A bundle past the max age whose delete fails stays tracked: the capture is
+/// reported and counted once, and only the delete is retried.
+#[tokio::test]
+async fn retries_only_the_delete_of_an_expired_bundle() {
+    let pid = 5006;
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, now_ts() - 7200, b"core that never uploads").await;
+    let bundle = Spool::new(&config.spool_dir)
+        .ready_dir()
+        .join(&ready(&config)[0]);
+    if !make_undeletable(&bundle) {
+        return;
+    }
+    let restore = bundle.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        make_deletable(&restore);
+    });
+
+    let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let (reports, metrics) =
+        flush_metered(&config, store, settings(), Duration::from_secs(10)).await;
+
+    assert!(ready(&config).is_empty(), "the delete is retried");
+    assert_eq!(reports.len(), 1, "reported once: {reports:?}");
+    assert_eq!(reports[0].outcome, Outcome::Failed);
+    assert!(
+        metrics.contains("coredrop_bundles_expired_total 1"),
+        "{metrics}"
+    );
+}
+
+/// An uploaded bundle whose delete fails does not wait for upload, so the
+/// spool age gauge leaves it out.
+#[tokio::test]
+async fn spool_age_leaves_out_an_uploaded_bundle() {
+    let pid = 5007;
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, now_ts() - 600, b"core whose bundle sticks").await;
+    let bundle = Spool::new(&config.spool_dir)
+        .ready_dir()
+        .join(&ready(&config)[0]);
+    if !make_undeletable(&bundle) {
+        return;
+    }
+
+    // A wake-up after the upload makes the uploader scan again, and that scan
+    // sets the gauges.
+    let wake = Arc::new(Notify::new());
+    let later = wake.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        later.notify_one();
+    });
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let metrics = Arc::new(Metrics::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    Uploader::new(
+        Spool::new(&config.spool_dir),
+        store,
+        settings(),
+        tx,
+        metrics.clone(),
+    )
+    .run(wake, std::future::ready(()), Duration::from_millis(500))
+    .await;
+    make_deletable(&bundle);
+
+    assert_eq!(rx.try_recv().unwrap().outcome, Outcome::Uploaded);
+    let text = metrics.encode();
+    assert!(text.contains("coredrop_spool_bundles 1"), "{text}");
+    assert!(
+        text.contains("coredrop_spool_oldest_bundle_age_seconds 0"),
+        "{text}"
+    );
+}

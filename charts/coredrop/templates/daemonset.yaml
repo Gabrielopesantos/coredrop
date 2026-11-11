@@ -17,6 +17,12 @@ spec:
       {{- include "coredrop.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
       labels:
         {{- include "coredrop.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
@@ -127,6 +133,9 @@ spec:
             - name: CAPTURE_NO_EVENTS
               value: "true"
             {{- end }}
+            # metrics: the Prometheus endpoint; empty turns it off.
+            - name: CAPTURE_METRICS_ADDR
+              value: {{ ternary (printf "0.0.0.0:%v" .Values.metrics.port) "" .Values.metrics.enabled | quote }}
             # cri: post-drain container identity enrichment.
             - name: CRICTL_PATH
               value: {{ .Values.cri.crictlPath | quote }}
@@ -138,6 +147,12 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "coredrop.fullname" . }}-store
+          {{- end }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
           {{- end }}
           # Probes exec `coredrop check`: the kernel still routes cores to
           # our handler, the handler config is intact, the event socket is

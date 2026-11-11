@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 use crate::cgroup::is_pod_uid;
 use crate::config::ensure_private_dir;
 use crate::events::{CaptureEventPayload, Outcome};
+use crate::metrics::Metrics;
 
 const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 
@@ -387,6 +388,7 @@ pub async fn run_listener(
     wake: Arc<Notify>,
     node: String,
     post_events: bool,
+    metrics: Arc<Metrics>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let client = if post_events {
@@ -423,6 +425,7 @@ pub async fn run_listener(
                     Ok(p) => p,
                     Err(e) => {
                         warn!(error = %e, "capture event payload parse failed; dropping");
+                        metrics.payload_dropped();
                         continue;
                     }
                 };
@@ -430,19 +433,17 @@ pub async fn run_listener(
                     log_capture(&payload, Stage::Spooled);
                     wake.notify_one();
                 } else {
-                    log_capture(&payload, Stage::Complete);
-                    handle_payload(client.as_ref(), &mut aggregator, &node, &payload).await;
+                    complete(client.as_ref(), &mut aggregator, &node, &metrics, &payload).await;
                 }
             }
             Some(payload) = reports.recv() => {
-                log_capture(&payload, Stage::Complete);
-                handle_payload(client.as_ref(), &mut aggregator, &node, &payload).await;
+                complete(client.as_ref(), &mut aggregator, &node, &metrics, &payload).await;
             }
             _ = sweep_interval.tick() => {
                 aggregator.sweep(Instant::now());
             }
             _ = &mut stop => {
-                drain_reports(&mut reports, client.as_ref(), &mut aggregator, &node).await;
+                drain_reports(&mut reports, client.as_ref(), &mut aggregator, &node, &metrics).await;
                 return;
             }
         }
@@ -456,14 +457,27 @@ async fn drain_reports(
     client: Option<&EventClient>,
     aggregator: &mut Aggregator,
     node: &str,
+    metrics: &Metrics,
 ) -> usize {
     let mut handled = 0;
     while let Ok(payload) = reports.try_recv() {
-        log_capture(&payload, Stage::Complete);
-        handle_payload(client, aggregator, node, &payload).await;
+        complete(client, aggregator, node, metrics, &payload).await;
         handled += 1;
     }
     handled
+}
+
+/// A capture is done: log it, count it, and post its k8s Event.
+async fn complete(
+    client: Option<&EventClient>,
+    aggregator: &mut Aggregator,
+    node: &str,
+    metrics: &Metrics,
+    payload: &CaptureEventPayload,
+) {
+    log_capture(payload, Stage::Complete);
+    metrics.capture_done(payload);
+    handle_payload(client, aggregator, node, metrics, payload).await;
 }
 
 /// Which log line a capture gets.
@@ -517,6 +531,7 @@ async fn handle_payload(
     client: Option<&EventClient>,
     aggregator: &mut Aggregator,
     node: &str,
+    metrics: &Metrics,
     payload: &CaptureEventPayload,
 ) {
     let Some(reason) = Reason::from_outcome(payload.outcome) else {
@@ -573,6 +588,7 @@ async fn handle_payload(
             .patch_event_series(namespace, &recorded.event_name, &body)
             .await
     };
+    metrics.event_posted(result.is_ok());
     if let Err(e) = result {
         warn!(error = %e, event = %recorded.event_name, namespace = %namespace, "posting kubernetes event failed");
     }
@@ -683,11 +699,67 @@ mod tests {
         tx.send(payload("default", "abc-123")).unwrap();
         tx.send(payload("default", "def-456")).unwrap();
         let mut aggregator = Aggregator::default();
+        let metrics = Metrics::new();
 
-        let handled = drain_reports(&mut rx, None, &mut aggregator, "node-1").await;
+        let handled = drain_reports(&mut rx, None, &mut aggregator, "node-1", &metrics).await;
 
         assert_eq!(handled, 2);
         assert!(rx.try_recv().is_err(), "the queue is empty");
+        assert!(
+            metrics
+                .encode()
+                .contains("coredrop_captures_total{outcome=\"uploaded\"} 2")
+        );
+    }
+
+    /// A datagram with a final outcome is counted once. A spooled capture is
+    /// counted later, when the uploader reports it, and a bad datagram is
+    /// counted as dropped.
+    #[tokio::test]
+    async fn listener_counts_final_outcomes_and_dropped_payloads() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("events.sock");
+        let socket = bind_socket(&path).unwrap();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let metrics = Arc::new(Metrics::new());
+        let listener = tokio::spawn(run_listener(
+            socket,
+            rx,
+            Arc::new(Notify::new()),
+            "node-1".into(),
+            false,
+            metrics.clone(),
+            stop_rx,
+        ));
+
+        let sender = StdUnixDatagram::unbound().unwrap();
+        for outcome in [Outcome::Spooled, Outcome::SkippedNonK8s] {
+            let p = CaptureEventPayload {
+                outcome,
+                ..payload("default", "abc-123")
+            };
+            sender
+                .send_to(&serde_json::to_vec(&p).unwrap(), &path)
+                .unwrap();
+        }
+        sender.send_to(b"not json", &path).unwrap();
+
+        let expected = [
+            "coredrop_captures_total{outcome=\"skipped-non-k8s\"} 1",
+            "coredrop_event_payloads_dropped_total 1",
+        ];
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !expected.iter().all(|l| metrics.encode().contains(l)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("metrics never matched:\n{}", metrics.encode()));
+        assert!(!metrics.encode().contains("outcome=\"spooled\""));
+
+        stop_tx.send(()).unwrap();
+        listener.await.unwrap();
     }
 
     #[tokio::test]
@@ -703,6 +775,7 @@ mod tests {
             Arc::new(Notify::new()),
             "node-1".into(),
             false,
+            Arc::new(Metrics::new()),
             stop_rx,
         ));
 
@@ -995,6 +1068,7 @@ mod tests {
         let client = EventClient::new_for_test(http, "http://127.0.0.1:1", "test".into());
 
         let mut agg = Aggregator::default();
+        let metrics = Metrics::new();
         let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
         let long_namespace = "x".repeat(MAX_NAMESPACE_LEN + 1);
         let long_uid = "a".repeat(crate::cgroup::MAX_POD_UID_LEN + 1);
@@ -1021,6 +1095,7 @@ mod tests {
                 Some(&client),
                 &mut agg,
                 "test-node",
+                &metrics,
                 &payload(namespace, pod_uid),
             )
             .await;
@@ -1033,10 +1108,16 @@ mod tests {
             Some(&client),
             &mut agg,
             "test-node",
+            &metrics,
             &payload("default", uid),
         )
         .await;
         assert_eq!(agg.entries.len(), 1);
+        let text = metrics.encode();
+        assert!(
+            text.contains("coredrop_events_posted_total{result=\"error\"} 1"),
+            "only the valid payload reaches the API server: {text}"
+        );
     }
 
     #[tokio::test]
@@ -1058,7 +1139,7 @@ mod tests {
         let mut no_pod_uid = payload("default", uid);
         no_pod_uid.pod_uid = None;
         for p in [no_namespace, no_pod_name, no_pod_uid] {
-            handle_payload(Some(&client), &mut agg, "test-node", &p).await;
+            handle_payload(Some(&client), &mut agg, "test-node", &Metrics::new(), &p).await;
         }
         assert!(agg.entries.is_empty());
     }

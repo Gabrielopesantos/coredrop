@@ -1,0 +1,31 @@
+{{- if and .Values.metrics.enabled .Values.metrics.podMonitor.enabled }}
+# Scrapes each daemon pod directly: a DaemonSet needs no Service for this.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "coredrop.fullname" . }}
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "coredrop.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      # A daemon pod runs on each node: label its series with the node, and
+      # with the cluster, so one dashboard can show several deployments.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        {{- with .Values.capture.cluster }}
+        - targetLabel: cluster
+          replacement: {{ . | quote }}
+        {{- end }}
+      {{- with .Values.metrics.podMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+{{- end }}

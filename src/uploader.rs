@@ -21,10 +21,11 @@ use object_store::ObjectStore;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::events::{CaptureEventPayload, Outcome};
 use crate::manifest::Manifest;
+use crate::metrics::Metrics;
 use crate::spool::{self, Spool};
 use crate::upload;
 
@@ -83,6 +84,7 @@ pub struct Uploader {
     store: Arc<dyn ObjectStore>,
     settings: UploadSettings,
     reports: mpsc::UnboundedSender<CaptureEventPayload>,
+    metrics: Arc<Metrics>,
 }
 
 /// A ready bundle the uploader knows about.
@@ -91,15 +93,17 @@ struct Pending {
     attempts: u32,
     next_at: Instant,
     in_flight: bool,
-    /// The bundle is uploaded and reported; only its delete failed. It is
-    /// not uploaded or reported again.
-    uploaded: bool,
+    /// The capture is reported: the bundle is uploaded, or it is past the
+    /// spool max age. Only its delete is left; it is not uploaded or
+    /// reported again.
+    reported: bool,
 }
 
 /// The result of one attempt that did not fail the upload.
 struct Attempt {
-    /// The capture's final event, when this attempt uploaded the bundle.
-    report: Option<CaptureEventPayload>,
+    /// The capture's final event and the upload time, when this attempt
+    /// uploaded the bundle.
+    report: Option<(CaptureEventPayload, Duration)>,
     /// The result of deleting the bundle from the spool.
     deleted: Result<()>,
 }
@@ -112,12 +116,14 @@ impl Uploader {
         store: Arc<dyn ObjectStore>,
         settings: UploadSettings,
         reports: mpsc::UnboundedSender<CaptureEventPayload>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             spool,
             store,
             settings,
             reports,
+            metrics,
         }
     }
 
@@ -177,10 +183,23 @@ impl Uploader {
         }
     }
 
-    /// Track every bundle in `ready/`, forget bundles that are gone, and
-    /// delete stale bundles from `incoming/`.
+    /// Track every bundle in `ready/`, forget bundles that are gone, delete
+    /// stale bundles from `incoming/`, and update the spool gauges.
     fn scan(&self, pending: &mut BTreeMap<String, Pending>) {
-        let ready = list_names(&self.spool.ready_dir());
+        let ready_dir = self.spool.ready_dir();
+        let ready = list_names(&ready_dir);
+        // A reported bundle waits only for its delete, not for an upload.
+        let waiting: Vec<&String> = ready
+            .iter()
+            .filter(|name| !pending.get(*name).is_some_and(|p| p.reported))
+            .collect();
+        let oldest = waiting
+            .iter()
+            .filter_map(|name| bundle_age(&ready_dir, name))
+            .max()
+            .unwrap_or_default();
+        self.metrics
+            .set_spool(waiting.len(), self.spool.usage_bytes(), oldest);
         let now = Instant::now();
         pending.retain(|name, p| p.in_flight || ready.contains(name));
         for name in ready {
@@ -188,7 +207,7 @@ impl Uploader {
                 attempts: 0,
                 next_at: now,
                 in_flight: false,
-                uploaded: false,
+                reported: false,
             });
         }
         sweep_incoming(&self.spool.incoming_dir());
@@ -215,16 +234,18 @@ impl Uploader {
             let dir = self.spool.ready_dir().join(name);
             let store = self.store.clone();
             let deadline_at = self.settings.attempt_timeout.map(|t| now + t);
-            let uploaded = p.uploaded;
+            let reported = p.reported;
             let handle = tasks.spawn(async move {
-                let report = if uploaded {
+                let report = if reported {
                     None
                 } else {
-                    Some(upload_bundle(&store, &dir, deadline_at).await?)
+                    let started = Instant::now();
+                    let payload = upload_bundle(&store, &dir, deadline_at).await?;
+                    Some((payload, started.elapsed()))
                 };
                 let deleted = tokio::fs::remove_dir_all(&dir)
                     .await
-                    .with_context(|| format!("removing uploaded bundle {}", dir.display()));
+                    .with_context(|| format!("removing bundle {}", dir.display()));
                 Ok(Attempt { report, deleted })
             });
             task_names.insert(handle.id(), name.clone());
@@ -235,7 +256,9 @@ impl Uploader {
     fn finish(&self, name: &str, result: Result<Attempt>, pending: &mut BTreeMap<String, Pending>) {
         match result {
             Ok(Attempt { report, deleted }) => {
-                if let Some(payload) = report {
+                if let Some((payload, took)) = report {
+                    self.metrics.upload_attempt(true);
+                    self.metrics.upload_duration(took);
                     let _ = self.reports.send(payload);
                 }
                 let Err(e) = deleted else {
@@ -244,16 +267,36 @@ impl Uploader {
                 };
                 // Keep the entry, so the next scan does not upload and report
                 // the bundle again. Only the delete is retried, past max age
-                // too: the capture is safe in the bucket.
+                // too: the capture is reported already.
                 let Some(p) = pending.get_mut(name) else {
                     return;
                 };
                 p.in_flight = false;
-                p.uploaded = true;
+                p.reported = true;
                 p.attempts += 1;
                 let backoff = backoff(self.settings.retry_backoff, p.attempts);
                 p.next_at = Instant::now() + backoff;
-                warn!(bundle = name, attempts = p.attempts, retry_in_secs = backoff.as_secs(), error = %format!("{e:#}"), "deleting an uploaded bundle failed; will retry");
+                // The first failure is a warning; the retries after it are
+                // debug, and the metrics count them.
+                let (attempts, retry_in_secs, error) =
+                    (p.attempts, backoff.as_secs(), format!("{e:#}"));
+                if attempts == 1 {
+                    warn!(
+                        bundle = name,
+                        attempts,
+                        retry_in_secs,
+                        error,
+                        "deleting a reported bundle failed; will retry"
+                    );
+                } else {
+                    debug!(
+                        bundle = name,
+                        attempts,
+                        retry_in_secs,
+                        error,
+                        "deleting a reported bundle failed; will retry"
+                    );
+                }
             }
             Err(e) => {
                 let Some(p) = pending.get_mut(name) else {
@@ -261,28 +304,47 @@ impl Uploader {
                 };
                 p.in_flight = false;
                 p.attempts += 1;
+                // An entry marked reported only retries its delete, which
+                // cannot fail the task.
+                if !p.reported {
+                    self.metrics.upload_attempt(false);
+                }
                 let age = bundle_age(&self.spool.ready_dir(), name);
-                if !p.uploaded && age.is_some_and(|age| age > self.settings.max_age) {
+                if !p.reported && age.is_some_and(|age| age > self.settings.max_age) {
                     warn!(bundle = name, attempts = p.attempts, error = %format!("{e:#}"), "bundle is past the spool max age; deleting it");
-                    pending.remove(name);
-                    self.drop_bundle(name, &e);
+                    // Report and count the capture once. The entry stays, so
+                    // a failed delete is retried and not uploaded again.
+                    p.reported = true;
+                    p.attempts = 0;
+                    p.next_at = Instant::now();
+                    self.metrics.bundle_expired();
+                    self.report_expired(name, &e);
                     return;
                 }
                 let backoff = backoff(self.settings.retry_backoff, p.attempts);
                 p.next_at = Instant::now() + backoff;
-                warn!(bundle = name, attempts = p.attempts, retry_in_secs = backoff.as_secs(), error = %format!("{e:#}"), "bundle upload failed; will retry");
+                let (attempts, retry_in_secs, error) =
+                    (p.attempts, backoff.as_secs(), format!("{e:#}"));
+                if attempts == 1 {
+                    warn!(
+                        bundle = name,
+                        attempts, retry_in_secs, error, "bundle upload failed; will retry"
+                    );
+                } else {
+                    debug!(
+                        bundle = name,
+                        attempts, retry_in_secs, error, "bundle upload failed; will retry"
+                    );
+                }
             }
         }
     }
 
-    /// Delete a bundle that will never upload and report the capture as failed.
-    fn drop_bundle(&self, name: &str, error: &anyhow::Error) {
+    /// Report the capture of a bundle that will never upload as failed. The
+    /// next dispatch deletes the bundle.
+    fn report_expired(&self, name: &str, error: &anyhow::Error) {
         let dir = self.spool.ready_dir().join(name);
-        let payload = read_capture(&dir);
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            warn!(error = %e, dir = %dir.display(), "removing an expired bundle failed");
-        }
-        if let Ok(payload) = payload {
+        if let Ok(payload) = read_capture(&dir) {
             let _ = self.reports.send(CaptureEventPayload {
                 outcome: Outcome::Failed,
                 manifest_key: None,

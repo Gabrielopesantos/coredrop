@@ -1,0 +1,119 @@
+# Prometheus alert rules for coredrop. Load the file with `rule_files`, or
+# put the `groups` into a Prometheus Operator `PrometheusRule`. See
+# docs/metrics.md.
+groups:
+  - name: coredrop
+    rules:
+      # min_over_time: with the chart, the liveness probe restarts the daemon
+      # about 90 s after the change, and the daemon installs the pattern again.
+      # The alert stays for 15 min after the last change.
+      - alert: CoredropCorePatternNotInstalled
+        expr: min_over_time(coredrop_core_pattern_installed[15m]) == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: core_pattern on {{ $labels.node }} did not route cores to coredrop.
+          description: >-
+            In the last 15 minutes, another tool (for example systemd-coredump
+            or apport) wrote core_pattern on node {{ $labels.node }}. While
+            the value was changed, the kernel did not send crashes to
+            coredrop. The daemon log has the value that replaced it. The
+            chart's liveness probe restarts the daemon, which installs the
+            pattern again. If this alert stays, the other tool writes the
+            value again: stop that tool.
+
+      - alert: CoredropCaptureFailed
+        expr: increase(coredrop_captures_total{outcome="failed"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A capture failed on {{ $labels.node }}.
+          description: >-
+            At least one capture failed in the last hour on pod
+            {{ $labels.pod }}. Its `capture complete` log line has the error.
+
+      - alert: CoredropUploadsFailing
+        expr: >-
+          increase(coredrop_upload_attempts_total{result="error"}[30m]) > 0
+          and ignoring (result)
+          increase(coredrop_upload_attempts_total{result="ok"}[30m]) == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Uploads from {{ $labels.pod }} fail and none succeed.
+          description: >-
+            In the last 30 minutes, every upload attempt from pod
+            {{ $labels.pod }} failed. The object store is not available, or
+            the credentials are incorrect. Captures stay in the spool until
+            they are past the spool max age.
+
+      - alert: CoredropUploadBacklog
+        expr: coredrop_spool_oldest_bundle_age_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A capture on {{ $labels.node }} waits for upload for more than 15 minutes.
+          description: >-
+            The oldest capture in the spool of pod {{ $labels.pod }} is
+            {{ $value | humanizeDuration }} old. Uploads fail or are too slow.
+            Look at coredrop_upload_attempts_total and the daemon log.
+
+      - alert: CoredropSpoolFull
+        expr: increase(coredrop_captures_total{outcome="spool-full"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Cores on {{ $labels.node }} are lost because the spool is full.
+          description: >-
+            In the last hour, at least one capture on pod {{ $labels.pod }}
+            kept no core (or a truncated core) because the spool was full.
+
+      - alert: CoredropSpoolFilling
+        expr: coredrop_spool_bytes / (coredrop_spool_max_bytes > 0) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The spool on {{ $labels.node }} is more than 80% full.
+          description: >-
+            The spool of pod {{ $labels.pod }} is at
+            {{ $value | humanizePercentage }} of its size limit. When it is
+            full, new captures keep no core.
+
+      - alert: CoredropEventPostsFailing
+        expr: increase(coredrop_events_posted_total{result="error"}[30m]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: coredrop cannot post Kubernetes Events from {{ $labels.pod }}.
+          description: >-
+            Kubernetes Event requests from pod {{ $labels.pod }} failed in the
+            last 30 minutes. Captures continue. Make sure that the RBAC of the
+            chart is installed (events.enabled).
+
+      - alert: CoredropPayloadsDropped
+        expr: increase(coredrop_event_payloads_dropped_total[1h]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: The coredrop daemon on {{ $labels.node }} cannot parse capture reports.
+          description: >-
+            Pod {{ $labels.pod }} dropped capture reports from the handler in
+            the last hour. These captures have no log line, Event or metric.
+            Look for the `capture event payload parse failed` log line.
+
+      # Needs kube-state-metrics.
+      - alert: CoredropDaemonMissing
+        expr: >-
+          kube_daemonset_status_desired_number_scheduled{daemonset=~".*coredrop.*"}
+          - kube_daemonset_status_number_available{daemonset=~".*coredrop.*"}
+          > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The coredrop DaemonSet {{ $labels.daemonset }} does not run on every node.
+          description: >-
+            {{ $value }} nodes have no available coredrop pod. Crashes on
+            those nodes are not captured. This alert needs kube-state-metrics.

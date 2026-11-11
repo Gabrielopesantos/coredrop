@@ -46,6 +46,11 @@ at startup.
 | image.repository | string | `"ghcr.io/gabrielopesantos/coredrop"` | Container image repository (published on `app-v*` tags). |
 | image.tag | string | `""` | Image tag; empty defaults to `.Chart.AppVersion`. |
 | logLevel | string | `"info"` | `RUST_LOG` filter for the daemon. |
+| metrics.enabled | bool | `true` | Serve `/metrics` on the daemon pod and add the `prometheus.io/*` scrape annotations. |
+| metrics.podMonitor.enabled | bool | `false` | Render a Prometheus Operator `PodMonitor` for the daemon pods (needs the `monitoring.coreos.com` CRDs). |
+| metrics.podMonitor.interval | string | `""` | Scrape interval; empty uses the Prometheus default. |
+| metrics.podMonitor.labels | object | `{}` | Extra labels on the `PodMonitor`, for a Prometheus `podMonitorSelector`. |
+| metrics.port | int | `9464` | Container port of the `/metrics` endpoint. |
 | nameOverride | string | `""` | Override the chart name segment of resource names. |
 | nodeSelector | object | `{}` | Pod node selector. |
 | podLabels | object | `{}` | Extra labels merged onto the daemon pod template. |

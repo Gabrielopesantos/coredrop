@@ -14,8 +14,13 @@ log "uninstalling Helm release '$RELEASE' (daemon restores core_pattern on shutd
 helm uninstall "$RELEASE" -n "$NAMESPACE" --ignore-not-found \
   || warn "helm uninstall failed (post-delete cleanup hook?); the namespace delete below still removes the workloads, but the node may keep $HOST_BIN_DIR and $HOST_RUN_DIR"
 
+log "uninstalling the monitoring stack (release '$MONITORING_RELEASE'), if installed"
+helm uninstall "$MONITORING_RELEASE" -n "$MONITORING_NAMESPACE" --ignore-not-found \
+  || warn "helm uninstall of the monitoring stack failed"
+
 log "deleting demo workload + namespaces"
 kubectl delete namespace "$DEMO_NAMESPACE" --ignore-not-found >/dev/null
 kubectl delete namespace "$NAMESPACE" --ignore-not-found >/dev/null
+kubectl delete namespace "$MONITORING_NAMESPACE" --ignore-not-found >/dev/null
 
 log "done (cluster kept; set DELETE_CLUSTER=1 to remove it)"

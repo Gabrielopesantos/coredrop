@@ -95,6 +95,10 @@ pub const DEFAULT_DRAIN_DEADLINE_SECS: u64 = 60;
 /// Default timeout for `crictl inspect` in the handler.
 pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
 
+/// Longest timeout for a `crictl inspect` that runs before the drain, while
+/// the kernel holds the crashed process and a `core_pipe_limit` slot.
+pub const MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS: u64 = 10;
+
 fn default_rate_state_path() -> PathBuf {
     PathBuf::from("/run/coredrop/recent.json")
 }
@@ -155,7 +159,7 @@ pub struct HandlerConfig {
     /// crictl runs after the handler releases the core pipe, so this only
     /// bounds how long the capture takes to reach the spool. A capture filter
     /// on namespace, pod, container or image runs crictl before the drain
-    /// instead: then this also bounds how long the kernel waits.
+    /// instead: see [`Self::pre_drain_crictl_timeout_secs`].
     pub crictl_timeout_secs: u64,
     /// Spool root on the node: where the handler writes capture bundles for
     /// the daemon to upload.
@@ -201,6 +205,18 @@ impl Default for HandlerConfig {
 }
 
 impl HandlerConfig {
+    /// Timeout in seconds for a `crictl inspect` before the drain:
+    /// `crictl_timeout_secs`, at most [`MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS`].
+    /// `0` (no timeout) also gives the maximum, so a hung crictl cannot hold
+    /// the crashed process.
+    #[must_use]
+    pub fn pre_drain_crictl_timeout_secs(&self) -> u64 {
+        match self.crictl_timeout_secs {
+            0 => MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS,
+            secs => secs.min(MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS),
+        }
+    }
+
     /// Validate that paths are absolute and the free-space floor is a percent.
     /// Called by [`Self::read`] before trusting a daemon-written config file.
     fn validate(&self) -> Result<()> {
@@ -319,6 +335,23 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("handler.json");
         (dir, path)
+    }
+
+    #[test]
+    fn pre_drain_crictl_timeout_is_capped() {
+        let with = |secs| HandlerConfig {
+            crictl_timeout_secs: secs,
+            ..HandlerConfig::default()
+        };
+        assert_eq!(with(3).pre_drain_crictl_timeout_secs(), 3);
+        assert_eq!(
+            with(60).pre_drain_crictl_timeout_secs(),
+            MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            with(0).pre_drain_crictl_timeout_secs(),
+            MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS
+        );
     }
 
     #[test]

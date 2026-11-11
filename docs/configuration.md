@@ -89,8 +89,9 @@ cgroup identity (pod UID, container ID)
 ```
 
 When a filter uses namespace, pod, container or image, crictl runs while the
-kernel holds the crashed process, so `--crictl-timeout-secs` also limits that
-wait. When crictl fails, those fields are unknown, and the crash is captured:
+kernel holds the crashed process. That run times out after
+`--crictl-timeout-secs`, but after 10 seconds at most, also when the flag is
+0. When crictl fails, those fields are unknown, and the crash is captured:
 an unknown field never matches an `exclude` entry, and never stops an
 `include` entry from matching.
 

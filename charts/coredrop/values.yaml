@@ -93,8 +93,9 @@ capture:
   # when it matches an `include` entry (or `include` is empty) and no
   # `exclude` entry. A filtered crash is not read: no core, no snapshot, no
   # manifest, no Event; it is only logged. A filter on namespace,
-  # pod, container or image runs crictl before the core is read; when crictl
-  # fails, the crash is captured.
+  # pod, container or image runs crictl before the core is read, with a
+  # timeout of `crictlTimeoutSeconds` but 10 s at most; when crictl fails,
+  # the crash is captured.
   filter:
     # -- Capture only crashes that match one of these entries; empty captures all. Example: `[{namespace: "team-*"}]`.
     include: []

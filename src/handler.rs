@@ -9,7 +9,7 @@
 //!    reaps the PID; must complete while the kernel waits.
 //! 2. Capture filter - drop a crash the filter (see [`crate::filter`]) does
 //!    not keep. A filter on namespace, pod, container or image runs the
-//!    crictl enrichment of step 4 here, before the drain.
+//!    crictl enrichment of step 5 here, before the drain.
 //! 3. Core drain - stream stdin through zstd into the capture's spool bundle.
 //!    A core that is not kept is not read. Then release the kernel's pipe:
 //!    the kernel reaps the crashed process and frees its `core_pipe_limit`
@@ -192,9 +192,14 @@ pub async fn run(
     // enrichment below does not run it a second time.
     let exe_path = args.exe.replace('!', "/");
     let early_info = match &identity {
-        Some(id) if config.filter.needs_crictl() => {
-            Some(crictl::inspect(&id.container_id, config).await)
-        }
+        Some(id) if config.filter.needs_crictl() => Some(
+            crictl::inspect_with_timeout(
+                &id.container_id,
+                config,
+                config.pre_drain_crictl_timeout_secs(),
+            )
+            .await,
+        ),
         _ => None,
     };
     let filtered = identity.is_some() && {

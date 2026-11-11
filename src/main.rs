@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use object_store::ObjectStore;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{error, info, warn};
@@ -41,20 +41,28 @@ const DEFAULT_SHUTDOWN_FLUSH_SECS: u64 = 25;
 /// termination grace period leaves after the flush.
 const LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// `coredrop` daemon config. Every knob is a flag with an env-var fallback.
-/// Secrets (store creds) stay env-only - never flags (leak via `ps`/cmdline).
-/// The kernel-exec'd `capture` subcommand reads the daemon-written hostPath
-/// config file (see `main`), not these flags.
+/// `coredrop` daemon config. Every knob is a flag with an env-var fallback,
+/// and `--config` names a YAML file that sets the same knobs (see
+/// [`DaemonArgs::load`]). Secrets
+/// (store creds) stay env-only - never flags (leak via `ps`/cmdline) and
+/// never the file (a `ConfigMap` in the chart). The kernel-exec'd `capture` subcommand reads
+/// the daemon-written hostPath config file (see `main`), not these flags.
 #[derive(Debug, Parser)]
 #[command(name = "coredrop", version, about)]
 struct DaemonArgs {
+    /// YAML config file. Its keys are the long flag names without `--`, for
+    /// example `max-core-size: 2Gi`. A flag or its env var wins over the
+    /// file.
+    #[arg(long, env = "CAPTURE_CONFIG_FILE", value_name = "FILE")]
+    config: Option<PathBuf>,
+
     /// Host path the kernel exec's as the `core_pattern` handler.
     #[arg(long, env = "CAPTURE_HANDLER_PATH", default_value = coredrop::DEFAULT_HANDLER_PATH)]
     handler_path: PathBuf,
 
     /// hostPath the daemon serializes the handler config to.
     #[arg(long, env = "CAPTURE_CONFIG_PATH", default_value = coredrop::config::DEFAULT_CONFIG_PATH)]
-    config_path: PathBuf,
+    handler_config_path: PathBuf,
 
     /// Cluster name - the first path segment of the object key.
     #[arg(long, env = "CAPTURE_CLUSTER", default_value = coredrop::config::DEFAULT_CLUSTER)]
@@ -139,9 +147,10 @@ struct DaemonArgs {
     crictl_timeout_secs: u64,
 
     /// Which crashes the handler keeps, as JSON:
-    /// `{"include":[{...}],"exclude":[{...}]}`. Each entry holds glob
-    /// patterns for `namespace`, `pod`, `container`, `image` and `exe`; all
-    /// of an entry's patterns must match. Empty keeps every crash.
+    /// `{"include":[{...}],"exclude":[{...}]}`; in the config file, a YAML
+    /// mapping. Each entry holds glob patterns for `namespace`, `pod`,
+    /// `container`, `image` and `exe`; all of an entry's patterns must match.
+    /// Empty keeps every crash.
     #[arg(long, env = "CAPTURE_FILTER", default_value = "", value_name = "JSON", value_parser = CaptureFilter::parse)]
     capture_filter: CaptureFilter,
 
@@ -180,6 +189,61 @@ struct DaemonArgs {
     metrics_addr: MetricsAddr,
 }
 
+/// Flags the config file cannot set.
+const FILE_ONLY_FLAGS: [&str; 3] = ["config", "help", "version"];
+
+/// Whether `arg` accepts `value`. Checked before the value becomes a default:
+/// clap checks defaults only in debug builds, and then with a panic.
+fn check_file_value(arg: &clap::Arg, value: &str) -> Result<(), String> {
+    if !arg.get_action().takes_values() {
+        return match value {
+            "true" | "false" => Ok(()),
+            _ => Err(format!("{value:?} is not true or false")),
+        };
+    }
+    let long = arg.get_long().unwrap_or_default();
+    clap::Command::new("coredrop")
+        .no_binary_name(true)
+        .arg(arg.clone())
+        .try_get_matches_from([format!("--{long}"), value.to_string()])
+        .map(drop)
+        .map_err(|e| {
+            let msg = e.to_string();
+            let first = msg.lines().next().unwrap_or_default();
+            first.trim_start_matches("error: ").to_string()
+        })
+}
+
+/// The `key: value` pairs of a config file, each value as its flag would
+/// take it. A list or mapping (`capture-filter`) becomes JSON; a `null`
+/// value leaves the default. An empty file sets nothing.
+fn config_file_values(text: &str) -> Result<Vec<(String, String)>, String> {
+    use serde_norway::Value;
+    let mapping = match serde_norway::from_str::<Value>(text).map_err(|e| e.to_string())? {
+        Value::Null => return Ok(Vec::new()),
+        Value::Mapping(mapping) => mapping,
+        _ => return Err("the top level must be a mapping of flag names to values".into()),
+    };
+    let mut values = Vec::new();
+    for (key, value) in mapping {
+        let Value::String(key) = key else {
+            return Err(format!("key {key:?} is not a string"));
+        };
+        let value = match value {
+            Value::Null => continue,
+            Value::String(s) => s,
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::Sequence(_) | Value::Mapping(_) => {
+                serde_json::to_string(&value).map_err(|e| format!("`{key}`: {e}"))?
+            }
+            Value::Tagged(_) => return Err(format!("`{key}`: YAML tags are not supported")),
+        };
+        values.push((key, value));
+    }
+    Ok(values)
+}
+
 /// `--metrics-addr`: the endpoint's address; `None` = no endpoint. A newtype,
 /// because clap reads an `Option` field as "flag may be absent".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +259,48 @@ fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
 }
 
 impl DaemonArgs {
+    /// Parse `argv` (program name first) and the env. With `--config`, the
+    /// file's values replace the built-in defaults, so the order is: flag,
+    /// env var, file, built-in default.
+    ///
+    /// # Errors
+    ///
+    /// A clap error for a bad flag, an unreadable or invalid file, an
+    /// unknown key, or a value its flag does not accept. `--help` and
+    /// `--version` also come back as a clap error, which prints them.
+    fn load<I, T>(argv: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString>,
+    {
+        let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+        let first = Self::try_parse_from(&argv)?;
+        let Some(path) = first.config else {
+            return Ok(first);
+        };
+        let file_error = |msg: String| {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                format!("config file {}: {msg}\n", path.display()),
+            )
+        };
+        let text = std::fs::read_to_string(&path).map_err(|e| file_error(e.to_string()))?;
+        let mut cmd = Self::command();
+        for (key, value) in config_file_values(&text).map_err(file_error)? {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| {
+                    a.get_long() == Some(key.as_str()) && !FILE_ONLY_FLAGS.contains(&key.as_str())
+                })
+                .ok_or_else(|| file_error(format!("unknown key `{key}`")))?;
+            check_file_value(arg, &value).map_err(|e| file_error(format!("`{key}`: {e}")))?;
+            let id = arg.get_id().clone();
+            cmd = cmd.mut_arg(id, |a| a.default_value(value));
+        }
+        let matches = cmd.try_get_matches_from(&argv)?;
+        Self::from_arg_matches(&matches)
+    }
+
     /// The object store the daemon uploads to, built from `--store-url` and
     /// the store env vars. Only the daemon holds store credentials; the
     /// handler learns only whether there is a store to spool for. `None`
@@ -247,8 +353,10 @@ impl DaemonArgs {
             spool_dir: self.spool_dir.clone(),
             spool_max_bytes: self.spool_max_bytes,
             spool_min_free_percent: self.spool_min_free_percent,
-            rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
-            event_socket_path: Some(coredrop::config::event_socket_path_for(&self.config_path)),
+            rate_state_path: coredrop::config::rate_state_path_for(&self.handler_config_path),
+            event_socket_path: Some(coredrop::config::event_socket_path_for(
+                &self.handler_config_path,
+            )),
             filter: self.capture_filter.clone(),
         }
     }
@@ -269,12 +377,10 @@ async fn main() -> Result<()> {
     // before the daemon's flag parsing.
     // `args_os`, not `args`: `args` panics on a non-UTF-8 argument, and `%E`
     // is a file name the crashing workload controls.
-    let mut argv = std::env::args_os();
-    let _bin = argv.next();
-    match argv.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match argv.get(1).and_then(|a| a.to_str()) {
         Some("capture") => {
-            let rest: Vec<std::ffi::OsString> = argv.collect();
-            let capture_args = CaptureArgs::parse(&rest)?;
+            let capture_args = CaptureArgs::parse(&argv[2..])?;
             // The kernel exec's with a clean environment, so read the daemon-written
             // hostPath config. Without it, the defaults store nothing.
             let config_path =
@@ -282,17 +388,18 @@ async fn main() -> Result<()> {
             let config = HandlerConfig::read(&config_path).unwrap_or_default();
             run_handler(capture_args, &config, KernelPipe::stdin()).await
         }
-        // Run by the readiness/liveness probes. Reads the same env the daemon
-        // container is configured with; the error is the probe's failure reason.
-        Some("check") => coredrop::health::check(
-            &env_path("CAPTURE_HANDLER_PATH", coredrop::DEFAULT_HANDLER_PATH),
-            &env_path("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH),
-            &env_path(
-                "CAPTURE_CORE_PATTERN_PATH",
-                coredrop::core_pattern::CORE_PATTERN_PATH,
-            ),
-        ),
-        _ => run_daemon(DaemonArgs::parse()).await,
+        // Run by the readiness/liveness probes, with the daemon's flags (in
+        // the chart, `--config`); the error is the probe's failure reason.
+        Some("check") => {
+            let daemon = DaemonArgs::load(argv.iter().take(1).chain(&argv[2..]).cloned())
+                .unwrap_or_else(|e| e.exit());
+            coredrop::health::check(
+                &daemon.handler_path,
+                &daemon.handler_config_path,
+                &daemon.core_pattern_path,
+            )
+        }
+        _ => run_daemon(DaemonArgs::load(argv).unwrap_or_else(|e| e.exit())).await,
     }
 }
 
@@ -305,7 +412,7 @@ fn env_path(key: &str, default: &str) -> PathBuf {
 async fn run_daemon(args: DaemonArgs) -> Result<()> {
     info!(
         handler = %args.handler_path.display(),
-        config = %args.config_path.display(),
+        config = %args.handler_config_path.display(),
         cluster = %args.cluster,
         "coredrop starting"
     );
@@ -348,7 +455,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     // only ever gets a path the daemon is listening on rather than one
     // it would send datagrams into the void. It is bound even with
     // --no-events: the daemon logs every capture it receives there.
-    let socket_path = coredrop::config::event_socket_path_for(&args.config_path);
+    let socket_path = coredrop::config::event_socket_path_for(&args.handler_config_path);
     let events_socket = match coredrop::k8s_events::bind_socket(&socket_path) {
         Ok(socket) => {
             info!(path = %socket_path.display(), "capture event socket bound");
@@ -362,7 +469,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         }
     };
 
-    let config_path = &args.config_path;
+    let config_path = &args.handler_config_path;
 
     if let Err(e) = config.write(config_path) {
         error!(error = %e, path = %config_path.display(), "failed to write handler config; exiting for restart");
@@ -573,7 +680,8 @@ mod tests {
     fn args(config_path: &Path, pattern: &Path, pipe: &Path) -> DaemonArgs {
         DaemonArgs {
             handler_path: "/opt/coredrop/bin/coredrop".into(),
-            config_path: config_path.to_path_buf(),
+            config: None,
+            handler_config_path: config_path.to_path_buf(),
             cluster: "test".into(),
             no_redact: false,
             proc_root: "/proc".into(),
@@ -616,6 +724,96 @@ mod tests {
             MetricsAddr(Some("127.0.0.1:9000".parse().unwrap()))
         );
         assert_eq!(parse(&["coredrop", "--metrics-addr="]), MetricsAddr(None));
+    }
+
+    /// Writes `yaml` to a temp `config.yaml` and loads it with `flags`.
+    fn load_with_file(yaml: &str, flags: &[&str]) -> Result<DaemonArgs, clap::Error> {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let mut argv = vec![
+            "coredrop".to_string(),
+            "--config".into(),
+            path.display().to_string(),
+        ];
+        argv.extend(flags.iter().map(ToString::to_string));
+        DaemonArgs::load(argv)
+    }
+
+    #[test]
+    fn config_file_sets_the_flags() {
+        let args = load_with_file(
+            "cluster: prod\n\
+             max-core-size: 1Gi\n\
+             max-cores-per-hour: 7\n\
+             no-redact: true\n\
+             store-url: s3://bucket\n\
+             metrics-addr: \"\"\n\
+             capture-filter:\n  exclude:\n    - namespace: kube-system\n",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(args.cluster, "prod");
+        assert_eq!(args.max_core_bytes, 1 << 30);
+        assert_eq!(args.max_cores_per_hour, 7);
+        assert!(args.no_redact);
+        assert_eq!(args.store_url.as_deref(), Some("s3://bucket"));
+        assert_eq!(args.metrics_addr, MetricsAddr(None));
+        assert_eq!(
+            args.capture_filter,
+            CaptureFilter::parse(r#"{"exclude":[{"namespace":"kube-system"}]}"#).unwrap()
+        );
+        // Keys the file leaves out keep their built-in default.
+        assert_eq!(
+            args.spool_dir,
+            PathBuf::from(coredrop::spool::DEFAULT_SPOOL_DIR)
+        );
+    }
+
+    #[test]
+    fn a_flag_wins_over_the_config_file() {
+        let args = load_with_file(
+            "cluster: prod\nmax-cores-per-hour: 7\n",
+            &["--cluster", "dev"],
+        )
+        .unwrap();
+        assert_eq!(args.cluster, "dev");
+        assert_eq!(args.max_cores_per_hour, 7);
+    }
+
+    #[test]
+    fn an_empty_config_file_or_a_null_value_keeps_the_defaults() {
+        for yaml in ["", "# nothing\n", "cluster: null\n"] {
+            let args = load_with_file(yaml, &[]).unwrap();
+            assert_eq!(args.cluster, coredrop::config::DEFAULT_CLUSTER, "{yaml:?}");
+        }
+    }
+
+    #[test]
+    fn config_file_errors_name_the_problem() {
+        for (yaml, want) in [
+            ("clusters: prod\n", "unknown key `clusters`"),
+            ("config: /other.yaml\n", "unknown key `config`"),
+            ("help: true\n", "unknown key `help`"),
+            ("max-cores-per-hour: many\n", "`max-cores-per-hour`"),
+            ("max-core-size: 2Zi\n", "`max-core-size`"),
+            ("spool-min-free-percent: 101\n", "`spool-min-free-percent`"),
+            ("no-redact: yes please\n", "`no-redact`"),
+            ("capture-filter:\n  exclude: [{}]\n", "`capture-filter`"),
+            ("- cluster\n", "top level must be a mapping"),
+            ("cluster: [\n", "config file"),
+        ] {
+            let err = load_with_file(yaml, &[]).unwrap_err().to_string();
+            assert!(err.contains(want), "{yaml:?}: {err}");
+            assert!(err.contains("config.yaml"), "{yaml:?}: {err}");
+        }
+        let missing = DaemonArgs::load(["coredrop", "--config", "/nonexistent/config.yaml"]);
+        assert!(
+            missing
+                .unwrap_err()
+                .to_string()
+                .contains("/nonexistent/config.yaml")
+        );
     }
 
     #[test]

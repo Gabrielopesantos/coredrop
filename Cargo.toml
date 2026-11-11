@@ -29,6 +29,8 @@ tokio = { version = "1", features = [
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The daemon's config file (YAML); maintained fork of serde_yaml
+serde_norway = "0.9.42"
 
 # In-memory tar of the pre-reap /proc snapshot
 tar = "0.4"
@@ -39,8 +41,9 @@ async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 sha2 = "0.11"
 url = "2"
 
-# CLI config: flags with env-var fallback; secrets (store creds) stay env-only
-clap = { version = "4", features = ["derive", "env"] }
+# CLI config: flags, with config-file values as their defaults. `string`
+# lets those defaults be built at runtime. Secrets (store creds) stay env-only.
+clap = { version = "4", features = ["derive", "env", "string"] }
 
 # Timestamp formatting in manifest (RFC3339)
 chrono = { version = "0.4", default-features = false, features = ["std"] }

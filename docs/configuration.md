@@ -1,6 +1,7 @@
 # Configuration
 
-Every knob is a CLI flag with an env-var fallback (secrets are env-only).
+Every knob is a CLI flag with an env-var fallback, and can also be set in a
+YAML config file (see [Config file](#config-file)). Secrets are env-only.
 Sizes take a Kubernetes quantity: a byte count, or a whole number with a
 binary (`Ki`, `Mi`, `Gi`, ...) or decimal (`k`, `M`, `G`, ...) suffix.
 For the Helm values that set these flags, see the
@@ -8,6 +9,7 @@ For the Helm values that set these flags, see the
 
 | Flag | Env | Default | Purpose |
 | --- | --- | --- | --- |
+| `--config` | `CAPTURE_CONFIG_FILE` | unset | YAML config file that sets the other flags |
 | `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
 | `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = observe-only: crashes are logged and reported, no cores are kept |
 | `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
@@ -21,12 +23,47 @@ For the Helm values that set these flags, see the
 | `--upload-timeout-secs` | `CAPTURE_UPLOAD_TIMEOUT_SECS` | 600 | Time limit for one upload attempt of one capture; 0 = no limit |
 | `--shutdown-flush-secs` | `CAPTURE_SHUTDOWN_FLUSH_SECS` | 25 | Time the daemon keeps uploading after SIGTERM |
 | `--crictl-timeout-secs` | `CRICTL_TIMEOUT_SECS` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
-| `--capture-filter` | `CAPTURE_FILTER` | empty | JSON include/exclude lists of crashes to capture; empty = all. See [Capture filter](#capture-filter) |
+| `--capture-filter` | `CAPTURE_FILTER` | empty | JSON (in the config file, YAML) include/exclude lists of crashes to capture; empty = all. See [Capture filter](#capture-filter) |
 | `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
 | `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
 | `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture; captures are still logged |
 | `--metrics-addr` | `CAPTURE_METRICS_ADDR` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |
+
+## Config file
+
+`--config <file>` reads a YAML mapping. Each key is a long flag name without
+`--`, and each value is what that flag takes. `capture-filter` takes a YAML
+mapping instead of JSON. A `null` value keeps the default. The daemon stops at
+startup on an unknown key or a bad value.
+
+```yaml
+cluster: prod
+store-url: s3://crash-artifacts
+max-core-size: 2Gi
+max-cores-per-hour: 3
+no-events: false
+capture-filter:
+  exclude:
+    - namespace: kube-system
+```
+
+A value comes from the first of these that sets it:
+
+```
+flag on the command line
+  -> env var
+    -> config file
+      -> built-in default
+```
+
+The daemon reads the file once, at startup. `coredrop check` (the probes)
+takes the same flags, so it finds the same paths. The Helm chart renders
+every setting into a ConfigMap mounted at `/etc/coredrop/config.yaml`, and a
+`checksum/config` pod annotation restarts the daemons when it changes. Env
+on the pod holds only `RUST_LOG`, `NODE_NAME` (downward API) and the
+object-store client options and credentials. Do not put credentials in the
+file: anyone who can read the namespace can read a ConfigMap.
 
 ## Observe-only mode
 

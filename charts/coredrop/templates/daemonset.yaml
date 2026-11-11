@@ -17,12 +17,15 @@ spec:
       {{- include "coredrop.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- if .Values.metrics.enabled }}
       annotations:
+        # A config change rolls the DaemonSet: the daemon reads the file
+        # only at startup.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.enabled }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.metrics.port | quote }}
         prometheus.io/path: /metrics
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "coredrop.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
@@ -71,6 +74,9 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          # Every daemon setting is in the config file (configmap.yaml); env
+          # holds only what the file must not or cannot hold.
+          args: ["--config", "/etc/coredrop/config.yaml"]
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
@@ -79,75 +85,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # corePattern: how the kernel is wired to the handler.
-            - name: CAPTURE_HANDLER_PATH
-              value: "{{ .Values.corePattern.hostBinDir }}/coredrop"
-            - name: CAPTURE_CONFIG_PATH
-              value: "{{ .Values.corePattern.hostRunDir }}/handler.json"
-            - name: CAPTURE_PIPE_LIMIT
-              value: {{ .Values.corePattern.pipeLimit | quote }}
-            # The node's sysctl files, bind-mounted writable (see volumeMounts).
-            - name: CAPTURE_CORE_PATTERN_PATH
-              value: "/host/sysctl/core_pattern"
-            - name: CAPTURE_CORE_PIPE_LIMIT_PATH
-              value: "/host/sysctl/core_pipe_limit"
-            # capture: what happens once the handler captures a crash.
-            - name: CAPTURE_CLUSTER
-              value: {{ .Values.capture.cluster | quote }}
-            {{- if .Values.capture.noRedact }}
-            - name: CAPTURE_NO_REDACT
-              value: "true"
-            {{- end }}
-            - name: CAPTURE_MAX_CORE_SIZE
-              value: {{ include "coredrop.size" (dict "name" "capture.maxCoreSize" "value" .Values.capture.maxCoreSize) | quote }}
-            - name: CAPTURE_MAX_CORES_PER_HOUR
-              value: {{ .Values.capture.maxCoresPerHour | quote }}
-            - name: CAPTURE_DRAIN_DEADLINE_SECS
-              value: {{ .Values.capture.drainDeadlineSeconds | quote }}
-            - name: CRICTL_TIMEOUT_SECS
-              value: {{ .Values.capture.crictlTimeoutSeconds | quote }}
-            {{- with .Values.capture.filter }}
-            {{- if or .include .exclude }}
-            - name: CAPTURE_FILTER
-              value: {{ dict "include" (.include | default list) "exclude" (.exclude | default list) | toJson | quote }}
-            {{- end }}
-            {{- end }}
+            # Object-store client options; the client reads them from env.
             {{- if .Values.capture.objectStore.url }}
-            - name: CAPTURE_STORE_URL
-              value: {{ .Values.capture.objectStore.url | quote }}
             {{- range $key, $value := .Values.capture.objectStore.config }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            {{- end }}
-            # spool + upload: the handler writes the spool, the daemon uploads it.
-            - name: CAPTURE_SPOOL_DIR
-              value: {{ .Values.spool.hostDir | quote }}
-            - name: CAPTURE_SPOOL_MAX_SIZE
-              value: {{ include "coredrop.size" (dict "name" "spool.maxSize" "value" .Values.spool.maxSize) | quote }}
-            - name: CAPTURE_SPOOL_MIN_FREE_PERCENT
-              value: {{ .Values.spool.minFreePercent | quote }}
-            - name: CAPTURE_SPOOL_MAX_AGE_SECS
-              value: {{ .Values.spool.maxAgeSeconds | int64 | quote }}
-            - name: CAPTURE_UPLOAD_CONCURRENCY
-              value: {{ .Values.upload.concurrency | quote }}
-            - name: CAPTURE_UPLOAD_TIMEOUT_SECS
-              value: {{ .Values.upload.timeoutSeconds | quote }}
-            - name: CAPTURE_SHUTDOWN_FLUSH_SECS
-              value: {{ .Values.upload.shutdownFlushSeconds | quote }}
-            {{- if not .Values.events.enabled }}
-            - name: CAPTURE_NO_EVENTS
-              value: "true"
-            {{- end }}
-            # metrics: the Prometheus endpoint; empty turns it off.
-            - name: CAPTURE_METRICS_ADDR
-              value: {{ ternary (printf "0.0.0.0:%v" .Values.metrics.port) "" .Values.metrics.enabled | quote }}
-            # cri: post-drain container identity enrichment.
-            - name: CRICTL_PATH
-              value: {{ .Values.cri.crictlPath | quote }}
-            {{- with .Values.cri.runtimeEndpoint }}
-            - name: CONTAINER_RUNTIME_ENDPOINT
-              value: {{ . | quote }}
             {{- end }}
           {{- if and .Values.capture.objectStore.url .Values.capture.objectStore.credentials }}
           envFrom:
@@ -165,18 +108,21 @@ spec:
           # bound.
           readinessProbe:
             exec:
-              command: ["/bin/coredrop", "check"]
+              command: ["/bin/coredrop", "check", "--config", "/etc/coredrop/config.yaml"]
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
             exec:
-              command: ["/bin/coredrop", "check"]
+              command: ["/bin/coredrop", "check", "--config", "/etc/coredrop/config.yaml"]
             initialDelaySeconds: 5
             periodSeconds: 30
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            - name: config
+              mountPath: /etc/coredrop
+              readOnly: true
             # hostPath for the daemon-written handler config and the handler binary
             # install dir (the handler reads the config path from here).
             - name: host-run
@@ -199,6 +145,9 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
+        - name: config
+          configMap:
+            name: {{ include "coredrop.fullname" . }}-config
         - name: host-bin
           hostPath:
             path: {{ .Values.corePattern.hostBinDir }}

@@ -22,12 +22,32 @@ provided by the repo's Nix dev shell (`nix develop`).
 ./up.sh         # VM -> build images -> MinIO -> helm install -> crash workload
 ./smoke.sh      # live capture checks; coredrop stays installed
 ./lifecycle.sh  # clean + unclean uninstall checks; reinstalls coredrop at the end
+./monitoring.sh # Prometheus + Grafana with the coredrop dashboard on localhost:3000
 ./down.sh       # remove release + namespaces, keep the VM (fast re-up)
 DELETE_CLUSTER=1 ./down.sh   # also delete the lima VM
 ```
 
 Both tests can run any number of times, in any order. Each one leaves
 coredrop installed.
+
+## Monitoring stack
+
+`./monitoring.sh` installs kube-prometheus-stack (Prometheus, the operator
+and Grafana only) into the `monitoring` namespace. It reinstalls coredrop
+with its `PodMonitor`, loads `alerts/coredrop.rules.yaml` as a
+`PrometheusRule` and `dashboards/coredrop.json` into Grafana as a sidecar
+ConfigMap, then forwards
+Grafana to `http://localhost:3000`. Grafana has no login (every visitor is
+an anonymous Admin), and its home page is the coredrop dashboard. Run
+`./smoke.sh` in another shell to make captures for the dashboard. Ctrl-C
+stops the port-forward only; run `./monitoring.sh` again to open it. It
+asserts nothing. There is no Alertmanager: see the alerts on the Prometheus
+Alerts page (`kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090`).
+
+When the `PodMonitor` CRD is in the cluster, `install_coredrop` always
+enables the `PodMonitor`, so the reinstalls in `smoke.sh`
+and `lifecycle.sh` keep them. The stack needs the images from the internet
+and about 1 GiB of the VM's memory.
 
 ## What the smoke test asserts
 
@@ -80,6 +100,8 @@ coredrop installed.
 | `workloads/segfault.{c,yaml}` | Demo workload that faults on a short loop |
 | `smoke.sh` | The live capture assertions, made directly against the bucket via `mc` |
 | `lifecycle.sh` | The uninstall assertions, made on the node |
+| `monitoring.sh` | Installs kube-prometheus-stack and forwards Grafana to the host |
+| `helm-values/monitoring.yaml` | kube-prometheus-stack overlay: no Alertmanager or cluster scrapes, all `PodMonitor`s and `PrometheusRule`s, dashboard sidecar, Grafana without login |
 
 ## Gotchas baked into the scripts
 

@@ -16,6 +16,15 @@ spec:
   podMetricsEndpoints:
     - port: metrics
       path: /metrics
+      # A daemon pod runs on each node: label its series with the node, and
+      # with the cluster, so one dashboard can show several deployments.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        {{- with .Values.capture.cluster }}
+        - targetLabel: cluster
+          replacement: {{ . | quote }}
+        {{- end }}
       {{- with .Values.metrics.podMonitor.interval }}
       interval: {{ . }}
       {{- end }}

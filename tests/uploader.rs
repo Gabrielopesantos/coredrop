@@ -179,6 +179,10 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
         "the failed attempts are counted: {metrics}"
     );
     assert!(metrics.contains("coredrop_spool_bundles 1"), "{metrics}");
+    assert!(
+        metrics.contains("coredrop_upload_duration_seconds_count 0"),
+        "a failed upload has no duration: {metrics}"
+    );
     let keys = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
     let inner: Arc<dyn ObjectStore> = inner;
     assert!(
@@ -193,6 +197,10 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
     assert_eq!(reports[0].outcome, Outcome::Uploaded);
     assert!(
         metrics.contains("coredrop_upload_attempts_total{result=\"ok\"} 1"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("coredrop_upload_duration_seconds_count 1"),
         "{metrics}"
     );
     assert!(ready(&config).is_empty());
@@ -221,6 +229,29 @@ async fn retries_a_failed_bundle_after_backoff() {
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].outcome, Outcome::Uploaded);
     assert!(ready(&config).is_empty());
+}
+
+/// The spool age gauge shows the oldest capture that waits for upload.
+#[tokio::test]
+async fn spool_age_is_the_age_of_the_oldest_waiting_capture() {
+    let tmp = TempDir::new().unwrap();
+    let config = base_config(tmp.path());
+    // Two crashes, 10 and 2 minutes ago; the max age is one hour.
+    for (pid, age) in [(5004, 600), (5005, 120)] {
+        write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+        capture(&config, pid, now_ts() - age, b"core during an outage").await;
+    }
+
+    let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let (_, metrics) = flush_metered(&config, store, settings(), Duration::from_millis(200)).await;
+
+    assert!(metrics.contains("coredrop_spool_bundles 2"), "{metrics}");
+    let age: i64 = metrics
+        .lines()
+        .find_map(|l| l.strip_prefix("coredrop_spool_oldest_bundle_age_seconds "))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("no age gauge in:\n{metrics}"));
+    assert!((600..660).contains(&age), "age {age}");
 }
 
 /// A bundle past the max age that still fails is deleted and reported as a

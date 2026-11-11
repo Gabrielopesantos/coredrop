@@ -2,11 +2,13 @@
 //! handler.
 //!
 //! The daemon writes `/proc/sys/kernel/core_pattern` at startup and restores
-//! the previous value on shutdown. It also raises `core_pipe_limit`: with the
-//! default `0` the kernel does not wait for the pipe handler and may reap
-//! the faulting process before the handler reads `/proc/<pid>` - which would
-//! defeat the pre-reap snapshot. A non-zero limit bounds how many crashes may
-//! have `/proc/<pid>` held open for their handler at once.
+//! the previous value on shutdown. While it runs, it checks that the pattern
+//! still routes to the handler: another tool (systemd-coredump, apport) can
+//! overwrite it, and then captures stop. It also raises `core_pipe_limit`:
+//! with the default `0` the kernel does not wait for the pipe handler and may
+//! reap the faulting process before the handler reads `/proc/<pid>` - which
+//! would defeat the pre-reap snapshot. A non-zero limit bounds how many
+//! crashes may have `/proc/<pid>` held open for their handler at once.
 //!
 //! The sysctl paths are injectable so the save -> set -> restore logic is
 //! unit-testable against temp files instead of the real `/proc/sys`.
@@ -38,6 +40,7 @@ pub fn build_pattern(handler_path: &Path) -> String {
 /// Installs our `core_pattern` + `core_pipe_limit` on construction and
 /// restores the prior values on drop.
 pub struct CorePatternGuard {
+    pattern: String,
     pattern_path: PathBuf,
     pipe_limit_path: PathBuf,
     prev_pattern: String,
@@ -71,18 +74,30 @@ impl CorePatternGuard {
         }
         let prev_pipe_limit = std::fs::read_to_string(&pipe_limit_path).unwrap_or_default();
 
-        std::fs::write(&pattern_path, build_pattern(handler_path))
+        let pattern = build_pattern(handler_path);
+        std::fs::write(&pattern_path, &pattern)
             .with_context(|| format!("writing {}", pattern_path.display()))?;
         if let Err(e) = std::fs::write(&pipe_limit_path, pipe_limit.to_string()) {
             warn!(error = %e, "could not raise core_pipe_limit; /proc snapshot may race the reaper");
         }
 
         Ok(Self {
+            pattern,
             pattern_path,
             pipe_limit_path,
             prev_pattern,
             prev_pipe_limit,
         })
+    }
+
+    /// A check of the installed pattern that a task can own. The guard
+    /// stays the only owner of the restore.
+    #[must_use]
+    pub fn checker(&self) -> CorePatternCheck {
+        CorePatternCheck {
+            pattern: self.pattern.clone(),
+            pattern_path: self.pattern_path.clone(),
+        }
     }
 
     /// Restore the previous `core_pattern`/pipe-limit sysctl values. A write
@@ -96,6 +111,28 @@ impl CorePatternGuard {
         {
             warn!(error = %e, "failed to restore core_pipe_limit");
         }
+    }
+}
+
+/// Checks that the `core_pattern` sysctl still routes to the handler.
+#[derive(Debug, Clone)]
+pub struct CorePatternCheck {
+    pattern: String,
+    pattern_path: PathBuf,
+}
+
+impl CorePatternCheck {
+    /// Read the `core_pattern` sysctl now. `Ok(None)` when it routes to the
+    /// handler, else `Ok(Some(value))` with the value that replaced it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the sysctl cannot be read.
+    pub fn check(&self) -> Result<Option<String>> {
+        let current = std::fs::read_to_string(&self.pattern_path)
+            .with_context(|| format!("reading {}", self.pattern_path.display()))?;
+        let current = current.trim_end();
+        Ok((current != self.pattern).then(|| current.to_string()))
     }
 }
 
@@ -145,6 +182,33 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
         assert_eq!(std::fs::read_to_string(&pipe).unwrap(), "0\n");
+    }
+
+    #[test]
+    fn check_sees_another_tool_overwrite_the_pattern() {
+        let dir = TempDir::new().unwrap();
+        let pattern = dir.path().join("core_pattern");
+        let pipe = dir.path().join("core_pipe_limit");
+        std::fs::write(&pattern, "core\n").unwrap();
+        std::fs::write(&pipe, "0\n").unwrap();
+        let guard =
+            CorePatternGuard::install_at(Path::new("/h/coredrop"), 16, pattern.clone(), pipe)
+                .unwrap();
+        let guard = guard.checker();
+        assert_eq!(guard.check().unwrap(), None);
+
+        // The kernel shows the value with a trailing newline.
+        std::fs::write(&pattern, "|/usr/lib/systemd/systemd-coredump %P\n").unwrap();
+        assert_eq!(
+            guard.check().unwrap().as_deref(),
+            Some("|/usr/lib/systemd/systemd-coredump %P")
+        );
+
+        std::fs::write(&pattern, "|/h/coredrop capture %P %s %t %E\n").unwrap();
+        assert_eq!(guard.check().unwrap(), None);
+
+        std::fs::remove_file(&pattern).unwrap();
+        assert!(guard.check().is_err());
     }
 
     #[test]

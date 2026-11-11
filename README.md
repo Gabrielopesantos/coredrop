@@ -131,7 +131,7 @@ expire them with a bucket lifecycle policy.
 - [Configuration](docs/configuration.md) - flags, env vars, credentials.
 - [Capture log and Events](docs/capture-log-and-events.md) - log lines and
   Event reasons.
-- [Metrics](docs/metrics.md) - Prometheus metrics and example alerts.
+- [Metrics](docs/metrics.md) - Prometheus metrics, example alerts and the Grafana dashboard.
 - [Retrieving artifacts](docs/retrieving-artifacts.md) - S3, GCS and Azure
   commands.
 - [Helm chart](charts/coredrop/README.md) - values, spool, rate limit, health,

@@ -476,7 +476,7 @@ async fn complete(
     payload: &CaptureEventPayload,
 ) {
     log_capture(payload, Stage::Complete);
-    metrics.capture(payload.outcome);
+    metrics.capture_done(payload);
     handle_payload(client, aggregator, node, metrics, payload).await;
 }
 

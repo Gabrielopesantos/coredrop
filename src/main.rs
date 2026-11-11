@@ -25,7 +25,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use coredrop::config::HandlerConfig;
-use coredrop::core_pattern::CorePatternGuard;
+use coredrop::core_pattern::{CorePatternCheck, CorePatternGuard};
 use coredrop::handler::{CaptureArgs, KernelPipe, run as run_handler};
 use coredrop::metrics::Metrics;
 use coredrop::spool::Spool;
@@ -380,12 +380,9 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         }
     };
 
-    let node = args
-        .node_name
-        .clone()
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(coredrop::handler::node_hostname);
-    let metrics = start_metrics(args.metrics_addr.0).await;
+    let node = node_name(&args);
+    let metrics = start_metrics(args.metrics_addr.0, args.spool_max_bytes).await;
+    let pattern_check = tokio::spawn(check_core_pattern(guard.checker(), metrics.clone()));
     let wake = Arc::new(Notify::new());
     let (reports_tx, reports_rx) = mpsc::unbounded_channel();
     let (listener_stop_tx, listener_stop_rx) = oneshot::channel::<()>();
@@ -407,7 +404,9 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     info!("shutdown signal received");
 
     // Stop new captures first, then give the spool the rest of the grace
-    // period. Bundles not uploaded by then stay for the next daemon.
+    // period. Bundles not uploaded by then stay for the next daemon. The
+    // check stops before the restore, so the restore is not reported.
+    pattern_check.abort();
     drop(guard);
     if let Some(uploader) = uploader {
         let _ = stop_tx.send(());
@@ -419,11 +418,61 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
+/// The node name for k8s Events: `--node-name`, else the host name.
+fn node_name(args: &DaemonArgs) -> String {
+    args.node_name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(coredrop::handler::node_hostname)
+}
+
+/// How often the daemon checks that `core_pattern` still routes to the handler.
+const CORE_PATTERN_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Check `core_pattern` every [`CORE_PATTERN_CHECK_INTERVAL`] and set
+/// `coredrop_core_pattern_installed`. Logs when the state changes. It does not
+/// write the pattern back: two tools that each write it would fight.
+async fn check_core_pattern(check: CorePatternCheck, metrics: Arc<Metrics>) {
+    let mut interval = tokio::time::interval(CORE_PATTERN_CHECK_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut was_installed = true;
+    loop {
+        interval.tick().await;
+        let installed = match check.check() {
+            Ok(None) => true,
+            Ok(Some(current)) => {
+                if was_installed {
+                    warn!(
+                        core_pattern = current,
+                        "core_pattern no longer routes to the handler; captures stop until the daemon restarts"
+                    );
+                }
+                false
+            }
+            Err(e) => {
+                if was_installed {
+                    warn!(error = %format!("{e:#}"), "cannot read core_pattern; reporting it as not installed");
+                }
+                false
+            }
+        };
+        if installed && !was_installed {
+            info!("core_pattern routes to the handler again");
+        }
+        metrics.set_core_pattern_installed(installed);
+        was_installed = installed;
+    }
+}
+
 /// The daemon's metrics, served on `addr` when it is set. A bind failure is
 /// logged and the daemon runs on without the endpoint: capture must not
 /// depend on it. The endpoint runs until the runtime stops.
-async fn start_metrics(addr: Option<SocketAddr>) -> Arc<Metrics> {
+async fn start_metrics(addr: Option<SocketAddr>, spool_max_bytes: u64) -> Arc<Metrics> {
     let metrics = Arc::new(Metrics::new());
+    metrics.set_spool_max_bytes(spool_max_bytes);
+    // The daemon installs core_pattern before it starts the endpoint. The
+    // check task updates the gauge from then on.
+    metrics.set_core_pattern_installed(true);
     let Some(addr) = addr else {
         info!("metrics endpoint disabled (--metrics-addr is empty)");
         return metrics;

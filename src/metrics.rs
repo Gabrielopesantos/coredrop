@@ -2,12 +2,14 @@
 //!
 //! The kernel-exec'd handler lives for one crash, so it keeps no metrics.
 //! The daemon counts at the points every capture passes through: the event
-//! listener (final outcome, k8s Event posts) and the uploader (upload
-//! attempts, spool size). Labels hold bounded values only - never a pod,
+//! listener (final outcome, core sizes, k8s Event posts), the uploader
+//! (upload attempts and durations, spool size and age) and the
+//! `core_pattern` check. Labels hold bounded values only - never a pod,
 //! namespace or object key - so the series count stays fixed.
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
@@ -18,12 +20,13 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::Registry;
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
-use crate::events::Outcome;
+use crate::events::{CaptureEventPayload, Outcome};
 
 /// Default address of the `/metrics` endpoint.
 pub const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9464";
@@ -33,15 +36,28 @@ const OPENMETRICS_CONTENT_TYPE: &str = "application/openmetrics-text; version=1.
 type OutcomeLabel = [(&'static str, &'static str); 1];
 type ResultLabel = [(&'static str, &'static str); 1];
 
+/// Buckets of `coredrop_upload_duration_seconds`: a small core uploads in
+/// under a second, a 2 GiB core on a slow link in minutes.
+const UPLOAD_DURATION_BUCKETS: [f64; 11] = [
+    0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
+
 /// The daemon's metrics. One instance is shared by the listener, the
 /// uploader and the HTTP endpoint.
 pub struct Metrics {
     registry: Registry,
     captures: Family<OutcomeLabel, Counter>,
     upload_attempts: Family<ResultLabel, Counter>,
+    upload_duration: Histogram,
     bundles_expired: Counter,
     spool_bundles: Gauge,
     spool_bytes: Gauge,
+    spool_oldest_age: Gauge,
+    spool_max_bytes: Gauge,
+    core_bytes: Counter,
+    stored_bytes: Counter,
+    cores_truncated: Counter,
+    core_pattern_installed: Gauge,
     events_posted: Family<ResultLabel, Counter>,
     payloads_dropped: Counter,
 }
@@ -77,38 +93,65 @@ impl Metrics {
             upload_attempts.clone(),
         );
 
-        let bundles_expired = Counter::default();
+        let upload_duration = Histogram::new(UPLOAD_DURATION_BUCKETS);
         registry.register(
+            "upload_duration_seconds",
+            "Time to upload one spooled capture (core, proc snapshot and manifest)",
+            upload_duration.clone(),
+        );
+
+        let bundles_expired: Counter = register(
+            &mut registry,
             "bundles_expired",
             "Spooled captures deleted because they were past the spool max age",
-            bundles_expired.clone(),
         );
-
-        let spool_bundles = Gauge::default();
-        registry.register(
+        let spool_bundles: Gauge = register(
+            &mut registry,
             "spool_bundles",
             "Captures in the spool waiting for upload",
-            spool_bundles.clone(),
         );
-
-        let spool_bytes = Gauge::default();
-        registry.register(
-            "spool_bytes",
-            "Size of the spool in bytes",
-            spool_bytes.clone(),
+        let spool_bytes: Gauge =
+            register(&mut registry, "spool_bytes", "Size of the spool in bytes");
+        let spool_oldest_age: Gauge = register(
+            &mut registry,
+            "spool_oldest_bundle_age_seconds",
+            "Age of the oldest capture in the spool waiting for upload; 0 when there is none",
         );
-
+        let spool_max_bytes: Gauge = register(
+            &mut registry,
+            "spool_max_bytes",
+            "Size limit of the spool in bytes; 0 = no limit",
+        );
+        let core_bytes: Counter = register(
+            &mut registry,
+            "core_bytes",
+            "Uncompressed core bytes read from the kernel by done captures",
+        );
+        let stored_bytes: Counter = register(
+            &mut registry,
+            "stored_bytes",
+            "Compressed core bytes stored by done captures",
+        );
+        let cores_truncated: Counter = register(
+            &mut registry,
+            "cores_truncated",
+            "Done captures whose stored core is truncated (size cap, full spool or stream error)",
+        );
+        let core_pattern_installed: Gauge = register(
+            &mut registry,
+            "core_pattern_installed",
+            "1 when the node's core_pattern routes cores to the handler, else 0",
+        );
         registry.register(
             "events_posted",
             "Kubernetes Event create and patch requests, by result",
             events_posted.clone(),
         );
 
-        let payloads_dropped = Counter::default();
-        registry.register(
+        let payloads_dropped: Counter = register(
+            &mut registry,
             "event_payloads_dropped",
             "Capture-event datagrams the daemon could not parse",
-            payloads_dropped.clone(),
         );
 
         registry.register(
@@ -121,19 +164,32 @@ impl Metrics {
             registry,
             captures,
             upload_attempts,
+            upload_duration,
             bundles_expired,
             spool_bundles,
             spool_bytes,
+            spool_oldest_age,
+            spool_max_bytes,
+            core_bytes,
+            stored_bytes,
+            cores_truncated,
+            core_pattern_installed,
             events_posted,
             payloads_dropped,
         }
     }
 
-    /// Count a capture that is done.
-    pub fn capture(&self, outcome: Outcome) {
+    /// Count a capture that is done: its outcome, its core sizes and
+    /// whether its core is truncated.
+    pub fn capture_done(&self, payload: &CaptureEventPayload) {
         self.captures
-            .get_or_create(&[("outcome", outcome.as_str())])
+            .get_or_create(&[("outcome", payload.outcome.as_str())])
             .inc();
+        self.core_bytes.inc_by(payload.core_bytes);
+        self.stored_bytes.inc_by(payload.stored_bytes.unwrap_or(0));
+        if payload.truncated {
+            self.cores_truncated.inc();
+        }
     }
 
     /// Count one upload attempt of one spooled capture.
@@ -143,17 +199,36 @@ impl Metrics {
             .inc();
     }
 
+    /// Record the time to upload one spooled capture.
+    pub fn upload_duration(&self, duration: Duration) {
+        self.upload_duration.observe(duration.as_secs_f64());
+    }
+
     /// Count a spooled capture deleted past the spool max age.
     pub fn bundle_expired(&self) {
         self.bundles_expired.inc();
     }
 
-    /// Set the spool gauges.
-    pub fn set_spool(&self, bundles: usize, bytes: u64) {
+    /// Set the spool gauges. `oldest_age` is the age of the oldest capture
+    /// waiting for upload, zero when there is none.
+    pub fn set_spool(&self, bundles: usize, bytes: u64, oldest_age: Duration) {
         self.spool_bundles
             .set(i64::try_from(bundles).unwrap_or(i64::MAX));
         self.spool_bytes
             .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+        self.spool_oldest_age
+            .set(i64::try_from(oldest_age.as_secs()).unwrap_or(i64::MAX));
+    }
+
+    /// Set the spool size limit; `0` = no limit.
+    pub fn set_spool_max_bytes(&self, bytes: u64) {
+        self.spool_max_bytes
+            .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+    }
+
+    /// Set whether the node's `core_pattern` routes cores to the handler.
+    pub fn set_core_pattern_installed(&self, installed: bool) {
+        self.core_pattern_installed.set(i64::from(installed));
     }
 
     /// Count one k8s Event create or patch request.
@@ -176,6 +251,16 @@ impl Metrics {
         let _ = encode(&mut out, &self.registry);
         out
     }
+}
+
+/// Register a metric with no labels and return it.
+fn register<M>(registry: &mut Registry, name: &str, help: &str) -> M
+where
+    M: Default + Clone + prometheus_client::registry::Metric,
+{
+    let metric = M::default();
+    registry.register(name, help, metric.clone());
+    metric
 }
 
 fn result(ok: bool) -> &'static str {
@@ -239,6 +324,13 @@ mod tests {
             "coredrop_bundles_expired_total 0",
             "coredrop_spool_bundles 0",
             "coredrop_spool_bytes 0",
+            "coredrop_spool_oldest_bundle_age_seconds 0",
+            "coredrop_spool_max_bytes 0",
+            "coredrop_core_bytes_total 0",
+            "coredrop_stored_bytes_total 0",
+            "coredrop_cores_truncated_total 0",
+            "coredrop_core_pattern_installed 0",
+            "coredrop_upload_duration_seconds_count 0",
             "coredrop_events_posted_total{result=\"ok\"} 0",
             "coredrop_event_payloads_dropped_total 0",
         ] {
@@ -260,10 +352,34 @@ mod tests {
     #[test]
     fn counts_and_sets() {
         let metrics = Metrics::new();
-        metrics.capture(Outcome::Uploaded);
-        metrics.capture(Outcome::Uploaded);
+        let uploaded = CaptureEventPayload {
+            namespace: None,
+            pod_name: None,
+            pod_uid: None,
+            container_id: None,
+            container_name: None,
+            host_pid: 1,
+            exe: String::new(),
+            signal: 11,
+            signal_name: None,
+            outcome: Outcome::Uploaded,
+            manifest_key: None,
+            core_bytes: 1000,
+            stored_bytes: Some(100),
+            truncated: false,
+            error: None,
+            timestamp: 0,
+        };
+        metrics.capture_done(&uploaded);
+        metrics.capture_done(&CaptureEventPayload {
+            truncated: true,
+            ..uploaded.clone()
+        });
         metrics.upload_attempt(false);
-        metrics.set_spool(3, 4096);
+        metrics.upload_duration(Duration::from_millis(700));
+        metrics.set_spool(3, 4096, Duration::from_secs(90));
+        metrics.set_spool_max_bytes(1 << 30);
+        metrics.set_core_pattern_installed(true);
         let text = metrics.encode();
         assert!(
             text.contains("coredrop_captures_total{outcome=\"uploaded\"} 2"),
@@ -275,6 +391,19 @@ mod tests {
         );
         assert!(text.contains("coredrop_spool_bundles 3"), "{text}");
         assert!(text.contains("coredrop_spool_bytes 4096"), "{text}");
+        for line in [
+            "coredrop_core_bytes_total 2000",
+            "coredrop_stored_bytes_total 200",
+            "coredrop_cores_truncated_total 1",
+            "coredrop_spool_oldest_bundle_age_seconds 90",
+            "coredrop_spool_max_bytes 1073741824",
+            "coredrop_core_pattern_installed 1",
+            "coredrop_upload_duration_seconds_count 1",
+            "coredrop_upload_duration_seconds_bucket{le=\"1.0\"} 1",
+            "coredrop_upload_duration_seconds_bucket{le=\"0.5\"} 0",
+        ] {
+            assert!(text.contains(line), "missing {line:?} in:\n{text}");
+        }
     }
 
     #[tokio::test]

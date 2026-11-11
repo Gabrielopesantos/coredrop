@@ -100,8 +100,9 @@ struct Pending {
 
 /// The result of one attempt that did not fail the upload.
 struct Attempt {
-    /// The capture's final event, when this attempt uploaded the bundle.
-    report: Option<CaptureEventPayload>,
+    /// The capture's final event and the upload time, when this attempt
+    /// uploaded the bundle.
+    report: Option<(CaptureEventPayload, Duration)>,
     /// The result of deleting the bundle from the spool.
     deleted: Result<()>,
 }
@@ -184,9 +185,15 @@ impl Uploader {
     /// Track every bundle in `ready/`, forget bundles that are gone, delete
     /// stale bundles from `incoming/`, and update the spool gauges.
     fn scan(&self, pending: &mut BTreeMap<String, Pending>) {
-        let ready = list_names(&self.spool.ready_dir());
+        let ready_dir = self.spool.ready_dir();
+        let ready = list_names(&ready_dir);
+        let oldest = ready
+            .iter()
+            .filter_map(|name| bundle_age(&ready_dir, name))
+            .max()
+            .unwrap_or_default();
         self.metrics
-            .set_spool(ready.len(), self.spool.usage_bytes());
+            .set_spool(ready.len(), self.spool.usage_bytes(), oldest);
         let now = Instant::now();
         pending.retain(|name, p| p.in_flight || ready.contains(name));
         for name in ready {
@@ -226,7 +233,9 @@ impl Uploader {
                 let report = if uploaded {
                     None
                 } else {
-                    Some(upload_bundle(&store, &dir, deadline_at).await?)
+                    let started = Instant::now();
+                    let payload = upload_bundle(&store, &dir, deadline_at).await?;
+                    Some((payload, started.elapsed()))
                 };
                 let deleted = tokio::fs::remove_dir_all(&dir)
                     .await
@@ -241,8 +250,9 @@ impl Uploader {
     fn finish(&self, name: &str, result: Result<Attempt>, pending: &mut BTreeMap<String, Pending>) {
         match result {
             Ok(Attempt { report, deleted }) => {
-                if let Some(payload) = report {
+                if let Some((payload, took)) = report {
                     self.metrics.upload_attempt(true);
+                    self.metrics.upload_duration(took);
                     let _ = self.reports.send(payload);
                 }
                 let Err(e) = deleted else {

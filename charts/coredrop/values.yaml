@@ -147,6 +147,21 @@ events:
   # -- Post a k8s Event on the crashing pod per capture; `false` also skips the events RBAC.
   enabled: true
 
+# Prometheus metrics on the daemon pod: capture outcomes, upload attempts,
+# spool size, Event posts. Labels hold bounded values only, never pod names.
+metrics:
+  # -- Serve `/metrics` on the daemon pod and add the `prometheus.io/*` scrape annotations.
+  enabled: true
+  # -- Container port of the `/metrics` endpoint.
+  port: 9464
+  podMonitor:
+    # -- Render a Prometheus Operator `PodMonitor` for the daemon pods (needs the `monitoring.coreos.com` CRDs).
+    enabled: false
+    # -- Scrape interval; empty uses the Prometheus default.
+    interval: ""
+    # -- Extra labels on the `PodMonitor`, for a Prometheus `podMonitorSelector`.
+    labels: {}
+
 # -- `RUST_LOG` filter for the daemon.
 logLevel: info
 

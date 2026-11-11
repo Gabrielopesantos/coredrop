@@ -48,6 +48,12 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Prometheus `/metrics` endpoint. hyper, hyper-util and http-body-util are
+# already transitive via reqwest; only the server features are new.
+prometheus-client = "0.25"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
 
 # flock for the rate-limit state file, statvfs for the spool free-space check,
 # and dup2 to release the kernel's core pipe (already transitive via tar -> xattr)

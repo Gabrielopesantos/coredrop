@@ -43,3 +43,13 @@ jobs:
           git diff --exit-code charts/coredrop/README.md
       - name: helm lint
         run: nix develop -c helm lint charts/coredrop
+      # The optional PodMonitor must render too, the dashboard must be the
+      # output of its generator, and the alert rules must load.
+      - name: helm template (PodMonitor) + dashboard JSON
+        run: |
+          nix develop -c helm template coredrop charts/coredrop \
+            --set metrics.podMonitor.enabled=true >/dev/null
+          nix develop -c jq empty dashboards/coredrop.json
+          nix develop -c sh -c 'python3 dashboards/generate.py | diff -u dashboards/coredrop.json -'
+      - name: promtool check rules
+        run: nix develop -c promtool check rules alerts/coredrop.rules.yaml

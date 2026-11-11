@@ -1,0 +1,63 @@
+# Local overlay for kube-prometheus-stack (monitoring.sh): Prometheus, the
+# operator and Grafana only, to show the coredrop dashboard. Not for production.
+alertmanager:
+  enabled: false
+nodeExporter:
+  enabled: false
+kubeStateMetrics:
+  enabled: false
+defaultRules:
+  create: false
+# No scrapes or dashboards of the cluster components: only coredrop.
+kubernetesServiceMonitors:
+  enabled: false
+kubeApiServer:
+  enabled: false
+kubelet:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+coreDns:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # Select every PodMonitor, not only those with this release's labels.
+    podMonitorSelectorNilUsesHelmValues: false
+    # Select every PrometheusRule too: monitoring.sh loads the coredrop alerts.
+    ruleSelectorNilUsesHelmValues: false
+    scrapeInterval: 15s
+    retention: 2d
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+grafana:
+  adminUser: admin
+  adminPassword: admin
+  defaultDashboardsEnabled: false
+  # Local only: no login. Every visitor is an anonymous Admin, and the home
+  # page is the coredrop dashboard (the sidecar writes it to /tmp/dashboards).
+  grafana.ini:
+    auth:
+      disable_login_form: true
+    auth.anonymous:
+      enabled: true
+      org_role: Admin
+    dashboards:
+      default_home_dashboard_path: /tmp/dashboards/coredrop.json
+  # The dashboard sidecar loads every ConfigMap labelled grafana_dashboard=1
+  # in any namespace. monitoring.sh makes one from dashboards/coredrop.json.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL

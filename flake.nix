@@ -51,6 +51,8 @@
               minio-client # `mc`
               zstd
               # CI/release tooling, resolved through the pinned flake input.
+              prometheus.cli # `promtool` for alerts/coredrop.rules.yaml
+              python3 # dashboards/generate.py
               skopeo
               yq-go
             ];

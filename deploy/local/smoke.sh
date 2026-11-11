@@ -360,6 +360,27 @@ else
   log "  handler.json carries no store credentials"
 fi
 
+# --- 11. the daemon counts the captures in its metrics -----------------------
+# Read /metrics through the API server's pod proxy: no port-forward, and the
+# image needs no HTTP client. Step 9 saw both outcomes in this daemon's log,
+# so both counters are above 0.
+log "checking $daemon_pod's /metrics"
+metrics="$(kubectl get --raw \
+  "/api/v1/namespaces/$NAMESPACE/pods/$daemon_pod:9464/proxy/metrics" 2>/dev/null || true)"
+if [ -z "$metrics" ]; then
+  warn "  could not read /metrics from $daemon_pod"; fail=1
+else
+  for outcome in uploaded suppressed-rate-limit; do
+    value="$(printf '%s\n' "$metrics" \
+      | awk -v s="coredrop_captures_total{outcome=\"$outcome\"}" '$1 == s { print $2 }')"
+    if [ -n "$value" ] && [ "${value%.*}" -gt 0 ]; then
+      log "  coredrop_captures_total{outcome=\"$outcome\"} = $value"
+    else
+      warn "  coredrop_captures_total{outcome=\"$outcome\"} is '${value:-missing}', expected > 0"; fail=1
+    fi
+  done
+fi
+
 if [ "$fail" -ne 0 ]; then
   die "smoke test FAILED"
 fi

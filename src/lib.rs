@@ -15,6 +15,7 @@ pub mod handler;
 pub mod health;
 pub mod k8s_events;
 pub mod manifest;
+pub mod metrics;
 pub mod ratelimit;
 pub mod redact;
 pub mod snapshot;

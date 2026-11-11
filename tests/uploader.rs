@@ -16,6 +16,7 @@ use coredrop::config::HandlerConfig;
 use coredrop::events::{CaptureEventPayload, Outcome};
 use coredrop::handler::{CaptureArgs, run};
 use coredrop::manifest::Manifest;
+use coredrop::metrics::Metrics;
 use coredrop::spool::Spool;
 use coredrop::upload::ObjectKeys;
 use coredrop::uploader::{UploadSettings, Uploader};
@@ -60,8 +61,25 @@ async fn flush(
     settings: UploadSettings,
     flush: Duration,
 ) -> Vec<CaptureEventPayload> {
+    flush_metered(config, store, settings, flush).await.0
+}
+
+/// [`flush`], and also return the uploader's metrics in the text format.
+async fn flush_metered(
+    config: &HandlerConfig,
+    store: Arc<dyn ObjectStore>,
+    settings: UploadSettings,
+    flush: Duration,
+) -> (Vec<CaptureEventPayload>, String) {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let uploader = Uploader::new(Spool::new(&config.spool_dir), store, settings, tx);
+    let metrics = Arc::new(Metrics::new());
+    let uploader = Uploader::new(
+        Spool::new(&config.spool_dir),
+        store,
+        settings,
+        tx,
+        metrics.clone(),
+    );
     uploader
         .run(Arc::new(Notify::new()), std::future::ready(()), flush)
         .await;
@@ -69,7 +87,7 @@ async fn flush(
     while let Ok(report) = rx.try_recv() {
         reports.push(report);
     }
-    reports
+    (reports, metrics.encode())
 }
 
 fn ready(config: &HandlerConfig) -> Vec<String> {
@@ -142,7 +160,7 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
     let inner = Arc::new(InMemory::new());
     let failing = Arc::new(FailingStore::core(inner.clone()));
     let store: Arc<dyn ObjectStore> = failing.clone();
-    let reports = flush(
+    let (reports, metrics) = flush_metered(
         &config,
         store.clone(),
         settings(),
@@ -152,6 +170,19 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
 
     assert!(reports.is_empty(), "a retried bundle is not reported yet");
     assert_eq!(ready(&config).len(), 1, "the bundle stays in the spool");
+    assert!(
+        metrics.contains("coredrop_upload_attempts_total{result=\"ok\"} 0"),
+        "{metrics}"
+    );
+    assert!(
+        !metrics.contains("coredrop_upload_attempts_total{result=\"error\"} 0"),
+        "the failed attempts are counted: {metrics}"
+    );
+    assert!(metrics.contains("coredrop_spool_bundles 1"), "{metrics}");
+    assert!(
+        metrics.contains("coredrop_upload_duration_seconds_count 0"),
+        "a failed upload has no duration: {metrics}"
+    );
     let keys = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
     let inner: Arc<dyn ObjectStore> = inner;
     assert!(
@@ -160,9 +191,18 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
     );
 
     failing.set_failing(false);
-    let reports = flush(&config, store, settings(), Duration::from_secs(10)).await;
+    let (reports, metrics) =
+        flush_metered(&config, store, settings(), Duration::from_secs(10)).await;
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].outcome, Outcome::Uploaded);
+    assert!(
+        metrics.contains("coredrop_upload_attempts_total{result=\"ok\"} 1"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("coredrop_upload_duration_seconds_count 1"),
+        "{metrics}"
+    );
     assert!(ready(&config).is_empty());
     get_object(&inner, &keys.core()).await;
     get_object(&inner, &keys.manifest()).await;
@@ -191,6 +231,29 @@ async fn retries_a_failed_bundle_after_backoff() {
     assert!(ready(&config).is_empty());
 }
 
+/// The spool age gauge shows the oldest capture that waits for upload.
+#[tokio::test]
+async fn spool_age_is_the_age_of_the_oldest_waiting_capture() {
+    let tmp = TempDir::new().unwrap();
+    let config = base_config(tmp.path());
+    // Two crashes, 10 and 2 minutes ago; the max age is one hour.
+    for (pid, age) in [(5004, 600), (5005, 120)] {
+        write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+        capture(&config, pid, now_ts() - age, b"core during an outage").await;
+    }
+
+    let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let (_, metrics) = flush_metered(&config, store, settings(), Duration::from_millis(200)).await;
+
+    assert!(metrics.contains("coredrop_spool_bundles 2"), "{metrics}");
+    let age: i64 = metrics
+        .lines()
+        .find_map(|l| l.strip_prefix("coredrop_spool_oldest_bundle_age_seconds "))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("no age gauge in:\n{metrics}"));
+    assert!((600..660).contains(&age), "age {age}");
+}
+
 /// A bundle past the max age that still fails is deleted and reported as a
 /// failed capture.
 #[tokio::test]
@@ -203,9 +266,14 @@ async fn deletes_a_bundle_past_max_age_and_reports_failed() {
     capture(&config, pid, now_ts() - 7200, b"core that never uploads").await;
 
     let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
-    let reports = flush(&config, store, settings(), Duration::from_secs(10)).await;
+    let (reports, metrics) =
+        flush_metered(&config, store, settings(), Duration::from_secs(10)).await;
 
     assert!(ready(&config).is_empty(), "the expired bundle is deleted");
+    assert!(
+        metrics.contains("coredrop_bundles_expired_total 1"),
+        "{metrics}"
+    );
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].outcome, Outcome::Failed);
     assert!(
@@ -350,4 +418,102 @@ fn set_mtime(dir: &Path, mtime: std::time::SystemTime) {
         .unwrap()
         .set_modified(mtime)
         .unwrap();
+}
+
+/// Make `bundle` read-only, so its files can be read but not removed.
+/// Returns `false` when the mode has no effect (the tests run as root).
+fn make_undeletable(bundle: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(bundle, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(bundle.join("probe"), b"").is_ok() {
+        make_deletable(bundle);
+        return false;
+    }
+    true
+}
+
+fn make_deletable(bundle: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(bundle, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// A bundle past the max age whose delete fails stays tracked: the capture is
+/// reported and counted once, and only the delete is retried.
+#[tokio::test]
+async fn retries_only_the_delete_of_an_expired_bundle() {
+    let pid = 5006;
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, now_ts() - 7200, b"core that never uploads").await;
+    let bundle = Spool::new(&config.spool_dir)
+        .ready_dir()
+        .join(&ready(&config)[0]);
+    if !make_undeletable(&bundle) {
+        return;
+    }
+    let restore = bundle.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        make_deletable(&restore);
+    });
+
+    let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let (reports, metrics) =
+        flush_metered(&config, store, settings(), Duration::from_secs(10)).await;
+
+    assert!(ready(&config).is_empty(), "the delete is retried");
+    assert_eq!(reports.len(), 1, "reported once: {reports:?}");
+    assert_eq!(reports[0].outcome, Outcome::Failed);
+    assert!(
+        metrics.contains("coredrop_bundles_expired_total 1"),
+        "{metrics}"
+    );
+}
+
+/// An uploaded bundle whose delete fails does not wait for upload, so the
+/// spool bundle and age gauges leave it out.
+#[tokio::test]
+async fn spool_age_leaves_out_an_uploaded_bundle() {
+    let pid = 5007;
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, now_ts() - 600, b"core whose bundle sticks").await;
+    let bundle = Spool::new(&config.spool_dir)
+        .ready_dir()
+        .join(&ready(&config)[0]);
+    if !make_undeletable(&bundle) {
+        return;
+    }
+
+    // A wake-up after the upload makes the uploader scan again, and that scan
+    // sets the gauges.
+    let wake = Arc::new(Notify::new());
+    let later = wake.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        later.notify_one();
+    });
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let metrics = Arc::new(Metrics::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    Uploader::new(
+        Spool::new(&config.spool_dir),
+        store,
+        settings(),
+        tx,
+        metrics.clone(),
+    )
+    .run(wake, std::future::ready(()), Duration::from_millis(500))
+    .await;
+    make_deletable(&bundle);
+
+    assert_eq!(rx.try_recv().unwrap().outcome, Outcome::Uploaded);
+    let text = metrics.encode();
+    assert!(text.contains("coredrop_spool_bundles 0"), "{text}");
+    assert!(
+        text.contains("coredrop_spool_oldest_bundle_age_seconds 0"),
+        "{text}"
+    );
 }

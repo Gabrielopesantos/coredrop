@@ -42,6 +42,13 @@ HOST_SPOOL_DIR="${HOST_SPOOL_DIR:-/var/lib/coredrop/spool}"
 RELEASE="${RELEASE:-coredrop}"
 BUCKET="${BUCKET:-coredrop-cores}"
 
+# The optional local monitoring stack (monitoring.sh): kube-prometheus-stack,
+# pinned, in its own namespace.
+MONITORING_NAMESPACE="${MONITORING_NAMESPACE:-monitoring}"
+MONITORING_RELEASE="${MONITORING_RELEASE:-monitoring}"
+KPS_CHART="oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack"
+KPS_VERSION="${KPS_VERSION:-93.2.2}"
+
 # Host kubeconfig exported from the VM's k3s (see cluster-lima-k3s.sh).
 KUBECONFIG_OUT="${KUBECONFIG_OUT:-$SCRIPT_DIR/.tmp/kubeconfig}"
 
@@ -107,11 +114,19 @@ install_coredrop() {
     printf '%s' "$orig_core_pattern" > "$ORIG_FILE"
   fi
 
+  # With the monitoring stack installed (monitoring.sh), also render the
+  # PodMonitor. Without its CRD, the PodMonitor would fail the install.
+  local monitoring_args=()
+  if kubectl get crd podmonitors.monitoring.coreos.com >/dev/null 2>&1; then
+    monitoring_args=(--set metrics.podMonitor.enabled=true)
+  fi
+
   log "installing coredrop chart (release: $RELEASE)"
   helm upgrade --install "$RELEASE" "$REPO_ROOT/charts/coredrop" \
     -n "$NAMESPACE" \
     -f "$SCRIPT_DIR/helm-values/coredrop.local.yaml" \
     --set "capture.objectStore.config.AWS_ENDPOINT=http://$minio_cluster_ip:9000" \
+    "${monitoring_args[@]}" \
     --wait --timeout 120s
 }
 

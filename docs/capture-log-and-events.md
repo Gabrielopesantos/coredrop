@@ -12,10 +12,12 @@ INFO coredrop::k8s_events: capture complete outcome="uploaded" namespace="defaul
 WARN coredrop::k8s_events: capture complete outcome="failed" ... error="draining core stream: ..."
 ```
 
-A failed upload is logged as `bundle upload failed; will retry` with the
-store's error. The uploader retries with exponential backoff, so a transient
-failure (a network fault, a short store outage) recovers on a later attempt.
-A bundle that is still not uploaded when it is older than
+The first failed upload of a capture is logged as a warning, `bundle upload
+failed; will retry`, with the store's error. Its later retries log at debug
+level; `coredrop_upload_attempts_total{result="error"}` counts all of them
+(see [Metrics](metrics.md)). The uploader retries with exponential backoff,
+so a transient failure (a network fault, a short store outage) recovers on a
+later attempt. A bundle that is still not uploaded when it is older than
 `--spool-max-age-secs` (default 7 days) is deleted, logged as `bundle is past
 the spool max age; deleting it`, and its capture completes as
 `outcome="failed"`. The core is then lost.

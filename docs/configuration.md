@@ -25,6 +25,7 @@ For the Helm values that set these flags, see the
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
 | `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
 | `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture; captures are still logged |
+| `--metrics-addr` | `CAPTURE_METRICS_ADDR` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |
 
 ## Observe-only mode
 

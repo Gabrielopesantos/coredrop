@@ -40,6 +40,18 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// The outcomes a capture can end with. [`Outcome::Spooled`] is not one:
+    /// the uploader turns it into [`Outcome::Uploaded`] or [`Outcome::Failed`].
+    pub const FINAL: [Outcome; 7] = [
+        Outcome::Uploaded,
+        Outcome::SuppressedRateLimit,
+        Outcome::SpoolFull,
+        Outcome::DrainDeadline,
+        Outcome::SkippedNonK8s,
+        Outcome::NoStoreDiscard,
+        Outcome::Failed,
+    ];
+
     /// Whether the handler left a spool bundle for this capture. The daemon
     /// reports such a capture once the bundle is uploaded; every other
     /// outcome is final when the handler reports it.

@@ -25,12 +25,12 @@ daemon, and the daemon counts it.
 | --- | --- | --- | --- |
 | `coredrop_captures_total` | counter | `outcome` | Captures by final outcome (see below) |
 | `coredrop_core_bytes_total` | counter | - | Uncompressed core bytes that done captures read from the kernel |
-| `coredrop_stored_bytes_total` | counter | - | Compressed core bytes that done captures stored |
-| `coredrop_cores_truncated_total` | counter | - | Done captures with a truncated core: size cap, full spool or stream error. The manifest has the reason |
+| `coredrop_stored_bytes_total` | counter | - | Compressed core bytes that done captures stored; a `failed` capture stores nothing |
+| `coredrop_cores_truncated_total` | counter | - | Done captures with a truncated core: size cap, full spool or stream error. The manifest has the reason. A `failed` capture is not counted |
 | `coredrop_upload_attempts_total` | counter | `result` = `ok`/`error` | Upload attempts of spooled captures |
 | `coredrop_upload_duration_seconds` | histogram | - | Time to upload one spooled capture: core, proc snapshot and manifest |
 | `coredrop_bundles_expired_total` | counter | - | Spooled captures deleted because they were past `--spool-max-age-secs` |
-| `coredrop_spool_bundles` | gauge | - | Captures in the spool waiting for upload |
+| `coredrop_spool_bundles` | gauge | - | Captures in the spool waiting for upload. A capture that is uploaded but not yet deleted does not wait; `coredrop_spool_bytes` still counts it |
 | `coredrop_spool_bytes` | gauge | - | Size of the spool, `incoming/` and `ready/` |
 | `coredrop_spool_oldest_bundle_age_seconds` | gauge | - | Age of the oldest capture waiting for upload; 0 when none waits. A capture that is uploaded but not yet deleted does not wait |
 | `coredrop_spool_max_bytes` | gauge | - | `--spool-max-size`; 0 = no limit |

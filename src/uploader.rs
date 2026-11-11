@@ -189,14 +189,17 @@ impl Uploader {
         let ready_dir = self.spool.ready_dir();
         let ready = list_names(&ready_dir);
         // A reported bundle waits only for its delete, not for an upload.
-        let oldest = ready
+        let waiting: Vec<&String> = ready
             .iter()
             .filter(|name| !pending.get(*name).is_some_and(|p| p.reported))
+            .collect();
+        let oldest = waiting
+            .iter()
             .filter_map(|name| bundle_age(&ready_dir, name))
             .max()
             .unwrap_or_default();
         self.metrics
-            .set_spool(ready.len(), self.spool.usage_bytes(), oldest);
+            .set_spool(waiting.len(), self.spool.usage_bytes(), oldest);
         let now = Instant::now();
         pending.retain(|name, p| p.in_flight || ready.contains(name));
         for name in ready {

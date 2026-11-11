@@ -191,12 +191,17 @@ impl Metrics {
     }
 
     /// Count a capture that is done: its outcome, its core sizes and
-    /// whether its core is truncated.
+    /// whether its core is truncated. A failed capture keeps nothing, so its
+    /// stored bytes and truncation are not counted, even when the handler
+    /// stored the core in the spool before the failure.
     pub fn capture_done(&self, payload: &CaptureEventPayload) {
         self.captures
             .get_or_create(&[("outcome", payload.outcome.as_str())])
             .inc();
         self.core_bytes.inc_by(payload.core_bytes);
+        if payload.outcome == Outcome::Failed {
+            return;
+        }
         self.stored_bytes.inc_by(payload.stored_bytes.unwrap_or(0));
         if payload.truncated {
             self.cores_truncated.inc();
@@ -404,6 +409,13 @@ mod tests {
             truncated: true,
             ..uploaded.clone()
         });
+        // An expired bundle: the handler stored a truncated core in the
+        // spool, but nothing reached the bucket.
+        metrics.capture_done(&CaptureEventPayload {
+            outcome: Outcome::Failed,
+            truncated: true,
+            ..uploaded.clone()
+        });
         metrics.upload_attempt(false);
         metrics.upload_duration(Duration::from_millis(700));
         metrics.set_spool(3, 4096, Duration::from_secs(90));
@@ -421,7 +433,8 @@ mod tests {
         assert!(text.contains("coredrop_spool_bundles 3"), "{text}");
         assert!(text.contains("coredrop_spool_bytes 4096"), "{text}");
         for line in [
-            "coredrop_core_bytes_total 2000",
+            "coredrop_captures_total{outcome=\"failed\"} 1",
+            "coredrop_core_bytes_total 3000",
             "coredrop_stored_bytes_total 200",
             "coredrop_cores_truncated_total 1",
             "coredrop_spool_oldest_bundle_age_seconds 90",

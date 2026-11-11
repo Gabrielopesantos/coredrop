@@ -472,7 +472,7 @@ async fn retries_only_the_delete_of_an_expired_bundle() {
 }
 
 /// An uploaded bundle whose delete fails does not wait for upload, so the
-/// spool age gauge leaves it out.
+/// spool bundle and age gauges leave it out.
 #[tokio::test]
 async fn spool_age_leaves_out_an_uploaded_bundle() {
     let pid = 5007;
@@ -511,7 +511,7 @@ async fn spool_age_leaves_out_an_uploaded_bundle() {
 
     assert_eq!(rx.try_recv().unwrap().outcome, Outcome::Uploaded);
     let text = metrics.encode();
-    assert!(text.contains("coredrop_spool_bundles 1"), "{text}");
+    assert!(text.contains("coredrop_spool_bundles 0"), "{text}");
     assert!(
         text.contains("coredrop_spool_oldest_bundle_age_seconds 0"),
         "{text}"

@@ -73,7 +73,8 @@ and about 1 GiB of the VM's memory.
 11. With a capture filter that excludes the demo namespace, the handler
     config holds the filter, and a new crash pod gets only `capture complete`
     lines with outcome `filtered`. The pod has no objects in the bucket and no
-    coredrop Event. The test then upgrades the release back to no filter.
+    coredrop Event, and `/metrics` counts it under outcome `filtered`. The
+    test then upgrades the release back to no filter.
 
 ## What the lifecycle test asserts
 

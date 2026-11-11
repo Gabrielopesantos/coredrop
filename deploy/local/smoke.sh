@@ -460,6 +460,14 @@ if [ -z "$f_events" ]; then
 else
   warn "  coredrop posted Events on the filtered pod: $f_events"; fail=1
 fi
+f_value="$(kubectl get --raw \
+  "/api/v1/namespaces/$NAMESPACE/pods/$f_daemon:9464/proxy/metrics" 2>/dev/null \
+  | awk '$1 == "coredrop_captures_total{outcome=\"filtered\"}" { print $2 }' || true)"
+if [ -n "$f_value" ] && [ "${f_value%.*}" -gt 0 ]; then
+  log "  coredrop_captures_total{outcome=\"filtered\"} = $f_value"
+else
+  warn "  coredrop_captures_total{outcome=\"filtered\"} is '${f_value:-missing}', expected > 0"; fail=1
+fi
 log "restoring the release without the capture filter"
 install_coredrop >/dev/null
 FILTER_SET=""

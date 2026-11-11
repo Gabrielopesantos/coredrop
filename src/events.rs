@@ -44,12 +44,13 @@ pub enum Outcome {
 impl Outcome {
     /// The outcomes a capture can end with. [`Outcome::Spooled`] is not one:
     /// the uploader turns it into [`Outcome::Uploaded`] or [`Outcome::Failed`].
-    pub const FINAL: [Outcome; 7] = [
+    pub const FINAL: [Outcome; 8] = [
         Outcome::Uploaded,
         Outcome::SuppressedRateLimit,
         Outcome::SpoolFull,
         Outcome::DrainDeadline,
         Outcome::SkippedNonK8s,
+        Outcome::Filtered,
         Outcome::NoStoreDiscard,
         Outcome::Failed,
     ];

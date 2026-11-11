@@ -7,17 +7,21 @@
 //!
 //! 1. Pre-reap snapshot - snapshot `/proc/<hostpid>` before the kernel
 //!    reaps the PID; must complete while the kernel waits.
-//! 2. Core drain - stream stdin through zstd into the capture's spool bundle.
+//! 2. Capture filter - drop a crash the filter (see [`crate::filter`]) does
+//!    not keep. A filter on namespace, pod, container or image runs the
+//!    crictl enrichment of step 5 here, before the drain.
+//! 3. Core drain - stream stdin through zstd into the capture's spool bundle.
 //!    A core that is not kept is not read. Then release the kernel's pipe:
 //!    the kernel reaps the crashed process and frees its `core_pipe_limit`
 //!    slot.
-//! 3. Proc snapshot - write the small tar into the bundle.
-//! 4. Crictl enrichment - best-effort: shell `crictl inspect` for
+//! 4. Proc snapshot - write the small tar into the bundle.
+//! 5. Crictl enrichment - best-effort: shell `crictl inspect` for
 //!    human-readable identity (namespace, pod name, container name, image,
-//!    restart count). Failure degrades to cgroup-only identity.
-//! 5. Manifest - write the JSON sidecar into the bundle, then move the
+//!    restart count). Failure degrades to cgroup-only identity. Skipped when
+//!    step 2 already ran it.
+//! 6. Manifest - write the JSON sidecar into the bundle, then move the
 //!    complete bundle to the spool's `ready/` directory.
-//! 6. Capture event - fire-and-forget datagram to the daemon for every
+//! 7. Capture event - fire-and-forget datagram to the daemon for every
 //!    outcome, failures included. The daemon logs it (the handler itself has
 //!    no stdout) and treats a spooled capture as a hint to scan the spool.
 //!    Best-effort.
@@ -36,6 +40,7 @@ use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::crictl;
 use crate::events::{self, CaptureEventPayload, Outcome};
+use crate::filter::Subject;
 use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
 use crate::ratelimit::{RateDecision, RateLimiter};
 use crate::redact::Redactor;
@@ -181,6 +186,39 @@ pub async fn run(
             "no kubernetes cgroup identity resolved; nothing will be spooled"
         );
     }
+
+    // Step 2: Capture filter. crictl runs here only when the filter needs its
+    // fields; `early_info` is then `Some`, also when crictl failed, so the
+    // enrichment below does not run it a second time.
+    let exe_path = args.exe.replace('!', "/");
+    let early_info = match &identity {
+        Some(id) if config.filter.needs_crictl() => Some(
+            crictl::inspect_with_timeout(
+                &id.container_id,
+                config,
+                config.pre_drain_crictl_timeout_secs(),
+            )
+            .await,
+        ),
+        _ => None,
+    };
+    let filtered = identity.is_some() && {
+        let info = early_info.as_ref().and_then(Option::as_ref);
+        let subject = Subject {
+            namespace: info.and_then(|i| i.namespace.as_deref()),
+            pod: info.and_then(|i| i.pod_name.as_deref()),
+            container: info.and_then(|i| i.container_name.as_deref()),
+            image: info.and_then(|i| i.image.as_deref()),
+            exe: Some(&exe_path),
+        };
+        !config.filter.keeps(&subject)
+    };
+    if filtered {
+        info!(exe = %exe_path, "capture filter drops this crash; nothing will be spooled");
+    } else if matches!(early_info, Some(None)) {
+        warn!("crictl identity unknown; capture filter keeps this crash");
+    }
+
     let cluster = config.cluster.as_str();
     let spool = Spool::new(&config.spool_dir);
 
@@ -189,7 +227,7 @@ pub async fn run(
     // capture is reported as failed.
     let mut spool_error = None;
     let target = match &identity {
-        Some(id) if config.store_configured => {
+        Some(id) if config.store_configured && !filtered => {
             let name =
                 spool::bundle_name(args.timestamp, args.host_pid, &id.pod_uid, &id.container_id);
             match spool.create_bundle(&name) {
@@ -265,7 +303,7 @@ pub async fn run(
         refund(&t.identity.pod_uid);
     }
 
-    // Step 2: Drain a kept core, then release the kernel's pipe. A core that
+    // Step 3: Drain a kept core, then release the kernel's pipe. A core that
     // is not kept is never read: the closed pipe stops the dump, so the
     // kernel reaps the crashed process sooner.
     let deadline = (config.drain_deadline_secs != 0)
@@ -362,7 +400,7 @@ pub async fn run(
         "core stream drained"
     );
 
-    // Step 3: Proc snapshot into the bundle (small, buffered).
+    // Step 4: Proc snapshot into the bundle (small, buffered).
     let proc_snapshot_key = target.as_ref().and_then(|t| {
         let tar = match snapshot.to_tar() {
             Ok(tar) => tar,
@@ -383,14 +421,15 @@ pub async fn run(
         }
     });
 
-    // Step 4: Crictl enrichment (after the pipe is released, so not time-critical).
-    let container_info = if let Some(id) = &identity {
-        crictl::inspect(&id.container_id, config).await
-    } else {
-        None
+    // Step 5: Crictl enrichment (after the pipe is released, so not
+    // time-critical), unless the capture filter already ran it.
+    let container_info = match (early_info, &identity) {
+        (Some(info), _) => info,
+        (None, Some(id)) => crictl::inspect(&id.container_id, config).await,
+        (None, None) => None,
     };
 
-    // Step 5: Assemble manifest.
+    // Step 6: Assemble manifest.
     let (pod_uid, container_id) = identity
         .as_ref()
         .map(|id| (id.pod_uid.clone(), id.container_id.clone()))
@@ -449,6 +488,8 @@ pub async fn run(
 
     let outcome = if identity.is_none() {
         Outcome::SkippedNonK8s
+    } else if filtered {
+        Outcome::Filtered
     } else if !config.store_configured {
         Outcome::NoStoreDiscard
     } else if rate_suppressed {
@@ -497,7 +538,7 @@ pub async fn run(
         );
     }
 
-    // Step 6: report the capture to the daemon.
+    // Step 7: report the capture to the daemon.
     report(config, &payload);
 
     Ok(())

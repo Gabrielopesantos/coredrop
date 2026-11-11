@@ -81,6 +81,7 @@ require_release() {
 
 # Install (or upgrade) the coredrop release against the in-cluster MinIO and
 # wait for it. Records the node's pre-install core_pattern to $ORIG_FILE.
+# Extra arguments go to `helm upgrade` (for example `--set-json ...`).
 install_coredrop() {
   # The daemon uploads from its pod network, so a ClusterIP is reachable. Point
   # coredrop's upload endpoint at MinIO's numeric ClusterIP. (The smoke test
@@ -127,6 +128,7 @@ install_coredrop() {
     -f "$SCRIPT_DIR/helm-values/coredrop.local.yaml" \
     --set "capture.objectStore.config.AWS_ENDPOINT=http://$minio_cluster_ip:9000" \
     "${monitoring_args[@]}" \
+    "$@" \
     --wait --timeout 120s
 }
 

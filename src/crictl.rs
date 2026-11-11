@@ -1,4 +1,4 @@
-//! Post-drain container identity enrichment via `crictl inspect`.
+//! Container identity enrichment via `crictl inspect`.
 //!
 //! After the core is drained (the time-critical section is done), we shell out
 //! to `crictl` to resolve human-readable identity: namespace, pod name,
@@ -10,6 +10,10 @@
 //! Kubernetes identity fields (the canonical source for
 //! `io.kubernetes.pod.namespace` etc.); `status.metadata.attempt` carries the
 //! restart count analog.
+//!
+//! A capture filter on a crictl field runs [`inspect_with_timeout`] before
+//! the drain instead, with a capped timeout (see
+//! [`HandlerConfig::pre_drain_crictl_timeout_secs`]).
 
 use serde_json::Value;
 use std::time::Duration;
@@ -66,6 +70,16 @@ pub struct ContainerInfo {
 /// `None` on any subprocess or parse failure - callers fall back to
 /// cgroup-only identity.
 pub async fn inspect(container_id: &str, config: &HandlerConfig) -> Option<ContainerInfo> {
+    inspect_with_timeout(container_id, config, config.crictl_timeout_secs).await
+}
+
+/// [`inspect`] with `timeout_secs` in place of `config.crictl_timeout_secs`;
+/// `0` = no timeout.
+pub async fn inspect_with_timeout(
+    container_id: &str,
+    config: &HandlerConfig,
+    timeout_secs: u64,
+) -> Option<ContainerInfo> {
     let mut cmd = tokio::process::Command::new(&config.crictl_path);
     cmd.arg("inspect").arg(container_id);
     cmd.stdout(std::process::Stdio::piped());
@@ -78,11 +92,7 @@ pub async fn inspect(container_id: &str, config: &HandlerConfig) -> Option<Conta
         cmd.env("CONTAINER_RUNTIME_ENDPOINT", endpoint);
     }
 
-    let timeout_dur = if config.crictl_timeout_secs == 0 {
-        None
-    } else {
-        Some(Duration::from_secs(config.crictl_timeout_secs))
-    };
+    let timeout_dur = (timeout_secs != 0).then(|| Duration::from_secs(timeout_secs));
     let output = match run_command(&mut cmd, timeout_dur).await {
         Ok(o) => o,
         Err(RunError::Io(e)) => {
@@ -93,7 +103,7 @@ pub async fn inspect(container_id: &str, config: &HandlerConfig) -> Option<Conta
             warn!(
                 container_id,
                 crictl = %config.crictl_path.display(),
-                timeout_secs = config.crictl_timeout_secs,
+                timeout_secs,
                 "crictl inspect timed out; identity will be cgroup-only"
             );
             return None;

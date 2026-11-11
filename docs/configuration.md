@@ -21,6 +21,7 @@ For the Helm values that set these flags, see the
 | `--upload-timeout-secs` | `CAPTURE_UPLOAD_TIMEOUT_SECS` | 600 | Time limit for one upload attempt of one capture; 0 = no limit |
 | `--shutdown-flush-secs` | `CAPTURE_SHUTDOWN_FLUSH_SECS` | 25 | Time the daemon keeps uploading after SIGTERM |
 | `--crictl-timeout-secs` | `CRICTL_TIMEOUT_SECS` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
+| `--capture-filter` | `CAPTURE_FILTER` | empty | JSON include/exclude lists of crashes to capture; empty = all. See [Capture filter](#capture-filter) |
 | `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
 | `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
 | `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
@@ -37,6 +38,62 @@ name; without that identity, the daemon skips the Event.
 Set a store URL to keep cores. A store URL that is set but unusable (not a
 URL, an unknown scheme, a store that cannot be built) stops the daemon at
 startup.
+
+## Capture filter
+
+The capture filter selects the crashes that coredrop captures. It has two
+lists of entries, `include` and `exclude`:
+
+- An entry holds glob patterns for `namespace`, `pod`, `container`, `image`
+  and `exe`. `*` matches any run of characters, `?` one character. All
+  patterns of one entry must match.
+- A crash is captured when it matches an `include` entry (or `include` is
+  empty) and matches no `exclude` entry. `exclude` wins.
+- `exe` is the executable path, for example `/usr/bin/server`. Use
+  `*/server` to match it in any directory.
+- `image` is the image as the container runtime reports it, for example
+  `docker.io/library/nginx:1.27`.
+
+In the chart:
+
+```yaml
+capture:
+  filter:
+    include:
+      - namespace: "team-*"
+    exclude:
+      - container: istio-proxy
+      - namespace: ci
+        pod: "flaky-test-*"
+```
+
+As a flag, the same filter is JSON:
+
+```sh
+--capture-filter '{"include":[{"namespace":"team-*"}],"exclude":[{"container":"istio-proxy"},{"namespace":"ci","pod":"flaky-test-*"}]}'
+```
+
+The daemon stops at startup when the filter is not valid: bad JSON, an
+unknown key, an empty pattern, or an entry with no patterns.
+
+The handler applies the filter before it reads the core:
+
+```
+cgroup identity (pod UID, container ID)
+  -> crictl inspect          only when an entry uses namespace, pod,
+                             container or image
+  -> filter
+       drop: core not read, nothing spooled, no Event,
+             outcome="filtered" in the capture log
+       keep: normal capture; crictl does not run again
+```
+
+When a filter uses namespace, pod, container or image, crictl runs while the
+kernel holds the crashed process. That run times out after
+`--crictl-timeout-secs`, but after 10 seconds at most, also when the flag is
+0. When crictl fails, those fields are unknown, and the crash is captured:
+an unknown field never matches an `exclude` entry, and never stops an
+`include` entry from matching.
 
 ## Credentials
 

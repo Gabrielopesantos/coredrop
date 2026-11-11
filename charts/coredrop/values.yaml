@@ -87,6 +87,20 @@ capture:
   crictlTimeoutSeconds: 10
   # -- Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing.
   noRedact: false
+  # Which crashes are captured. Each entry holds glob patterns (`*`, `?`) for
+  # `namespace`, `pod`, `container`, `image` and `exe` (executable path, e.g.
+  # `*/server`); all patterns of one entry must match. A crash is captured
+  # when it matches an `include` entry (or `include` is empty) and no
+  # `exclude` entry. A filtered crash is not read: no core, no snapshot, no
+  # manifest, no Event; it is only logged. A filter on namespace,
+  # pod, container or image runs crictl before the core is read, with a
+  # timeout of `crictlTimeoutSeconds` but 10 s at most; when crictl fails,
+  # the crash is captured.
+  filter:
+    # -- Capture only crashes that match one of these entries; empty captures all. Example: `[{namespace: "team-*"}]`.
+    include: []
+    # -- Never capture crashes that match one of these entries; wins over `include`. Example: `[{namespace: kube-system}, {container: istio-proxy}]`.
+    exclude: []
   # S3-compatible/GCS/Azure object store the daemon uploads the core +
   # proc-snapshot + manifest to. Only the daemon pod gets these settings and
   # credentials; the handler never does. Leave `url` empty to run

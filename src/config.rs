@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::filter::CaptureFilter;
 use crate::spool;
 
 /// Host path the daemon writes the serialized [`HandlerConfig`] to, and the
@@ -94,6 +95,10 @@ pub const DEFAULT_DRAIN_DEADLINE_SECS: u64 = 60;
 /// Default timeout for `crictl inspect` in the handler.
 pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
 
+/// Longest timeout for a `crictl inspect` that runs before the drain, while
+/// the kernel holds the crashed process and a `core_pipe_limit` slot.
+pub const MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS: u64 = 10;
+
 fn default_rate_state_path() -> PathBuf {
     PathBuf::from("/run/coredrop/recent.json")
 }
@@ -152,7 +157,9 @@ pub struct HandlerConfig {
     pub drain_deadline_secs: u64,
     /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
     /// crictl runs after the handler releases the core pipe, so this only
-    /// bounds how long the capture takes to reach the spool.
+    /// bounds how long the capture takes to reach the spool. A capture filter
+    /// on namespace, pod, container or image runs crictl before the drain
+    /// instead: see [`Self::pre_drain_crictl_timeout_secs`].
     pub crictl_timeout_secs: u64,
     /// Spool root on the node: where the handler writes capture bundles for
     /// the daemon to upload.
@@ -168,6 +175,10 @@ pub struct HandlerConfig {
     /// the handler config on the hostPath. The daemon always sets it; `None`
     /// (tests, a hand-written config) means the handler reports nothing.
     pub event_socket_path: Option<PathBuf>,
+    /// Which crashes the handler keeps. A config without the field keeps
+    /// every crash.
+    #[serde(default)]
+    pub filter: CaptureFilter,
 }
 
 impl Default for HandlerConfig {
@@ -188,11 +199,24 @@ impl Default for HandlerConfig {
             spool_min_free_percent: spool::DEFAULT_SPOOL_MIN_FREE_PERCENT,
             rate_state_path: default_rate_state_path(),
             event_socket_path: Some(default_event_socket_path()),
+            filter: CaptureFilter::default(),
         }
     }
 }
 
 impl HandlerConfig {
+    /// Timeout in seconds for a `crictl inspect` before the drain:
+    /// `crictl_timeout_secs`, at most [`MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS`].
+    /// `0` (no timeout) also gives the maximum, so a hung crictl cannot hold
+    /// the crashed process.
+    #[must_use]
+    pub fn pre_drain_crictl_timeout_secs(&self) -> u64 {
+        match self.crictl_timeout_secs {
+            0 => MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS,
+            secs => secs.min(MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS),
+        }
+    }
+
     /// Validate that paths are absolute and the free-space floor is a percent.
     /// Called by [`Self::read`] before trusting a daemon-written config file.
     fn validate(&self) -> Result<()> {
@@ -211,6 +235,7 @@ impl HandlerConfig {
             must_be_absolute(event_socket_path, "event_socket_path")?;
         }
         must_be_absolute(&self.spool_dir, "spool_dir")?;
+        self.filter.validate()?;
         if self.spool_min_free_percent > 100 {
             bail!(
                 "spool_min_free_percent must be at most 100: {}",
@@ -313,6 +338,23 @@ mod tests {
     }
 
     #[test]
+    fn pre_drain_crictl_timeout_is_capped() {
+        let with = |secs| HandlerConfig {
+            crictl_timeout_secs: secs,
+            ..HandlerConfig::default()
+        };
+        assert_eq!(with(3).pre_drain_crictl_timeout_secs(), 3);
+        assert_eq!(
+            with(60).pre_drain_crictl_timeout_secs(),
+            MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            with(0).pre_drain_crictl_timeout_secs(),
+            MAX_PRE_DRAIN_CRICTL_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
     fn write_then_read_round_trips() {
         let cfg = HandlerConfig {
             cluster: "prod".into(),
@@ -330,6 +372,7 @@ mod tests {
             spool_min_free_percent: 20,
             rate_state_path: "/run/coredrop/recent.json".into(),
             event_socket_path: Some("/run/coredrop/events.sock".into()),
+            filter: CaptureFilter::parse(r#"{"exclude":[{"namespace":"kube-system"}]}"#).unwrap(),
         };
         let (_dir, path) = tmp_config();
         cfg.write(&path).unwrap();

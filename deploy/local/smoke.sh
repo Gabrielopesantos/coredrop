@@ -2,7 +2,8 @@
 # Live smoke test. Asserts the full kernel-to-bucket path on a real
 # node: the DaemonSet repoints core_pattern at the handler, a faulting workload
 # produces a core, the handler spools it, and the daemon uploads a valid core +
-# redacted proc-snapshot + manifest to MinIO. Non-destructive and repeatable: coredrop stays installed
+# redacted proc-snapshot + manifest to MinIO, and that the capture filter drops
+# an excluded crash. Non-destructive and repeatable: coredrop stays installed
 # (lifecycle.sh tests the uninstall paths). coredrop has no control plane, so
 # every assertion is made directly against the bucket (mc over a port-forward),
 # not a REST API. See README.md.
@@ -22,7 +23,17 @@ WORKDIR="$(mktemp -d)"
 
 fail=0
 PF_PID=""
-cleanup() { [ -n "$PF_PID" ] && kill "$PF_PID" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"; }
+# Set while step 11 runs with a capture filter, so an early exit still gives
+# back the release without it.
+FILTER_SET=""
+cleanup() {
+  [ -n "$PF_PID" ] && kill "$PF_PID" >/dev/null 2>&1 || true
+  if [ -n "$FILTER_SET" ]; then
+    warn "restoring the release without the capture filter"
+    install_coredrop >/dev/null || warn "could not restore the release; run ./up.sh"
+  fi
+  rm -rf "$WORKDIR"
+}
 trap cleanup EXIT
 
 # 1. DaemonSet ready
@@ -380,6 +391,87 @@ else
     fi
   done
 fi
+
+# --- 12. the capture filter drops an excluded crash before it is read --------
+# Exclude the demo namespace, crash a fresh demo pod, and expect a `filtered`
+# capture log line, no objects for that pod, and no CoreDumped Event. The
+# release goes back to no filter after the check (also on an early exit).
+log "enabling a capture filter that excludes namespace $DEMO_NAMESPACE"
+FILTER_SET=1
+install_coredrop --set-json "capture.filter.exclude=[{\"namespace\":\"$DEMO_NAMESPACE\"}]" >/dev/null
+kubectl -n "$NAMESPACE" rollout status "$ds" --timeout=120s
+filter_config="$(node_exec cat "$HOST_RUN_DIR/handler.json" 2>/dev/null | jq -c '.filter' 2>/dev/null || true)"
+if [ "$filter_config" = "{\"exclude\":[{\"namespace\":\"$DEMO_NAMESPACE\"}]}" ]; then
+  log "  handler.json carries the filter: $filter_config"
+else
+  warn "  handler.json filter is '$filter_config'"; fail=1
+fi
+restart_demo
+f_hash="$(kubectl -n "$DEMO_NAMESPACE" get rs -l app=crash-segfault -o json \
+  | jq -r '.items[] | select(.spec.replicas > 0) | .metadata.labels["pod-template-hash"]' | head -n1)"
+f_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods -l "app=crash-segfault,pod-template-hash=$f_hash" -o json \
+  | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' | head -n1)"
+f_uid="$(kubectl -n "$DEMO_NAMESPACE" get pod "$f_pod" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+# The old daemon pod can still be in its shutdown flush: skip a terminating pod.
+f_daemon="$(kubectl -n "$NAMESPACE" get pods \
+  -l 'app.kubernetes.io/name=coredrop,!coredrop.io/cleanup' \
+  --field-selector status.phase=Running -o json \
+  | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' | head -n1)"
+[ -n "$f_pod" ] && [ -n "$f_uid" ] && [ -n "$f_daemon" ] \
+  || die "could not resolve the filtered demo pod or the daemon pod"
+log "waiting for a filtered capture of $f_pod in $f_daemon's log (up to ${SMOKE_TIMEOUT}s)"
+filtered_line=""
+deadline=$(( SECONDS + SMOKE_TIMEOUT ))
+while :; do
+  filtered_line="$(kubectl -n "$NAMESPACE" logs "$f_daemon" -c coredrop 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -F "capture complete" | grep -F "$f_pod" \
+    | grep 'outcome="\?filtered"\?[ ]' | head -n1 || true)"
+  [ -n "$filtered_line" ] && break
+  [ "$SECONDS" -ge "$deadline" ] && break
+  sleep 5
+done
+if [ -n "$filtered_line" ]; then
+  log "  daemon logged 'capture complete' outcome=filtered pod=$f_pod"
+else
+  warn "  no 'capture complete outcome=filtered' line for $f_pod"; fail=1
+fi
+other_outcomes="$(kubectl -n "$NAMESPACE" logs "$f_daemon" -c coredrop 2>/dev/null \
+  | sed 's/\x1b\[[0-9;]*m//g' | grep -F "$f_pod" | grep -F "capture " \
+  | grep -v 'outcome="\?filtered"\?[ ]' || true)"
+if [ -z "$other_outcomes" ]; then
+  log "  every capture of $f_pod is filtered"
+else
+  warn "  $f_pod has captures that are not filtered: $other_outcomes"; fail=1
+fi
+# A kept crash takes about 10s to reach the bucket; give a wrong one time to land.
+sleep 15
+f_objects="$(mc ls --recursive "$MC_ALIAS/$BUCKET" 2>/dev/null | awk '{print $NF}' \
+  | grep -F -- "/$f_uid/" || true)"
+if [ -z "$f_objects" ]; then
+  log "  no objects in s3://$BUCKET for the filtered pod (uid $f_uid)"
+else
+  warn "  the filtered pod has objects in the bucket: $f_objects"; fail=1
+fi
+f_events="$(kubectl -n "$DEMO_NAMESPACE" get events.events.k8s.io \
+  --field-selector "regarding.name=$f_pod" -o json 2>/dev/null \
+  | jq -r '.items[] | select(.reportingController == "coredrop") | .reason' || true)"
+if [ -z "$f_events" ]; then
+  log "  no coredrop Event on the filtered pod"
+else
+  warn "  coredrop posted Events on the filtered pod: $f_events"; fail=1
+fi
+f_value="$(kubectl get --raw \
+  "/api/v1/namespaces/$NAMESPACE/pods/$f_daemon:9464/proxy/metrics" 2>/dev/null \
+  | awk '$1 == "coredrop_captures_total{outcome=\"filtered\"}" { print $2 }' || true)"
+if [ -n "$f_value" ] && [ "${f_value%.*}" -gt 0 ]; then
+  log "  coredrop_captures_total{outcome=\"filtered\"} = $f_value"
+else
+  warn "  coredrop_captures_total{outcome=\"filtered\"} is '${f_value:-missing}', expected > 0"; fail=1
+fi
+log "restoring the release without the capture filter"
+install_coredrop >/dev/null
+FILTER_SET=""
+restart_demo
 
 if [ "$fail" -ne 0 ]; then
   die "smoke test FAILED"

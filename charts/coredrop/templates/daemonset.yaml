@@ -106,6 +106,12 @@ spec:
               value: {{ .Values.capture.drainDeadlineSeconds | quote }}
             - name: CRICTL_TIMEOUT_SECS
               value: {{ .Values.capture.crictlTimeoutSeconds | quote }}
+            {{- with .Values.capture.filter }}
+            {{- if or .include .exclude }}
+            - name: CAPTURE_FILTER
+              value: {{ dict "include" (.include | default list) "exclude" (.exclude | default list) | toJson | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.capture.objectStore.url }}
             - name: CAPTURE_STORE_URL
               value: {{ .Values.capture.objectStore.url | quote }}

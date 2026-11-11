@@ -354,6 +354,7 @@ mod tests {
         for line in [
             "coredrop_captures_total{outcome=\"uploaded\"} 0",
             "coredrop_captures_total{outcome=\"failed\"} 0",
+            "coredrop_captures_total{outcome=\"filtered\"} 0",
             "coredrop_upload_attempts_total{result=\"error\"} 0",
             "coredrop_bundles_expired_total 0",
             "coredrop_spool_bundles 0",

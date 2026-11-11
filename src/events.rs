@@ -35,6 +35,8 @@ pub enum Outcome {
     /// spooled.
     DrainDeadline,
     SkippedNonK8s,
+    /// The capture filter dropped the crash; the core is not read.
+    Filtered,
     NoStoreDiscard,
     Failed,
 }
@@ -76,6 +78,7 @@ impl Outcome {
             Outcome::SpoolFull => "spool-full",
             Outcome::DrainDeadline => "drain-deadline",
             Outcome::SkippedNonK8s => "skipped-non-k8s",
+            Outcome::Filtered => "filtered",
             Outcome::NoStoreDiscard => "no-store-discard",
             Outcome::Failed => "failed",
         }

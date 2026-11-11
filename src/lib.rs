@@ -11,6 +11,7 @@ pub mod config;
 pub mod core_pattern;
 pub mod crictl;
 pub mod events;
+pub mod filter;
 pub mod handler;
 pub mod health;
 pub mod k8s_events;

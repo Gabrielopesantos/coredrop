@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::filter::CaptureFilter;
 use crate::spool;
 
 /// Host path the daemon writes the serialized [`HandlerConfig`] to, and the
@@ -152,7 +153,9 @@ pub struct HandlerConfig {
     pub drain_deadline_secs: u64,
     /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
     /// crictl runs after the handler releases the core pipe, so this only
-    /// bounds how long the capture takes to reach the spool.
+    /// bounds how long the capture takes to reach the spool. A capture filter
+    /// on namespace, pod, container or image runs crictl before the drain
+    /// instead: then this also bounds how long the kernel waits.
     pub crictl_timeout_secs: u64,
     /// Spool root on the node: where the handler writes capture bundles for
     /// the daemon to upload.
@@ -168,6 +171,10 @@ pub struct HandlerConfig {
     /// the handler config on the hostPath. The daemon always sets it; `None`
     /// (tests, a hand-written config) means the handler reports nothing.
     pub event_socket_path: Option<PathBuf>,
+    /// Which crashes the handler keeps. A config without the field keeps
+    /// every crash.
+    #[serde(default)]
+    pub filter: CaptureFilter,
 }
 
 impl Default for HandlerConfig {
@@ -188,6 +195,7 @@ impl Default for HandlerConfig {
             spool_min_free_percent: spool::DEFAULT_SPOOL_MIN_FREE_PERCENT,
             rate_state_path: default_rate_state_path(),
             event_socket_path: Some(default_event_socket_path()),
+            filter: CaptureFilter::default(),
         }
     }
 }
@@ -211,6 +219,7 @@ impl HandlerConfig {
             must_be_absolute(event_socket_path, "event_socket_path")?;
         }
         must_be_absolute(&self.spool_dir, "spool_dir")?;
+        self.filter.validate()?;
         if self.spool_min_free_percent > 100 {
             bail!(
                 "spool_min_free_percent must be at most 100: {}",
@@ -330,6 +339,7 @@ mod tests {
             spool_min_free_percent: 20,
             rate_state_path: "/run/coredrop/recent.json".into(),
             event_socket_path: Some("/run/coredrop/events.sock".into()),
+            filter: CaptureFilter::parse(r#"{"exclude":[{"namespace":"kube-system"}]}"#).unwrap(),
         };
         let (_dir, path) = tmp_config();
         cfg.write(&path).unwrap();

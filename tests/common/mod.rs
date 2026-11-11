@@ -24,6 +24,7 @@ use object_store::{
 use tokio::io::AsyncReadExt;
 
 use coredrop::config::HandlerConfig;
+use coredrop::filter::CaptureFilter;
 
 /// Serializes tests that write executable scripts and spawn subprocesses.
 /// Without it, a concurrent test's fork can inherit another test's open
@@ -77,6 +78,7 @@ pub fn base_config(root: &Path) -> HandlerConfig {
         spool_min_free_percent: 0,
         rate_state_path: root.join("recent.json"),
         event_socket_path: None,
+        filter: CaptureFilter::default(),
     }
 }
 

@@ -298,7 +298,7 @@ mod tests {
     /// makes the chart reject a legitimate value.
     #[test]
     fn helpers_store_opts_match_allowlist() {
-        const HELPERS: &str = include_str!("../charts/coredrop/templates/_helpers.tpl");
+        const HELPERS: &str = include_str!("../../charts/coredrop/templates/_helpers.tpl");
 
         let block = HELPERS
             .split_once(r#"{{- define "coredrop.allowedStoreOpts" -}}"#)

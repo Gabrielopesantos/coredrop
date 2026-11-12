@@ -23,11 +23,11 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::daemon::metrics::Metrics;
+use crate::daemon::upload;
 use crate::events::{CaptureEventPayload, Outcome};
 use crate::manifest::Manifest;
-use crate::metrics::Metrics;
 use crate::spool::{self, Spool};
-use crate::upload;
 
 /// Default number of bundles uploaded at the same time.
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 2;

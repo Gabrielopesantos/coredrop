@@ -1,28 +1,27 @@
 #![warn(missing_docs)]
 
-//! Standalone Kubernetes coredump handler: capture backends, the node-local
-//! spool, object-store upload, manifest/event types, and the daemon-side
-//! helpers that use them.
+//! Standalone Kubernetes coredump handler.
+//!
+//! The code is split by where it runs:
+//!
+//! - [`handler`]: the `core_pattern` pipe handler. The kernel execs it on
+//!   the host, once per crash.
+//! - [`daemon`]: the long-running pod. It installs `core_pattern`, writes
+//!   the handler config, uploads the spool, and reports captures.
+//! - The top-level modules are what both sides share: the handler config
+//!   ([`config`]), the spool layout ([`spool`]), the capture datagram
+//!   ([`events`]), the manifest, the capture filter, and cgroup identity.
 
 pub mod backend;
-pub mod buildid;
 pub mod cgroup;
 pub mod config;
 pub mod core_pattern;
-pub mod crictl;
+pub mod daemon;
 pub mod events;
 pub mod filter;
 pub mod handler;
-pub mod health;
-pub mod k8s_events;
 pub mod manifest;
-pub mod metrics;
-pub mod ratelimit;
-pub mod redact;
-pub mod snapshot;
 pub mod spool;
-pub mod upload;
-pub mod uploader;
 
 /// Host path the `DaemonSet` installs the binary to, so the kernel can exec it as
 /// the `core_pattern` pipe target. Overridable via `CAPTURE_HANDLER_PATH`.

@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use coredrop::config::HandlerConfig;
+use coredrop::daemon::upload;
 use coredrop::events::{CaptureEventPayload, Outcome};
 use coredrop::filter::CaptureFilter;
 use coredrop::handler::{CaptureArgs, run};
 use coredrop::manifest::Manifest;
 use coredrop::spool::{self, Spool};
-use coredrop::upload;
 
 mod common;
 use common::{

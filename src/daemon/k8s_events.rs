@@ -5,7 +5,7 @@
 //! `kubectl get events` can surface them.
 //!
 //! Payloads come from two places: the handler's datagrams (see
-//! [`crate::events`]) and the uploader's reports (see [`crate::uploader`]).
+//! [`crate::events`]) and the uploader's reports (see [`crate::daemon::uploader`]).
 //! A datagram for a capture that left a spool bundle is logged as
 //! `capture spooled` and wakes the uploader; the capture is complete once the
 //! uploader reports the uploaded bundle. This module owns logging,
@@ -26,8 +26,8 @@ use tracing::{debug, info, warn};
 
 use crate::cgroup::is_pod_uid;
 use crate::config::ensure_private_dir;
+use crate::daemon::metrics::Metrics;
 use crate::events::{CaptureEventPayload, Outcome};
-use crate::metrics::Metrics;
 
 const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 

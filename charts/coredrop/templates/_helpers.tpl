@@ -34,7 +34,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/*
 The object-store option keys the daemon forwards to the handler. Source of
-truth is ALLOWED_STORE_OPTS in src/upload.rs; the `helpers_store_opts_match_allowlist`
+truth is ALLOWED_STORE_OPTS in src/daemon/upload.rs; the `helpers_store_opts_match_allowlist`
 test there fails if this copy drifts from it.
 */}}
 {{- define "coredrop.allowedStoreOpts" -}}

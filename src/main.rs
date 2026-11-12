@@ -26,11 +26,11 @@ use tracing::{error, info, warn};
 
 use coredrop::config::HandlerConfig;
 use coredrop::core_pattern::{CorePatternCheck, CorePatternGuard};
+use coredrop::daemon::metrics::Metrics;
+use coredrop::daemon::uploader::{UploadSettings, Uploader};
 use coredrop::filter::CaptureFilter;
 use coredrop::handler::{CaptureArgs, KernelPipe, run as run_handler};
-use coredrop::metrics::Metrics;
 use coredrop::spool::Spool;
-use coredrop::uploader::{UploadSettings, Uploader};
 
 /// Default time the daemon keeps uploading the spool after SIGTERM. The
 /// chart's termination grace period adds a margin on top.
@@ -125,16 +125,16 @@ struct DaemonArgs {
 
     /// Age in seconds past which a spooled capture that still fails to
     /// upload is deleted.
-    #[arg(long, env = "CAPTURE_SPOOL_MAX_AGE_SECS", default_value_t = coredrop::uploader::DEFAULT_SPOOL_MAX_AGE_SECS)]
+    #[arg(long, env = "CAPTURE_SPOOL_MAX_AGE_SECS", default_value_t = coredrop::daemon::uploader::DEFAULT_SPOOL_MAX_AGE_SECS)]
     spool_max_age_secs: u64,
 
     /// Spooled captures the daemon uploads at the same time.
-    #[arg(long, env = "CAPTURE_UPLOAD_CONCURRENCY", default_value_t = coredrop::uploader::DEFAULT_UPLOAD_CONCURRENCY, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64))]
+    #[arg(long, env = "CAPTURE_UPLOAD_CONCURRENCY", default_value_t = coredrop::daemon::uploader::DEFAULT_UPLOAD_CONCURRENCY, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64))]
     upload_concurrency: usize,
 
     /// Time limit in seconds for one upload attempt of one spooled capture;
     /// 0 = no limit. A timed-out capture is retried later.
-    #[arg(long, env = "CAPTURE_UPLOAD_TIMEOUT_SECS", default_value_t = coredrop::uploader::DEFAULT_UPLOAD_TIMEOUT_SECS)]
+    #[arg(long, env = "CAPTURE_UPLOAD_TIMEOUT_SECS", default_value_t = coredrop::daemon::uploader::DEFAULT_UPLOAD_TIMEOUT_SECS)]
     upload_timeout_secs: u64,
 
     /// On SIGTERM, how long in seconds the daemon keeps uploading the spool
@@ -185,7 +185,7 @@ struct DaemonArgs {
 
     /// Address of the Prometheus `/metrics` endpoint (`host:port`); empty
     /// turns the endpoint off.
-    #[arg(long, env = "CAPTURE_METRICS_ADDR", default_value = coredrop::metrics::DEFAULT_METRICS_ADDR, value_parser = parse_metrics_addr)]
+    #[arg(long, env = "CAPTURE_METRICS_ADDR", default_value = coredrop::daemon::metrics::DEFAULT_METRICS_ADDR, value_parser = parse_metrics_addr)]
     metrics_addr: MetricsAddr,
 }
 
@@ -315,13 +315,13 @@ impl DaemonArgs {
             info!("no object store configured; the handler discards cores");
             return Ok(None);
         };
-        let store_options = coredrop::upload::store_options_from_env();
-        if coredrop::upload::is_plaintext_endpoint(&store_options) {
+        let store_options = coredrop::daemon::upload::store_options_from_env();
+        if coredrop::daemon::upload::is_plaintext_endpoint(&store_options) {
             warn!(
                 "object-store endpoint is plaintext HTTP; cores traverse the network unencrypted"
             );
         }
-        coredrop::upload::object_store_from_url_opts(url, store_options)
+        coredrop::daemon::upload::object_store_from_url_opts(url, store_options)
             .map(Some)
             .with_context(|| {
                 format!("--store-url {url} is set, but the object store cannot be built")
@@ -393,7 +393,7 @@ async fn main() -> Result<()> {
         Some("check") => {
             let daemon = DaemonArgs::load(argv.iter().take(1).chain(&argv[2..]).cloned())
                 .unwrap_or_else(|e| e.exit());
-            coredrop::health::check(
+            coredrop::daemon::health::check(
                 &daemon.handler_path,
                 &daemon.handler_config_path,
                 &daemon.core_pattern_path,
@@ -440,7 +440,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         // Say so, or a missing identity looks like a bug rather than a setting.
         None => info!("no CRI endpoint configured; crictl will resolve one on the node"),
         Some(endpoint) => {
-            if let Some(socket) = coredrop::crictl::unix_socket_path(endpoint)
+            if let Some(socket) = coredrop::handler::crictl::unix_socket_path(endpoint)
                 && !std::path::Path::new(socket).exists()
             {
                 warn!(
@@ -456,7 +456,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     // it would send datagrams into the void. It is bound even with
     // --no-events: the daemon logs every capture it receives there.
     let socket_path = coredrop::config::event_socket_path_for(&args.handler_config_path);
-    let events_socket = match coredrop::k8s_events::bind_socket(&socket_path) {
+    let events_socket = match coredrop::daemon::k8s_events::bind_socket(&socket_path) {
         Ok(socket) => {
             info!(path = %socket_path.display(), "capture event socket bound");
             socket
@@ -502,7 +502,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     let wake = Arc::new(Notify::new());
     let (reports_tx, reports_rx) = mpsc::unbounded_channel();
     let (listener_stop_tx, listener_stop_rx) = oneshot::channel::<()>();
-    let listener = tokio::spawn(coredrop::k8s_events::run_listener(
+    let listener = tokio::spawn(coredrop::daemon::k8s_events::run_listener(
         events_socket,
         reports_rx,
         wake.clone(),
@@ -596,7 +596,7 @@ async fn start_metrics(addr: Option<SocketAddr>, spool_max_bytes: u64) -> Arc<Me
     match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {
             info!(%addr, "metrics endpoint listening on /metrics");
-            tokio::spawn(coredrop::metrics::serve(listener, metrics.clone()));
+            tokio::spawn(coredrop::daemon::metrics::serve(listener, metrics.clone()));
         }
         Err(e) => {
             error!(error = %e, %addr, "failed to bind the metrics endpoint; running without metrics");
@@ -716,7 +716,9 @@ mod tests {
         assert_eq!(
             parse(&["coredrop"]),
             MetricsAddr(Some(
-                coredrop::metrics::DEFAULT_METRICS_ADDR.parse().unwrap()
+                coredrop::daemon::metrics::DEFAULT_METRICS_ADDR
+                    .parse()
+                    .unwrap()
             ))
         );
         assert_eq!(

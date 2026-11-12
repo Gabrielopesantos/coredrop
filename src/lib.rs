@@ -13,7 +13,6 @@
 //!   ([`events`]), the object keys ([`keys`]), the manifest, the capture
 //!   filter, and cgroup identity.
 
-pub mod backend;
 pub mod cgroup;
 pub mod config;
 pub mod core_pattern;

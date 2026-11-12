@@ -2,7 +2,7 @@
 //!
 //! The pre-reap `/proc` snapshot is backend-independent; only the core's
 //! destination differs - that is this interface boundary. The
-//! [`SpoolBackend`](crate::spool::SpoolBackend) (zstd-in-stream write to the
+//! [`SpoolBackend`](crate::handler::drain::SpoolBackend) (zstd-in-stream write to the
 //! node-local spool) is the backend. A core that is not kept is never read:
 //! the handler closes the pipe, and the kernel stops the dump.
 

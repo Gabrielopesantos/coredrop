@@ -1,5 +1,6 @@
-//! Object store access: the key scheme, building the store from the daemon's
-//! environment, and the uploads the daemon makes from the spool.
+//! Object store access: building the store from the daemon's environment,
+//! and the uploads the daemon makes from the spool. The key scheme is in
+//! [`crate::keys`].
 
 use std::path::Path;
 use std::sync::Arc;
@@ -11,53 +12,6 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Instant, timeout_at};
 use tracing::warn;
-
-/// Object keys for one capture. Every object of a capture shares the prefix
-/// `{cluster}/{podUID}/{containerID}/{timestamp}-{hostPid}`; the suffix names
-/// the object. Handler-derivable from the cgroup - no UUIDs; the manifest
-/// carries the human-readable identity from crictl. The host PID
-/// disambiguates two crashes in the same container within the same second
-/// (possible before the rate limiter engages), which would otherwise
-/// overwrite each other.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObjectKeys {
-    prefix: String,
-}
-
-impl ObjectKeys {
-    /// Build the key prefix for one capture:
-    /// `{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}`.
-    #[must_use]
-    pub fn new(
-        cluster: &str,
-        pod_uid: &str,
-        container_id: &str,
-        timestamp: i64,
-        host_pid: i32,
-    ) -> Self {
-        Self {
-            prefix: format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}"),
-        }
-    }
-
-    /// `<prefix>-core.zst`
-    #[must_use]
-    pub fn core(&self) -> String {
-        format!("{}-core.zst", self.prefix)
-    }
-
-    /// `<prefix>-procsnapshot.tar`
-    #[must_use]
-    pub fn proc_snapshot(&self) -> String {
-        format!("{}-procsnapshot.tar", self.prefix)
-    }
-
-    /// `<prefix>-manifest.json`, written last (blob-first ordering).
-    #[must_use]
-    pub fn manifest(&self) -> String {
-        format!("{}-manifest.json", self.prefix)
-    }
-}
 
 /// Buffered single-shot PUT of a small object (the proc snapshot tar or the
 /// manifest JSON). Unlike the multi-GB core, these are bounded and fit in
@@ -289,6 +243,7 @@ pub fn object_store_from_url_opts(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::keys::ObjectKeys;
     use crate::testutil::ENV_LOCK;
     use object_store::memory::InMemory;
 
@@ -319,30 +274,6 @@ mod tests {
             chart, rust,
             "coredrop.allowedStoreOpts in _helpers.tpl drifted from ALLOWED_STORE_OPTS"
         );
-    }
-
-    #[test]
-    fn builds_object_keys() {
-        assert_eq!(
-            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242).core(),
-            "prod/pod-uid-123/abc123def/1749600000-4242-core.zst"
-        );
-        assert_eq!(
-            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242)
-                .proc_snapshot(),
-            "prod/pod-uid-123/abc123def/1749600000-4242-procsnapshot.tar"
-        );
-        assert_eq!(
-            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242).manifest(),
-            "prod/pod-uid-123/abc123def/1749600000-4242-manifest.json"
-        );
-    }
-
-    #[test]
-    fn distinct_pids_yield_distinct_keys_within_the_same_second() {
-        let a = ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 111).core();
-        let b = ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 222).core();
-        assert_ne!(a, b);
     }
 
     #[tokio::test]

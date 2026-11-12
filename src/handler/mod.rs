@@ -44,12 +44,12 @@ use tracing::{info, warn};
 use crate::backend::{CaptureBackend, CoreStats, DrainDeadline};
 use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
-use crate::daemon::upload::ObjectKeys;
 use crate::events::{self, CaptureEventPayload, Outcome};
 use crate::filter::Subject;
 use crate::handler::ratelimit::{RateDecision, RateLimiter};
 use crate::handler::redact::Redactor;
 use crate::handler::snapshot::ProcSnapshot;
+use crate::keys::ObjectKeys;
 use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
 use crate::spool::{self, Bundle, Spool, SpoolBackend, SpoolBudget};
 

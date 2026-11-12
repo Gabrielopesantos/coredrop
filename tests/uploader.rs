@@ -14,10 +14,10 @@ use tokio::sync::{Notify, mpsc};
 
 use coredrop::config::HandlerConfig;
 use coredrop::daemon::metrics::Metrics;
-use coredrop::daemon::upload::ObjectKeys;
 use coredrop::daemon::uploader::{UploadSettings, Uploader};
 use coredrop::events::{CaptureEventPayload, Outcome};
 use coredrop::handler::{CaptureArgs, run};
+use coredrop::keys::ObjectKeys;
 use coredrop::manifest::Manifest;
 use coredrop::spool::Spool;
 

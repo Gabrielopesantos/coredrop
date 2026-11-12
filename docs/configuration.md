@@ -136,7 +136,7 @@ an unknown field never matches an `exclude` entry, and never stops an
 
 Object-store credentials (`AWS_ACCESS_KEY_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`,
 `AZURE_STORAGE_ACCESS_KEY`, ...) are read from the environment only - never
-flags - and only an allowlist of keys is read (`src/upload.rs`,
+flags - and only an allowlist of keys is read (`src/daemon/upload.rs`,
 `ALLOWED_STORE_OPTS`). Only the daemon reads them: the handler config file
 holds no credentials. The daemon writes that file mode `0600` in a `0700`
 directory and rewrites it on startup. On `helm uninstall`, the post-delete

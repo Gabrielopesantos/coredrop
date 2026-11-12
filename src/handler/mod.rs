@@ -26,6 +26,12 @@
 //!    no stdout) and treats a spooled capture as a hint to scan the spool.
 //!    Best-effort.
 
+pub mod buildid;
+pub mod crictl;
+pub mod ratelimit;
+pub mod redact;
+pub mod snapshot;
+
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::pin::Pin;
@@ -38,15 +44,14 @@ use tracing::{info, warn};
 use crate::backend::{CaptureBackend, CoreStats, DrainDeadline};
 use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
-use crate::crictl;
+use crate::daemon::upload::ObjectKeys;
 use crate::events::{self, CaptureEventPayload, Outcome};
 use crate::filter::Subject;
+use crate::handler::ratelimit::{RateDecision, RateLimiter};
+use crate::handler::redact::Redactor;
+use crate::handler::snapshot::ProcSnapshot;
 use crate::manifest::{CoreRef, Manifest, ManifestIdentity, ProcSnapshotRef};
-use crate::ratelimit::{RateDecision, RateLimiter};
-use crate::redact::Redactor;
-use crate::snapshot::ProcSnapshot;
 use crate::spool::{self, Bundle, Spool, SpoolBackend, SpoolBudget};
-use crate::upload::ObjectKeys;
 
 /// The positional args the kernel passes after the `capture` subcommand,
 /// matching the `core_pattern` template `%P %s %t %E`.

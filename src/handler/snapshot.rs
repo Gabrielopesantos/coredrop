@@ -18,8 +18,8 @@
 use std::io::Read;
 use std::path::Path;
 
-use crate::buildid::build_id_from_path;
-use crate::redact::Redactor;
+use crate::handler::buildid::build_id_from_path;
+use crate::handler::redact::Redactor;
 
 // Cap each snapshot file at 8 MiB.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -225,7 +225,7 @@ fn read_fd_listing(fd_dir: &Path) -> Option<(String, bool)> {
 )]
 mod tests {
     use super::*;
-    use crate::buildid::tests::synthetic_elf_with_build_id;
+    use crate::handler::buildid::tests::synthetic_elf_with_build_id;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 

@@ -239,7 +239,7 @@ pub(crate) mod tests {
         elf
     }
 
-    /// 64-bit fixture, used by `crate::snapshot`'s `/proc` fixture tree.
+    /// 64-bit fixture, used by `crate::handler::snapshot`'s `/proc` fixture tree.
     pub(crate) fn synthetic_elf_with_build_id(desc: &[u8]) -> Vec<u8> {
         synthetic_elf(ElfClass::Elf64, desc)
     }

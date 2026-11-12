@@ -10,7 +10,8 @@
 //!   the handler config, uploads the spool, and reports captures.
 //! - The top-level modules are what both sides share: the handler config
 //!   ([`config`]), the spool layout ([`spool`]), the capture datagram
-//!   ([`events`]), the manifest, the capture filter, and cgroup identity.
+//!   ([`events`]), the object keys ([`keys`]), the manifest, the capture
+//!   filter, and cgroup identity.
 
 pub mod backend;
 pub mod cgroup;
@@ -20,6 +21,7 @@ pub mod daemon;
 pub mod events;
 pub mod filter;
 pub mod handler;
+pub mod keys;
 pub mod manifest;
 pub mod spool;
 

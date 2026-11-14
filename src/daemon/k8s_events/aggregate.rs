@@ -58,8 +58,8 @@ impl Aggregator {
             .retain(|_, e| now.duration_since(e.created_at) < AGGREGATION_TTL);
     }
 
-    /// Sweep expired entries. Public so `run_listener` can call it on a
-    /// periodic timer even when no events are being recorded.
+    /// Sweep expired entries. `post_events` calls it on a periodic timer even
+    /// when no events are being recorded.
     pub(super) fn sweep(&mut self, now: Instant) {
         self.prune(now);
     }

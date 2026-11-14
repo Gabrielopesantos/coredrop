@@ -122,8 +122,13 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            # subPath: the file stays fixed for the pod's life. A directory
+            # mount gets ConfigMap updates, so during a rollout an old pod's
+            # probe would check the new config against the old daemon. A
+            # config change rolls the pods through checksum/config instead.
             - name: config
-              mountPath: /etc/coredrop
+              mountPath: /etc/coredrop/config.yaml
+              subPath: config.yaml
               readOnly: true
             # hostPath for the daemon-written handler config and the handler binary
             # install dir (the handler reads the config path from here).

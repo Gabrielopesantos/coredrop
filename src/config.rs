@@ -218,7 +218,9 @@ impl HandlerConfig {
     }
 
     /// Validate that paths are absolute and the free-space floor is a percent.
-    /// Called by [`Self::read`] before trusting a daemon-written config file.
+    /// Called by [`Self::write`], so the daemon fails at startup on a config
+    /// the handler would ignore, and by [`Self::read`] before trusting a
+    /// daemon-written config file.
     fn validate(&self) -> Result<()> {
         let must_be_absolute = |path: &Path, label: &str| -> Result<()> {
             if path.is_absolute() {
@@ -281,10 +283,12 @@ impl HandlerConfig {
     ///
     /// # Errors
     ///
-    /// Fails when the parent dir cannot be created/chmod'd, or the file
-    /// cannot be created/written/chmod'd.
+    /// Fails when the config is invalid (see [`Self::validate`]), when the
+    /// parent dir cannot be created/chmod'd, or when the file cannot be
+    /// created/written/chmod'd.
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
+        self.validate().context("invalid handler config")?;
         if let Some(parent) = path.parent() {
             ensure_private_dir(parent)
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
@@ -380,6 +384,21 @@ mod tests {
     }
 
     #[test]
+    fn write_rejects_a_config_the_handler_would_ignore() {
+        let cfg = HandlerConfig {
+            crictl_path: "crictl".into(),
+            ..HandlerConfig::default()
+        };
+        let (_dir, path) = tmp_config();
+        let err = cfg.write(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("crictl_path must be absolute"),
+            "{err:#}"
+        );
+        assert!(!path.exists(), "no config file is written");
+    }
+
+    #[test]
     fn write_sets_0600_file_and_0700_parent_dir() {
         let (dir, path) = tmp_config();
         HandlerConfig::default().write(&path).unwrap();
@@ -451,12 +470,13 @@ mod tests {
     #[test]
     fn read_invalid_config_returns_none() {
         // Parses as JSON, but `validate` rejects the relative crictl path.
+        // `write` rejects it too, so serialize it directly.
         let (_dir, path) = tmp_config();
         let cfg = HandlerConfig {
             crictl_path: "relative".into(),
             ..Default::default()
         };
-        cfg.write(&path).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).unwrap();
         assert!(HandlerConfig::read(&path).is_none());
     }
 

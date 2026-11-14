@@ -10,7 +10,7 @@
 //! a missing socket, a full send buffer, or an unreachable API server never
 //! affects the capture itself. The spool scan does not depend on the
 //! datagram either. The daemon-side listener and k8s Event client live in
-//! [`crate::k8s_events`].
+//! [`crate::daemon::k8s_events`].
 
 use std::fmt::Display;
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;

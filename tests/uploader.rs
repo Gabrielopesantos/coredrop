@@ -13,13 +13,13 @@ use tempfile::TempDir;
 use tokio::sync::{Notify, mpsc};
 
 use coredrop::config::HandlerConfig;
+use coredrop::daemon::metrics::Metrics;
+use coredrop::daemon::uploader::{UploadSettings, Uploader};
 use coredrop::events::{CaptureEventPayload, Outcome};
 use coredrop::handler::{CaptureArgs, run};
+use coredrop::keys::ObjectKeys;
 use coredrop::manifest::Manifest;
-use coredrop::metrics::Metrics;
 use coredrop::spool::Spool;
-use coredrop::upload::ObjectKeys;
-use coredrop::uploader::{UploadSettings, Uploader};
 
 mod common;
 use common::{

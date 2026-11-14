@@ -116,6 +116,17 @@ startup.
 {{- end -}}
 
 {{/*
+Fail rendering on a capture value the daemon would reject at startup. Without
+this check, int64 renders a non-number as 0 (no rate limit for
+maxCoresPerHour) and drops a fraction.
+*/}}
+{{- define "coredrop.validateCapture" -}}
+{{- include "coredrop.validateInt" (dict "name" "corePattern.pipeLimit" "value" .Values.corePattern.pipeLimit "min" 0 "max" 4294967295) -}}
+{{- include "coredrop.validateInt" (dict "name" "capture.maxCoresPerHour" "value" .Values.capture.maxCoresPerHour "min" 0 "max" 4294967295) -}}
+{{- include "coredrop.validateInt" (dict "name" "capture.crictlTimeoutSeconds" "value" .Values.capture.crictlTimeoutSeconds "min" 0) -}}
+{{- end -}}
+
+{{/*
 Render .value, a size, as the string the daemon parses: a whole number of
 bytes, or a whole number with a Kubernetes quantity suffix (binary Ki to Ei,
 decimal k to E). Fail rendering on anything else.

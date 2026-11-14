@@ -45,7 +45,6 @@ pub struct SnapshotFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct ProcSnapshot {
-    pub host_pid: i32,
     pub build_id: Option<String>,
     pub files: Vec<SnapshotFile>,
 }
@@ -109,11 +108,7 @@ impl ProcSnapshot {
         }
         let build_id = build_id_from_path(&base.join("exe"));
 
-        Self {
-            host_pid: pid,
-            build_id,
-            files,
-        }
+        Self { build_id, files }
     }
 
     /// Render the snapshot to an in-memory tar for object-store upload. Any

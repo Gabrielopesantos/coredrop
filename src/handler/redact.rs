@@ -24,9 +24,9 @@
 
 const REDACTED: &str = "<redacted>";
 
-const DEFAULT_KEYWORDS: &[&str] = &[
-    "PASSWORD",
-    "PASSWD",
+/// Key words that mark a secret, matched as substrings of the upper-cased
+/// key (`PASS` also matches `PASSWORD` and `PASSWD`).
+const KEYWORDS: &[&str] = &[
     "PASS",
     "PWD",
     "SECRET",
@@ -55,29 +55,19 @@ const ENTROPY_BITS: f64 = 3.5;
 #[derive(Debug, Clone)]
 pub struct Redactor {
     enabled: bool,
-    keywords: Vec<String>,
 }
 
 impl Default for Redactor {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            keywords: DEFAULT_KEYWORDS
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
-        }
+        Self { enabled: true }
     }
 }
 
 impl Redactor {
-    /// A redactor that never redacts (no keywords configured).
+    /// A redactor that never redacts.
     #[must_use]
     pub fn disabled() -> Self {
-        Self {
-            enabled: false,
-            keywords: Vec::new(),
-        }
+        Self { enabled: false }
     }
 
     /// Redact secret values in a raw `/proc/<pid>/environ` blob.
@@ -91,7 +81,7 @@ impl Redactor {
             if entry.is_empty() {
                 continue;
             }
-            out.extend_from_slice(&self.redact_entry(entry));
+            out.extend_from_slice(&Self::redact_entry(entry));
             out.push(0);
         }
         out
@@ -117,15 +107,15 @@ impl Redactor {
                 out.extend_from_slice(REDACTED.as_bytes());
                 redact_next = false;
             } else {
-                redact_next = self.is_secret_flag(arg);
-                out.extend_from_slice(&self.redact_entry(arg));
+                redact_next = Self::is_secret_flag(arg);
+                out.extend_from_slice(&Self::redact_entry(arg));
             }
             out.push(0);
         }
         out
     }
 
-    fn redact_entry(&self, entry: &[u8]) -> Vec<u8> {
+    fn redact_entry(entry: &[u8]) -> Vec<u8> {
         let Ok(text) = std::str::from_utf8(entry) else {
             return entry.to_vec();
         };
@@ -137,12 +127,12 @@ impl Redactor {
         if matches!(key, "PWD" | "OLDPWD") {
             return entry.to_vec();
         }
-        if self.key_is_secret(key) || looks_secret_value(value) {
+        if key_is_secret(key) || looks_secret_value(value) {
             return format!("{key}={REDACTED}").into_bytes();
         }
         // A connection string can hold a URL and secret pairs: run both.
-        let url = self.redact_url(value);
-        let pairs = self.redact_pairs(url.as_deref().unwrap_or(value));
+        let url = Self::redact_url(value);
+        let pairs = Self::redact_pairs(url.as_deref().unwrap_or(value));
         match pairs.or(url) {
             Some(rewritten) => format!("{key}={rewritten}").into_bytes(),
             None => entry.to_vec(),
@@ -151,7 +141,7 @@ impl Redactor {
 
     /// Redact secret-keyword values in a `;`-separated connection string
     /// (`Server=db;Password=x`). `None` when there is nothing to redact.
-    fn redact_pairs(&self, value: &str) -> Option<String> {
+    fn redact_pairs(value: &str) -> Option<String> {
         if !value.contains(';') {
             return None;
         }
@@ -159,7 +149,7 @@ impl Redactor {
         let pairs = value
             .split(';')
             .map(|pair| match pair.split_once('=') {
-                Some((key, v)) if !v.is_empty() && self.key_is_secret(key.trim()) => {
+                Some((key, v)) if !v.is_empty() && key_is_secret(key.trim()) => {
                     changed = true;
                     format!("{key}={REDACTED}")
                 }
@@ -172,23 +162,18 @@ impl Redactor {
 
     /// A valueless flag whose name matches a secret keyword (`--password`), so
     /// the *next* argv entry is its value and must go.
-    fn is_secret_flag(&self, arg: &[u8]) -> bool {
+    fn is_secret_flag(arg: &[u8]) -> bool {
         let Ok(text) = std::str::from_utf8(arg) else {
             return false;
         };
-        text.starts_with('-') && !text.contains('=') && self.key_is_secret(text)
-    }
-
-    fn key_is_secret(&self, key: &str) -> bool {
-        let upper = key.to_ascii_uppercase();
-        self.keywords.iter().any(|kw| upper.contains(kw.as_str()))
+        text.starts_with('-') && !text.contains('=') && key_is_secret(text)
     }
 
     /// Redact credentials inside a `scheme://...` URL: a userinfo password, a
     /// userinfo that is itself a secret-shaped token, and query-parameter
     /// values whose name matches a secret keyword. Returns `None` when the
     /// value isn't a URL or holds nothing worth redacting.
-    fn redact_url(&self, value: &str) -> Option<String> {
+    fn redact_url(value: &str) -> Option<String> {
         let scheme_end = value.find("://")?;
         let scheme = &value[..scheme_end];
         let rest = &value[scheme_end + 3..];
@@ -237,7 +222,7 @@ impl Redactor {
             },
             None => authority.to_string(),
         };
-        let tail = match self.redact_query(tail) {
+        let tail = match Self::redact_query(tail) {
             Some(rewritten) => {
                 changed = true;
                 rewritten
@@ -250,7 +235,7 @@ impl Redactor {
 
     /// Redact secret-keyword query-parameter values in a URL's path+query+
     /// fragment tail. `None` when there is no query or nothing matched.
-    fn redact_query(&self, tail: &str) -> Option<String> {
+    fn redact_query(tail: &str) -> Option<String> {
         let start = tail.find('?')?;
         let after = &tail[start + 1..];
         let end = after.find('#').unwrap_or(after.len());
@@ -260,7 +245,7 @@ impl Redactor {
         let query = after[..end]
             .split('&')
             .map(|pair| match pair.split_once('=') {
-                Some((key, value)) if !value.is_empty() && self.key_is_secret(key) => {
+                Some((key, value)) if !value.is_empty() && key_is_secret(key) => {
                     changed = true;
                     format!("{key}={REDACTED}")
                 }
@@ -271,6 +256,11 @@ impl Redactor {
 
         changed.then(|| format!("{path}?{query}{fragment}", path = &tail[..start]))
     }
+}
+
+fn key_is_secret(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    KEYWORDS.iter().any(|kw| upper.contains(kw))
 }
 
 fn looks_secret_value(value: &str) -> bool {

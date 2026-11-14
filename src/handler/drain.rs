@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
+use crate::handler::buildid::hex;
 use crate::spool::SpoolBudget;
 
 // Read the core in 256 KiB chunks.
@@ -26,9 +27,6 @@ const CORE_READ_CHUNK: usize = 256 * 1024;
 // the current block but keeps the window, so it costs almost no ratio.
 const BUDGET_FLUSH_INTERVAL: u64 = 1024 * 1024;
 
-// While a core is written, check the whole spool again after this many more
-// stored bytes. Concurrent captures and other disk users then count against
-// the cap, and each capture passes it by at most about this much.
 /// Integrity stats for a drained core. The default value describes a core
 /// that was not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -306,7 +304,7 @@ where
         CoreStats {
             bytes: drained,
             stored_bytes,
-            sha256: Some(hex_lower(&hasher.finalize())),
+            sha256: Some(hex(&hasher.finalize())),
             truncated: truncated_reason.is_some(),
             truncated_reason: truncated_reason.map(str::to_string),
         },
@@ -346,15 +344,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for HashingWriter<W> {
     }
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -385,7 +374,7 @@ mod tests {
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
-        hex_lower(&Sha256::digest(bytes))
+        hex(&Sha256::digest(bytes))
     }
 
     async fn drain(

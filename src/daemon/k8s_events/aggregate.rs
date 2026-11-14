@@ -53,15 +53,11 @@ pub(super) struct Recorded {
 }
 
 impl Aggregator {
+    /// Drop the entries past [`AGGREGATION_TTL`]. `post_events` also calls
+    /// it on a timer, so entries expire when no Events are recorded.
     pub(super) fn prune(&mut self, now: Instant) {
         self.entries
             .retain(|_, e| now.duration_since(e.created_at) < AGGREGATION_TTL);
-    }
-
-    /// Sweep expired entries. `post_events` calls it on a periodic timer even
-    /// when no events are being recorded.
-    pub(super) fn sweep(&mut self, now: Instant) {
-        self.prune(now);
     }
 
     /// Drop the entry for `key`, so its next occurrence starts a new Event.
@@ -239,7 +235,7 @@ mod tests {
         assert_eq!(agg.entries.len(), 1);
 
         let after_ttl = t0 + AGGREGATION_TTL + Duration::from_secs(1);
-        agg.sweep(after_ttl);
+        agg.prune(after_ttl);
         assert!(agg.entries.is_empty());
 
         let recorded = agg.record(key, after_ttl, || "ev-2".into()).unwrap();

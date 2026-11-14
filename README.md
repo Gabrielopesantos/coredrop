@@ -51,12 +51,15 @@ Handler flow, ordered by time-criticality:
 
 1. **Pre-reap `/proc` snapshot** - `maps`, `smaps`, `status`, `fd`, `limits`,
    `environ`, `cmdline`, `stack`, `exe`, plus the executable's GNU build-id.
-2. **Core drain** - stdin -> zstd -> sha256 -> spool file. The kernel then
+2. **Capture filter** - an optional include/exclude list of namespace, pod,
+   container, image and executable globs. A crash it drops is not read (see
+   [Capture filter](docs/configuration.md#capture-filter)).
+3. **Core drain** - stdin -> zstd -> sha256 -> spool file. The kernel then
    reaps the crashed process.
-3. **Proc snapshot** - the small in-memory tar, written to the spool.
-4. **CRI enrichment** - best-effort `crictl inspect` for namespace, pod and
+4. **Proc snapshot** - the small in-memory tar, written to the spool.
+5. **CRI enrichment** - best-effort `crictl inspect` for namespace, pod and
    container identity. Falls back to cgroup-derived pod UID + container ID.
-5. **Manifest** - the JSON record. The capture moves from `incoming/` to
+6. **Manifest** - the JSON record. The capture moves from `incoming/` to
    `ready/`.
 
 The daemon uploads each ready capture in the order core, proc snapshot,

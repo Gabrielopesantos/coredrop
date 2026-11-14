@@ -4,7 +4,9 @@ The kernel gives the handler no stdout, so the handler reports every capture
 to the daemon over a unix datagram socket (`/run/coredrop/events.sock` by
 default). The daemon logs `capture spooled` when a capture reaches the spool,
 and one `capture complete` line per capture once it is done - uploaded, or
-ended without an upload. Failures and non-pod crashes are included:
+ended without an upload. Failures, non-pod crashes and crashes the
+[capture filter](configuration.md#capture-filter) drops
+(`outcome="filtered"`, no Event) are included:
 
 ```sh
 $ kubectl -n <namespace> logs ds/coredrop | grep 'capture complete'

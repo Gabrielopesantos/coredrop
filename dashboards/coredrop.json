@@ -1397,7 +1397,7 @@
       "type": "timeseries",
       "id": 23,
       "title": "Events posted",
-      "description": "Kubernetes Event create and patch requests per minute, by result.",
+      "description": "Kubernetes Event create and patch requests per minute, by result, and Events dropped because the post queue was full.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1417,6 +1417,16 @@
           "expr": "sum by (result) (rate(coredrop_events_posted_total{cluster=~\"$cluster\",namespace=~\"$namespace\",pod=~\"$pod\"}[$__rate_interval])) * 60",
           "refId": "A",
           "legendFormat": "{{result}}",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(coredrop_events_dropped_total{cluster=~\"$cluster\",namespace=~\"$namespace\",pod=~\"$pod\"}[$__rate_interval])) * 60",
+          "refId": "A",
+          "legendFormat": "dropped",
           "range": true
         }
       ],

@@ -70,6 +70,7 @@ pub struct Metrics {
     cores_truncated: Counter,
     core_pattern_installed: Gauge,
     events_posted: Family<ResultLabel, Counter>,
+    events_dropped: Counter,
     payloads_dropped: Counter,
 }
 
@@ -159,17 +160,19 @@ impl Metrics {
             events_posted.clone(),
         );
 
+        let events_dropped: Counter = register(
+            &mut registry,
+            "events_dropped",
+            "Kubernetes Events dropped before a request because the post queue was full",
+        );
+
         let payloads_dropped: Counter = register(
             &mut registry,
             "event_payloads_dropped",
             "Capture-event datagrams the daemon could not parse",
         );
 
-        registry.register(
-            "build",
-            "coredrop build information",
-            Info::new([("version", env!("CARGO_PKG_VERSION"))]),
-        );
+        register_build_info(&mut registry);
 
         Self {
             registry,
@@ -186,6 +189,7 @@ impl Metrics {
             cores_truncated,
             core_pattern_installed,
             events_posted,
+            events_dropped,
             payloads_dropped,
         }
     }
@@ -254,6 +258,11 @@ impl Metrics {
             .inc();
     }
 
+    /// Count a k8s Event dropped because the post queue was full.
+    pub fn event_dropped(&self) {
+        self.events_dropped.inc();
+    }
+
     /// Count a capture-event datagram that did not parse.
     pub fn payload_dropped(&self) {
         self.payloads_dropped.inc();
@@ -270,6 +279,14 @@ impl Metrics {
 }
 
 /// Register a metric with no labels and return it.
+fn register_build_info(registry: &mut Registry) {
+    registry.register(
+        "build",
+        "coredrop build information",
+        Info::new([("version", env!("CARGO_PKG_VERSION"))]),
+    );
+}
+
 fn register<M>(registry: &mut Registry, name: &str, help: &str) -> M
 where
     M: Default + Clone + prometheus_client::registry::Metric,

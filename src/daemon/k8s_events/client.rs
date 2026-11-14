@@ -1,6 +1,7 @@
 //! Minimal client for the `events.k8s.io/v1` API, with the pod's
 //! projected `ServiceAccount` token and CA.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -37,7 +38,9 @@ pub(super) struct EventClient {
     /// `https://<api server>/apis/events.k8s.io/v1/namespaces`, parsed once.
     /// Requests append their path segments to it.
     pub(super) events_base: reqwest::Url,
-    pub(super) token: String,
+    /// The projected `ServiceAccount` token file. The kubelet rotates the
+    /// token, so each request reads the file again: see [`Self::token`].
+    pub(super) token_path: PathBuf,
 }
 
 /// The events API base for an API server origin (`https://host:port`).
@@ -50,10 +53,8 @@ impl EventClient {
     /// in-cluster API server env vars. `None` when any of those are missing -
     /// e.g. running outside a cluster - and the caller logs + drops events.
     pub(super) fn from_env() -> Option<Self> {
-        let token = std::fs::read_to_string(format!("{SERVICE_ACCOUNT_DIR}/token"))
-            .ok()?
-            .trim()
-            .to_string();
+        let token_path = PathBuf::from(format!("{SERVICE_ACCOUNT_DIR}/token"));
+        read_token(&token_path).ok()?;
         let ca_pem = std::fs::read(format!("{SERVICE_ACCOUNT_DIR}/ca.crt")).ok()?;
         let Some(http) = build_http(&ca_pem) else {
             warn!(
@@ -78,7 +79,7 @@ impl EventClient {
         Some(Self {
             http,
             events_base,
-            token,
+            token_path,
         })
     }
 
@@ -100,12 +101,19 @@ impl EventClient {
         Ok(url)
     }
 
+    /// The current `ServiceAccount` token. Read for each request: the kubelet
+    /// replaces the file before the old token expires, and a cached token
+    /// would fail every request after that until the daemon restarts.
+    fn token(&self) -> Result<String> {
+        read_token(&self.token_path)
+    }
+
     pub(super) async fn create_event(&self, namespace: &str, body: &Value) -> Result<()> {
         let url = self.events_url(namespace, None)?;
         let resp = self
             .http
             .post(url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token()?)
             .json(body)
             .send()
             .await
@@ -123,7 +131,7 @@ impl EventClient {
         let resp = self
             .http
             .patch(url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token()?)
             .header("Content-Type", "application/merge-patch+json")
             .json(body)
             .send()
@@ -138,13 +146,33 @@ impl EventClient {
 impl EventClient {
     /// Build an `EventClient` directly for unit tests. The underlying HTTP
     /// client is supplied by the caller so the test can control timeouts.
-    pub(super) fn new_for_test(http: reqwest::Client, api_server: &str, token: String) -> Self {
+    pub(super) fn new_for_test(
+        http: reqwest::Client,
+        api_server: &str,
+        token_path: PathBuf,
+    ) -> Self {
         Self {
             http,
             events_base: events_base(api_server).unwrap(),
-            token,
+            token_path,
         }
     }
+}
+
+/// Write the token `test` into `dir` and return the file's path.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(super) fn token_file(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("token");
+    std::fs::write(&path, "test\n").unwrap();
+    path
+}
+
+/// Read the `ServiceAccount` token at `path`, without surrounding whitespace.
+fn read_token(path: &Path) -> Result<String> {
+    let token = std::fs::read_to_string(path)
+        .with_context(|| format!("reading token {}", path.display()))?;
+    Ok(token.trim().to_string())
 }
 
 /// A non-2xx response from the API server.
@@ -185,6 +213,8 @@ pub(super) async fn api_result(resp: reqwest::Response, what: &'static str) -> R
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -271,8 +301,25 @@ Kf3s
         EventClient::new_for_test(
             build_http(TEST_CA_1.as_bytes()).unwrap(),
             origin,
-            "test".into(),
+            PathBuf::from("/nonexistent/token"),
         )
+    }
+
+    #[test]
+    fn token_is_read_again_after_rotation() {
+        let dir = TempDir::new().unwrap();
+        let path = token_file(&dir);
+        let client =
+            EventClient::new_for_test(reqwest::Client::new(), "http://127.0.0.1:1", path.clone());
+        assert_eq!(client.token().unwrap(), "test");
+
+        // The kubelet replaces the file with a new token.
+        std::fs::write(&path, "rotated\n").unwrap();
+        assert_eq!(client.token().unwrap(), "rotated");
+
+        std::fs::remove_file(&path).unwrap();
+        let err = client.token().unwrap_err();
+        assert!(format!("{err:#}").contains("reading token"), "{err:#}");
     }
 
     #[test]

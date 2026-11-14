@@ -291,6 +291,7 @@ async fn handle_payload(
 mod tests {
     use tempfile::TempDir;
 
+    use super::client::token_file;
     use super::*;
     use crate::events::Outcome;
 
@@ -459,7 +460,8 @@ mod tests {
             .timeout(Duration::from_secs(1))
             .build()
             .unwrap();
-        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", "test".into());
+        let token_dir = TempDir::new().unwrap();
+        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", token_file(&token_dir));
 
         let mut agg = Aggregator::default();
         let metrics = Metrics::new();
@@ -559,7 +561,9 @@ mod tests {
         // The first create fails, so the Event does not exist. The next
         // capture's patch gets 404 and creates a new Event instead.
         let (origin, seen) = fake_api_server(vec![500, 404, 201, 200]).await;
-        let client = EventClient::new_for_test(reqwest::Client::new(), &origin, "test".into());
+        let token_dir = TempDir::new().unwrap();
+        let client =
+            EventClient::new_for_test(reqwest::Client::new(), &origin, token_file(&token_dir));
         let mut agg = Aggregator::default();
         let metrics = Metrics::new();
         let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
@@ -608,7 +612,8 @@ mod tests {
             .timeout(Duration::from_secs(1))
             .build()
             .unwrap();
-        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", "test".into());
+        let token_dir = TempDir::new().unwrap();
+        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", token_file(&token_dir));
         let mut agg = Aggregator::default();
         let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
 

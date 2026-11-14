@@ -360,6 +360,7 @@ mod tests {
     fn config_file_errors_name_the_problem() {
         for (yaml, want) in [
             ("clusters: prod\n", "unknown key `clusters`"),
+            ("clusters: null\n", "unknown key `clusters`"),
             ("config: /other.yaml\n", "unknown key `config`"),
             ("help: true\n", "unknown key `help`"),
             ("max-cores-per-hour: many\n", "`max-cores-per-hour`"),

@@ -27,6 +27,8 @@ pub(super) fn apply(mut cmd: Command, path: &Path) -> Result<Command, clap::Erro
                 a.get_long() == Some(key.as_str()) && !FILE_ONLY_FLAGS.contains(&key.as_str())
             })
             .ok_or_else(|| file_error(format!("unknown key `{key}`")))?;
+        // `null` keeps the default, but only for a key that names a flag.
+        let Some(value) = value else { continue };
         check_file_value(arg, &value).map_err(|e| file_error(format!("`{key}`: {e}")))?;
         let id = arg.get_id().clone();
         cmd = cmd.mut_arg(id, |a| a.default_value(value));
@@ -61,8 +63,8 @@ fn check_file_value(arg: &clap::Arg, value: &str) -> Result<(), String> {
 
 /// The `key: value` pairs of a config file, each value as its flag would
 /// take it. A list or mapping (`capture-filter`) becomes JSON; a `null`
-/// value leaves the default. An empty file sets nothing.
-fn config_file_values(text: &str) -> Result<Vec<(String, String)>, String> {
+/// value is `None`, which leaves the default. An empty file sets nothing.
+fn config_file_values(text: &str) -> Result<Vec<(String, Option<String>)>, String> {
     use serde_norway::Value;
     let mapping = match serde_norway::from_str::<Value>(text).map_err(|e| e.to_string())? {
         Value::Null => return Ok(Vec::new()),
@@ -75,7 +77,10 @@ fn config_file_values(text: &str) -> Result<Vec<(String, String)>, String> {
             return Err(format!("key {key:?} is not a string"));
         };
         let value = match value {
-            Value::Null => continue,
+            Value::Null => {
+                values.push((key, None));
+                continue;
+            }
             Value::String(s) => s,
             Value::Bool(b) => b.to_string(),
             Value::Number(n) => n.to_string(),
@@ -84,7 +89,7 @@ fn config_file_values(text: &str) -> Result<Vec<(String, String)>, String> {
             }
             Value::Tagged(_) => return Err(format!("`{key}`: YAML tags are not supported")),
         };
-        values.push((key, value));
+        values.push((key, Some(value)));
     }
     Ok(values)
 }

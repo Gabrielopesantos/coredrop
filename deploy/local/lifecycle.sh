@@ -47,11 +47,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The host PID of the daemon. The kernel-exec'd handler runs as
-# `coredrop capture ...`, so it does not match.
+# The host PID of the daemon, which runs as `/bin/coredrop --config ...`. The
+# kernel-exec'd handler (`coredrop capture ...`) and the probes
+# (`/bin/coredrop check ...`) do not match.
 daemon_host_pid() {
   local pids
-  pids="$(node_exec pgrep -f '^/bin/coredrop$' || true)"
+  pids="$(node_exec pgrep -f '^/bin/coredrop --config ' || true)"
   [ "$(printf '%s\n' "$pids" | grep -c .)" -eq 1 ] \
     || die "expected exactly one coredrop daemon on the node, found: '${pids//$'\n'/ }'"
   printf '%s' "$pids"

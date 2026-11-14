@@ -1,8 +1,6 @@
-{{- include "coredrop.validateStoreOpts" . }}
-{{- include "coredrop.validateSpool" . }}
-{{- include "coredrop.validateUpload" . }}
-{{- include "coredrop.validateCapture" . }}
-{{- include "coredrop.validateFilter" . }}
+{{- $binDir := clean .Values.corePattern.hostBinDir }}
+{{- $runDir := clean .Values.corePattern.hostRunDir }}
+{{- $spoolDir := clean .Values.spool.hostDir }}
 {{- $criUnixSocket := "" }}
 {{- if hasPrefix "unix://" .Values.cri.runtimeEndpoint }}
 {{- $criUnixSocket = clean (trimPrefix "unix://" .Values.cri.runtimeEndpoint) }}
@@ -23,6 +21,8 @@ spec:
         # A config change rolls the DaemonSet: the daemon reads the file
         # only at startup.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # The store credentials reach the daemon as env, read at startup.
+        checksum/store: {{ include (print $.Template.BasePath "/store-secret.yaml") . | sha256sum }}
         {{- if .Values.metrics.enabled }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.metrics.port | quote }}
@@ -39,6 +39,9 @@ spec:
       # SIGTERM; the margin covers restoring core_pattern and exiting.
       terminationGracePeriodSeconds: {{ add .Values.upload.shutdownFlushSeconds 10 }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -56,20 +59,19 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # Root writes into a root-owned hostPath directory: no capability needed.
           securityContext:
-            runAsUser: 0
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # The path reaches the script as an environment variable, never as
+          # script text, so no character in it is shell syntax.
+          env:
+            - name: BIN_DIR
+              value: {{ $binDir | quote }}
           command:
             - sh
             - -c
-            - install -m 0755 /bin/coredrop {{ .Values.corePattern.hostBinDir }}/coredrop
+            - install -m 0755 /bin/coredrop "$BIN_DIR/coredrop"
           volumeMounts:
             - name: host-bin
-              mountPath: {{ .Values.corePattern.hostBinDir }}
+              mountPath: {{ $binDir | quote }}
       containers:
         - name: coredrop
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -133,11 +135,11 @@ spec:
             # hostPath for the daemon-written handler config and the handler binary
             # install dir (the handler reads the config path from here).
             - name: host-run
-              mountPath: {{ .Values.corePattern.hostRunDir }}
+              mountPath: {{ $runDir | quote }}
             # The spool, at its host path: the handler writes host paths, and
             # the daemon reads the same paths here.
             - name: host-spool
-              mountPath: {{ .Values.spool.hostDir | quote }}
+              mountPath: {{ $spoolDir | quote }}
             # Only these two sysctls are writable. The container's own /proc/sys
             # stays read-only. The mount point is outside /proc: the runtime
             # refuses most mounts under it.
@@ -148,7 +150,7 @@ spec:
             {{- if $criUnixSocket }}
             # CRI socket for crictl enrichment (post-drain, best-effort).
             - name: cri-socket
-              mountPath: {{ $criUnixSocket }}
+              mountPath: {{ $criUnixSocket | quote }}
               readOnly: true
             {{- end }}
       volumes:
@@ -157,15 +159,15 @@ spec:
             name: {{ include "coredrop.fullname" . }}-config
         - name: host-bin
           hostPath:
-            path: {{ .Values.corePattern.hostBinDir }}
+            path: {{ $binDir | quote }}
             type: DirectoryOrCreate
         - name: host-run
           hostPath:
-            path: {{ .Values.corePattern.hostRunDir }}
+            path: {{ $runDir | quote }}
             type: DirectoryOrCreate
         - name: host-spool
           hostPath:
-            path: {{ .Values.spool.hostDir | quote }}
+            path: {{ $spoolDir | quote }}
             type: DirectoryOrCreate
         - name: host-core-pattern
           hostPath:
@@ -178,6 +180,6 @@ spec:
         {{- if $criUnixSocket }}
         - name: cri-socket
           hostPath:
-            path: {{ $criUnixSocket }}
+            path: {{ $criUnixSocket | quote }}
             type: Socket
         {{- end }}

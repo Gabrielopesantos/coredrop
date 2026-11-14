@@ -33,135 +33,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-The object-store option keys the daemon forwards to the handler. Source of
-truth is ALLOWED_STORE_OPTS in src/daemon/upload.rs; the `helpers_store_opts_match_allowlist`
-test there fails if this copy drifts from it.
-*/}}
-{{- define "coredrop.allowedStoreOpts" -}}
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
-AWS_SESSION_TOKEN
-AWS_REGION
-AWS_DEFAULT_REGION
-AWS_ENDPOINT
-AWS_ALLOW_HTTP
-AWS_VIRTUAL_HOSTED_STYLE_REQUEST
-AWS_ROLE_ARN
-AWS_WEB_IDENTITY_TOKEN_FILE
-GOOGLE_SERVICE_ACCOUNT
-GOOGLE_SERVICE_ACCOUNT_KEY
-AZURE_STORAGE_ACCOUNT_NAME
-AZURE_STORAGE_ACCESS_KEY
-AZURE_STORAGE_CLIENT_ID
-AZURE_STORAGE_CLIENT_SECRET
-AZURE_STORAGE_TENANT_ID
-AZURE_CLIENT_ID
-AZURE_TENANT_ID
-AZURE_FEDERATED_TOKEN_FILE
-AZURE_AUTHORITY_HOST
-{{- end -}}
-
-{{/*
-Fail rendering on an unrecognized objectStore key. Every key in these two maps
-is declared as a store option, so an unknown one is a typo; the daemon's allowlist
-filter would drop it silently at runtime, leaving no error anywhere.
-*/}}
-{{- define "coredrop.validateStoreOpts" -}}
-{{- $allowed := regexSplit "\\s+" (include "coredrop.allowedStoreOpts" . | trim) -1 -}}
-{{- range $field := (list "config" "credentials") -}}
-{{- range $key, $_ := (get $.Values.capture.objectStore $field) -}}
-{{- if not (has $key $allowed) -}}
-{{- fail (printf "capture.objectStore.%s: unknown key %q. Valid keys: %s" $field $key (join ", " $allowed)) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Fail rendering on an unrecognized capture.filter key. The template reads only
-include and exclude, so another key (a typo) would be dropped silently, and
-the filter would keep every crash.
-*/}}
-{{- define "coredrop.validateFilter" -}}
-{{- range $key, $_ := (.Values.capture.filter | default dict) -}}
-{{- if not (has $key (list "include" "exclude")) -}}
-{{- fail (printf "capture.filter: unknown key %q. Valid keys: include, exclude" $key) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Fail rendering on a spool directory that is not an absolute path below the
-root. The handler only accepts absolute paths, and the cleanup worker mounts
-the directory's parent.
-*/}}
-{{- define "coredrop.validateSpool" -}}
-{{- $dir := clean .Values.spool.hostDir -}}
-{{- if or (not (isAbs $dir)) (eq $dir "/") -}}
-{{- fail (printf "spool.hostDir must be an absolute path below /: %q" .Values.spool.hostDir) -}}
-{{- end -}}
-{{- include "coredrop.validateInt" (dict "name" "spool.minFreePercent" "value" .Values.spool.minFreePercent "min" 0 "max" 100) -}}
-{{- end -}}
-
-{{/*
-Fail rendering on an upload or deadline value the daemon would reject at
-startup.
-*/}}
-{{- define "coredrop.validateUpload" -}}
-{{- include "coredrop.validateInt" (dict "name" "upload.concurrency" "value" .Values.upload.concurrency "min" 1 "max" 64) -}}
-{{- include "coredrop.validateInt" (dict "name" "upload.timeoutSeconds" "value" .Values.upload.timeoutSeconds "min" 0) -}}
-{{- include "coredrop.validateInt" (dict "name" "upload.shutdownFlushSeconds" "value" .Values.upload.shutdownFlushSeconds "min" 0) -}}
-{{- include "coredrop.validateInt" (dict "name" "spool.maxAgeSeconds" "value" .Values.spool.maxAgeSeconds "min" 0) -}}
-{{- include "coredrop.validateInt" (dict "name" "capture.drainDeadlineSeconds" "value" .Values.capture.drainDeadlineSeconds "min" 0) -}}
-{{- end -}}
-
-{{/*
-Fail rendering on a capture value the daemon would reject at startup. Without
-this check, int64 renders a non-number as 0 (no rate limit for
-maxCoresPerHour) and drops a fraction.
-*/}}
-{{- define "coredrop.validateCapture" -}}
-{{- include "coredrop.validateInt" (dict "name" "corePattern.pipeLimit" "value" .Values.corePattern.pipeLimit "min" 0 "max" 4294967295) -}}
-{{- include "coredrop.validateInt" (dict "name" "capture.maxCoresPerHour" "value" .Values.capture.maxCoresPerHour "min" 0 "max" 4294967295) -}}
-{{- include "coredrop.validateInt" (dict "name" "capture.crictlTimeoutSeconds" "value" .Values.capture.crictlTimeoutSeconds "min" 0) -}}
-{{- end -}}
-
-{{/*
-Render .value, a size, as the string the daemon parses: a whole number of
-bytes, or a whole number with a Kubernetes quantity suffix (binary Ki to Ei,
-decimal k to E). Fail rendering on anything else.
+Render .value, a size, as the string the daemon parses. values.schema.json
+allows a whole number of bytes, or a whole number with a Kubernetes quantity
+suffix. YAML numbers reach the template as float64, which toYaml would render
+in exponent form, so a number is rendered as an int64.
 */}}
 {{- define "coredrop.size" -}}
-{{- $v := .value -}}
-{{- if kindIs "string" $v -}}
-{{- if not (regexMatch "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$" $v) -}}
-{{- fail (printf "%s must be a size such as 10Gi, 500M or a byte count: %q" .name $v) -}}
-{{- end -}}
-{{- $v -}}
+{{- if kindIs "string" .value -}}
+{{- .value -}}
 {{- else -}}
-{{- include "coredrop.validateInt" (dict "name" .name "value" $v "min" 0) -}}
-{{- int64 $v -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Fail rendering when .value is not a whole number in [.min, .max]; .max is
-optional. The daemon parses these values as unsigned integers and exits on
-anything else. YAML numbers reach the template as float64, --set numbers as
-int64, so a float is accepted only when it has no fraction.
-*/}}
-{{- define "coredrop.validateInt" -}}
-{{- $v := .value -}}
-{{- $whole := or (kindIs "int" $v) (kindIs "int64" $v) (and (kindIs "float64" $v) (eq $v (floor $v))) -}}
-{{- if not $whole -}}
-{{- fail (printf "%s must be a whole number: %v" .name $v) -}}
-{{- end -}}
-{{- $n := int64 $v -}}
-{{- if lt $n (int64 .min) -}}
-{{- fail (printf "%s must be at least %d: %d" .name (int64 .min) $n) -}}
-{{- end -}}
-{{- if and (hasKey . "max") (gt $n (int64 .max)) -}}
-{{- fail (printf "%s must be at most %d: %d" .name (int64 .max) $n) -}}
+{{- int64 .value -}}
 {{- end -}}
 {{- end -}}
 
@@ -207,13 +88,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            runAsUser: 0
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
+            {{- toYaml .Values.securityContext | nindent 12 }}
           # The configured paths reach the script as environment variables,
           # never as script text, so no character in them is shell syntax.
           env:
@@ -281,11 +156,11 @@ spec:
       volumes:
         - name: host-bin-parent
           hostPath:
-            path: {{ dir $binDir }}
+            path: {{ dir $binDir | quote }}
             type: DirectoryOrCreate
         - name: host-run-parent
           hostPath:
-            path: {{ dir $runDir }}
+            path: {{ dir $runDir | quote }}
             type: DirectoryOrCreate
         - name: host-spool-parent
           hostPath:

@@ -306,7 +306,7 @@ impl HandlerConfig {
     ///
     /// # Errors
     ///
-    /// Fails when the config is invalid (see [`Self::validate`]), when the
+    /// Fails when the config is invalid (see `validate`), when the
     /// parent dir cannot be created/chmod'd, or when the file cannot be
     /// created/written/chmod'd.
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {

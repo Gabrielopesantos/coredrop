@@ -83,11 +83,14 @@ metadata:
     {{- include "coredrop.labels" . | nindent 4 }}
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 180
+  # Above the sum of the step timeouts (60 + 120 + 60 s), plus image pulls.
+  activeDeadlineSeconds: 300
   template:
     metadata:
       labels:
         {{- include "coredrop.selectorLabels" . | nindent 8 }}
+        # Selectors for the daemon pods leave out cleanup pods by this label.
+        coredrop.io/cleanup: "true"
     spec:
       serviceAccountName: {{ include "coredrop.fullname" . }}-cleanup
       restartPolicy: Never

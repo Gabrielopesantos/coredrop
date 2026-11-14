@@ -37,7 +37,7 @@ pub struct SpoolBackend {
     path: PathBuf,
     /// Max uncompressed bytes stored per core; `0` = unlimited.
     max_core_bytes: u64,
-    /// Max compressed bytes stored, from [`Spool::core_budget`].
+    /// Max compressed bytes stored, from [`crate::spool::Spool::core_budget`].
     max_stored_bytes: u64,
     /// The spool cap, checked again during the write.
     budget: Option<SpoolBudget>,

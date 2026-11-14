@@ -56,8 +56,9 @@ at startup.
 | nameOverride | string | `""` | Override the chart name segment of resource names. |
 | nodeSelector | object | `{}` | Pod node selector. |
 | podLabels | object | `{}` | Extra labels merged onto the daemon pod template. |
+| priorityClassName | string | `""` | PriorityClass of the daemon pods. A node agent that should survive node pressure can use `system-node-critical`. |
 | resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | DaemonSet resource requests/limits. |
-| securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}` | Daemon container securityContext. |
+| securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}` | securityContext of the daemon, its install-handler initContainer and the cleanup worker. |
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
 | spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. Use a directory for coredrop only: the handler creates `incoming/` and `ready/` in it, and `helm uninstall` deletes them. |
 | spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default); 0 = never. |
@@ -68,9 +69,10 @@ at startup.
 | upload.shutdownFlushSeconds | int | `25` | On pod shutdown, seconds the daemon keeps uploading the spool. The pod's termination grace period is this plus 10. |
 | upload.timeoutSeconds | int | `600` | Time limit in seconds for one upload attempt of one capture; it is retried after. `0` = no limit. |
 
-Only allowlisted object-store keys are read by the daemon. An unrecognized
-key in either map fails `helm install`/`template` naming it and
-the valid set - a typo can't reach the cluster and silently drop out:
+Only allowlisted object-store keys are read by the daemon. The chart's
+`values.schema.json` rejects an unrecognized key in either map, and a secret
+key in `config`, so `helm install`/`template` fails before a typo reaches the
+cluster. `credentials` also takes the non-secret keys:
 
 - `capture.objectStore.config` (non-secret):
   - `AWS_REGION`
@@ -105,6 +107,23 @@ data - crosses the cluster network in the clear. A plaintext endpoint can be
 used for in-cluster or dev stores only; anywhere else, TLS should be used.
 The daemon logs a warning at startup when it is configured with one.
 
+## Value checks
+
+Two layers check the values:
+
+```
+values.yaml --helm install/upgrade--> values.schema.json --> ConfigMap --rollout--> daemon start
+                                      types, ranges, key names           meaning: store URL builds,
+                                      fails before any node              spool on disk, filter patterns;
+                                                                         fails as a pod restart per node
+```
+
+- `values.schema.json` checks the types, the ranges and the key names. Helm
+  runs it on `install`, `upgrade`, `template` and `lint`.
+- The daemon checks what a value means when it starts. A value that fails
+  this check makes the pod restart, one node at a time as the rollout reaches
+  it. Use `helm upgrade --wait` to see such a failure.
+
 ## Events RBAC
 
 `events.enabled: true` (default) renders a `ClusterRole` +
@@ -112,8 +131,8 @@ The daemon logs a warning at startup when it is configured with one.
 `events.k8s.io` API group, bound to the DaemonSet's `ServiceAccount`. It's
 cluster-scoped because a crash can happen in any namespace the node hosts
 pods for - see [Capture log and Events](../../docs/capture-log-and-events.md)
-for what gets posted. Set `events.enabled: false` to skip both the RBAC objects and the
-daemon's socket listener; the handler then skips the report with no error.
+for what gets posted. Set `events.enabled: false` to skip the RBAC objects and the Event posts. The
+daemon still listens on its socket and logs every capture.
 
 ## Retention
 

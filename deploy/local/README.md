@@ -13,8 +13,9 @@ and a container cannot provide it.
 
 ## Prerequisites
 
-`limactl`, `docker`, `kubectl`, `helm`, `mc`, `zstd`, `jq`, `tar` - all
-provided by the repo's Nix dev shell (`nix develop`).
+`limactl`, `kubectl`, `helm`, `mc`, `zstd`, `jq`, `tar` - all provided by
+the repo's Nix dev shell (`nix develop`) - plus `nix` and a `docker` daemon on
+the host. The dev shell does not provide docker.
 
 ## Usage
 
@@ -99,7 +100,7 @@ and about 1 GiB of the VM's memory.
 | --- | --- |
 | `lib.sh` | Shared config (namespaces, image tags, release/bucket names) + helpers |
 | `cluster-lima-k3s.sh` | lima VM lifecycle: `cluster_up`/`cluster_down`/`load_images` |
-| `build-images.sh` | Builds the coredrop image + the segfault workload image (multi-stage `Dockerfile`) |
+| `build-images.sh` | Builds the coredrop image from the flake (`nix build .#image`, the image that ships) and the segfault workload image (`Dockerfile`) |
 | `minio/minio.yaml` | In-cluster MinIO + bucket-creation Job |
 | `helm-values/coredrop.local.yaml` | Chart overlay: local image, MinIO store, k3s CRI socket path |
 | `workloads/segfault.{c,yaml}` | Demo workload that faults on a short loop |

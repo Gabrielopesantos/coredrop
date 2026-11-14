@@ -35,6 +35,8 @@ pub enum Outcome {
     /// spooled.
     DrainDeadline,
     SkippedNonK8s,
+    /// The capture filter dropped the crash; the core is not read.
+    Filtered,
     NoStoreDiscard,
     Failed,
 }
@@ -42,12 +44,13 @@ pub enum Outcome {
 impl Outcome {
     /// The outcomes a capture can end with. [`Outcome::Spooled`] is not one:
     /// the uploader turns it into [`Outcome::Uploaded`] or [`Outcome::Failed`].
-    pub const FINAL: [Outcome; 7] = [
+    pub const FINAL: [Outcome; 8] = [
         Outcome::Uploaded,
         Outcome::SuppressedRateLimit,
         Outcome::SpoolFull,
         Outcome::DrainDeadline,
         Outcome::SkippedNonK8s,
+        Outcome::Filtered,
         Outcome::NoStoreDiscard,
         Outcome::Failed,
     ];
@@ -76,6 +79,7 @@ impl Outcome {
             Outcome::SpoolFull => "spool-full",
             Outcome::DrainDeadline => "drain-deadline",
             Outcome::SkippedNonK8s => "skipped-non-k8s",
+            Outcome::Filtered => "filtered",
             Outcome::NoStoreDiscard => "no-store-discard",
             Outcome::Failed => "failed",
         }

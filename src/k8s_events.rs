@@ -84,7 +84,7 @@ impl Reason {
             Outcome::SpoolFull => Some(Self::CoreDumpSpoolFull),
             Outcome::DrainDeadline => Some(Self::CoreDumpDrainDeadline),
             Outcome::NoStoreDiscard => Some(Self::CoreDiscardedNoStore),
-            Outcome::Spooled | Outcome::SkippedNonK8s | Outcome::Failed => None,
+            Outcome::Spooled | Outcome::SkippedNonK8s | Outcome::Filtered | Outcome::Failed => None,
         }
     }
 
@@ -831,6 +831,7 @@ mod tests {
         // target, and a failed capture has no artifacts to point at.
         assert_eq!(Reason::from_outcome(Outcome::Spooled), None);
         assert_eq!(Reason::from_outcome(Outcome::SkippedNonK8s), None);
+        assert_eq!(Reason::from_outcome(Outcome::Filtered), None);
         assert_eq!(Reason::from_outcome(Outcome::Failed), None);
     }
 

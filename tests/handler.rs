@@ -9,6 +9,7 @@ use tempfile::TempDir;
 
 use coredrop::config::HandlerConfig;
 use coredrop::events::{CaptureEventPayload, Outcome};
+use coredrop::filter::CaptureFilter;
 use coredrop::handler::{CaptureArgs, run};
 use coredrop::manifest::Manifest;
 use coredrop::spool::{self, Spool};
@@ -639,4 +640,121 @@ async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     assert!(event.pod_uid.is_none());
     assert!(event.namespace.is_none());
     assert_eq!(event.core_bytes, 0);
+}
+
+/// A fake crictl that prints the standard response and appends one line to
+/// `<root>/crictl-calls` per run, so a test can count the runs.
+fn counting_crictl(root: &Path, namespace: &str) -> PathBuf {
+    let calls = root.join("crictl-calls");
+    let script = fake_crictl_script(namespace, "nginx-abc123", "mycontainer").replacen(
+        "#!/bin/sh\n",
+        &format!("#!/bin/sh\necho run >> '{}'\n", calls.display()),
+        1,
+    );
+    write_fake_crictl(root, &script)
+}
+
+fn crictl_calls(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("crictl-calls")).map_or(0, |s| s.lines().count())
+}
+
+fn exclude(filter: &str) -> CaptureFilter {
+    CaptureFilter::parse(&format!(r#"{{"exclude":[{filter}]}}"#)).unwrap()
+}
+
+/// An excluded crash: the core is not read, nothing is spooled, and the
+/// capture is reported as filtered with its crictl identity.
+#[tokio::test]
+async fn run_filtered_capture_does_not_read_the_core_and_spools_nothing() {
+    let _guard = common::SPAWN_LOCK.lock().await;
+    let pid = 4260;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let (listener, sock_path) = bind_events_listener(tmp.path());
+    let mut config = base_config(tmp.path());
+    config.crictl_path = counting_crictl(tmp.path(), "kube-system");
+    config.crictl_timeout_secs = 10;
+    config.event_socket_path = Some(sock_path);
+    config.filter = exclude(r#"{"namespace":"kube-*"}"#);
+
+    run_without_reading(capture_args(pid, 11, TS), &config)
+        .await
+        .unwrap();
+
+    let spool = Spool::new(&config.spool_dir);
+    assert!(bundle_names(&spool.ready_dir()).is_empty());
+    assert!(bundle_names(&spool.incoming_dir()).is_empty());
+    let event = recv_event(&listener);
+    assert_eq!(event.outcome, Outcome::Filtered);
+    assert_eq!(event.namespace.as_deref(), Some("kube-system"));
+    assert_eq!(event.pod_uid.as_deref(), Some(POD_UID));
+    assert!(event.manifest_key.is_none());
+    assert_eq!(event.core_bytes, 0);
+    assert_eq!(crictl_calls(tmp.path()), 1);
+}
+
+/// A crash the filter keeps is spooled as usual, and crictl runs only once:
+/// the enrichment reuses the filter's result.
+#[tokio::test]
+async fn run_kept_by_the_filter_spools_and_runs_crictl_once() {
+    let _guard = common::SPAWN_LOCK.lock().await;
+    let pid = 4261;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let mut config = base_config(tmp.path());
+    config.crictl_path = counting_crictl(tmp.path(), "production");
+    config.crictl_timeout_secs = 10;
+    config.filter = exclude(r#"{"namespace":"kube-*"}"#);
+
+    let core_in: &[u8] = b"core payload the filter keeps";
+    run(capture_args(pid, 11, TS), &config, core_in)
+        .await
+        .unwrap();
+
+    let bundle = ready_bundle(&config, CONTAINER_ID, TS, pid);
+    assert!(bundle.join(spool::CORE_FILE).exists());
+    let manifest = read_manifest(&bundle);
+    assert_eq!(manifest.identity.namespace.as_deref(), Some("production"));
+    assert_eq!(read_capture(&bundle).outcome, Outcome::Spooled);
+    assert_eq!(crictl_calls(tmp.path()), 1);
+}
+
+/// crictl fails, so the namespace is unknown: the filter keeps the crash.
+#[tokio::test]
+async fn run_filter_fails_open_when_crictl_fails() {
+    let pid = 4262;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let mut config = base_config(tmp.path());
+    config.filter = exclude(r#"{"namespace":"*"}"#);
+
+    let core_in: &[u8] = b"core payload with unknown namespace";
+    run(capture_args(pid, 11, TS), &config, core_in)
+        .await
+        .unwrap();
+
+    let bundle = ready_bundle(&config, CONTAINER_ID, TS, pid);
+    assert!(bundle.join(spool::CORE_FILE).exists());
+    assert_eq!(read_capture(&bundle).outcome, Outcome::Spooled);
+}
+
+/// An `exe` pattern matches the un-mangled path and needs no crictl.
+#[tokio::test]
+async fn run_filter_matches_the_exe_path() {
+    let pid = 4263;
+
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let mut config = base_config(tmp.path());
+    config.filter = exclude(r#"{"exe":"/usr/bin/crash*"}"#);
+
+    run_without_reading(capture_args(pid, 11, TS), &config)
+        .await
+        .unwrap();
+
+    let spool = Spool::new(&config.spool_dir);
+    assert!(bundle_names(&spool.ready_dir()).is_empty());
 }

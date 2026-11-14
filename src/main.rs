@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 
 use coredrop::config::HandlerConfig;
 use coredrop::core_pattern::{CorePatternCheck, CorePatternGuard};
+use coredrop::filter::CaptureFilter;
 use coredrop::handler::{CaptureArgs, KernelPipe, run as run_handler};
 use coredrop::metrics::Metrics;
 use coredrop::spool::Spool;
@@ -137,6 +138,13 @@ struct DaemonArgs {
     #[arg(long, env = "CRICTL_TIMEOUT_SECS", default_value_t = coredrop::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
     crictl_timeout_secs: u64,
 
+    /// Which crashes the handler keeps, as JSON:
+    /// `{"include":[{...}],"exclude":[{...}]}`. Each entry holds glob
+    /// patterns for `namespace`, `pod`, `container`, `image` and `exe`; all
+    /// of an entry's patterns must match. Empty keeps every crash.
+    #[arg(long, env = "CAPTURE_FILTER", default_value = "", value_name = "JSON", value_parser = CaptureFilter::parse)]
+    capture_filter: CaptureFilter,
+
     /// Disable k8s Event emission on capture (`kubectl describe pod`/
     /// `kubectl get events` surfacing). Events are on by default. Captures are
     /// still logged by the daemon either way.
@@ -241,6 +249,7 @@ impl DaemonArgs {
             spool_min_free_percent: self.spool_min_free_percent,
             rate_state_path: coredrop::config::rate_state_path_for(&self.config_path),
             event_socket_path: Some(coredrop::config::event_socket_path_for(&self.config_path)),
+            filter: self.capture_filter.clone(),
         }
     }
 }
@@ -582,6 +591,7 @@ mod tests {
             upload_timeout_secs: 0,
             shutdown_flush_secs: 0,
             crictl_timeout_secs: 0,
+            capture_filter: CaptureFilter::default(),
             no_events: true,
             pipe_limit: 16,
             node_name: None,
@@ -606,6 +616,27 @@ mod tests {
             MetricsAddr(Some("127.0.0.1:9000".parse().unwrap()))
         );
         assert_eq!(parse(&["coredrop", "--metrics-addr="]), MetricsAddr(None));
+    }
+
+    #[test]
+    fn capture_filter_flag_reaches_the_handler_config() {
+        let parse = |argv: &[&str]| DaemonArgs::try_parse_from(argv).map(|a| a.capture_filter);
+        assert_eq!(parse(&["coredrop"]).unwrap(), CaptureFilter::default());
+        let filter = parse(&[
+            "coredrop",
+            "--capture-filter",
+            r#"{"exclude":[{"namespace":"kube-system"}],"include":[]}"#,
+        ])
+        .unwrap();
+        assert_eq!(filter.exclude.len(), 1);
+        assert!(parse(&["coredrop", "--capture-filter", r#"{"exclude":[{}]}"#]).is_err());
+        let args = DaemonArgs::try_parse_from([
+            "coredrop",
+            "--capture-filter",
+            r#"{"exclude":[{"exe":"*/crasher"}]}"#,
+        ])
+        .unwrap();
+        assert_eq!(args.to_handler_config(true).filter, args.capture_filter);
     }
 
     /// Temp stand-ins for the two kernel sysctls, seeded with plausible

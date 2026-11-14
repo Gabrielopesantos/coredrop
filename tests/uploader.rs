@@ -129,7 +129,7 @@ async fn uploads_bundles_deletes_them_and_reports_final_outcomes() {
 
     let second = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts + 1, pid);
     assert!(is_absent(&store, &second.core()).await);
-    get_object(&store, &second.proc_snapshot()).await;
+    assert!(is_absent(&store, &second.proc_snapshot()).await);
     let m = manifest(&store, &second.manifest()).await;
     assert_eq!(m.core.skipped_reason.as_deref(), Some("rate_limit"));
 

@@ -42,8 +42,9 @@ pub(crate) struct DaemonArgs {
     #[arg(long, env = "CAPTURE_CONFIG_PATH", default_value = crate::config::DEFAULT_CONFIG_PATH)]
     pub(crate) handler_config_path: PathBuf,
 
-    /// Cluster name - the first path segment of the object key.
-    #[arg(long, env = "CAPTURE_CLUSTER", default_value = crate::config::DEFAULT_CLUSTER)]
+    /// Cluster name - the first path segment of the object key. ASCII
+    /// letters, digits, `.`, `_` and `-`.
+    #[arg(long, env = "CAPTURE_CLUSTER", default_value = crate::config::DEFAULT_CLUSTER, value_parser = parse_cluster)]
     pub(crate) cluster: String,
 
     /// Pass `environ` and `cmdline` through un-redacted.
@@ -75,13 +76,14 @@ pub(crate) struct DaemonArgs {
     pub(crate) max_core_bytes: u64,
 
     /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
-    /// crashes still get a proc snapshot and manifest, just no core.
+    /// crashes still get a manifest, but no core and no proc snapshot.
     #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = crate::config::DEFAULT_MAX_CORES_PER_HOUR)]
     pub(crate) max_cores_per_hour: u32,
 
     /// Wall-clock deadline (seconds) for draining one core into the spool;
     /// 0 = no deadline. On expiry the handler drops the core and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
+    /// A core already truncated by a size limit keeps its stored part.
     #[arg(long, env = "CAPTURE_DRAIN_DEADLINE_SECS", default_value_t = crate::config::DEFAULT_DRAIN_DEADLINE_SECS)]
     pub(crate) drain_deadline_secs: u64,
 
@@ -91,8 +93,8 @@ pub(crate) struct DaemonArgs {
     pub(crate) spool_dir: PathBuf,
 
     /// Cap on the spool's total size, as a quantity (`10Gi`, `500M`, bytes
-    /// without a suffix); 0 = no cap. A core that does not fit is dropped;
-    /// its snapshot and manifest are still spooled.
+    /// without a suffix); 0 = no cap. A core that does not fit is dropped,
+    /// with its proc snapshot; its manifest is still spooled.
     #[arg(long = "spool-max-size", env = "CAPTURE_SPOOL_MAX_SIZE", default_value = "10Gi", value_name = "SIZE", value_parser = crate::config::parse_size)]
     pub(crate) spool_max_bytes: u64,
 
@@ -171,6 +173,10 @@ pub(crate) struct DaemonArgs {
 /// because clap reads an `Option` field as "flag may be absent".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetricsAddr(pub(crate) Option<SocketAddr>);
+
+fn parse_cluster(s: &str) -> Result<String, String> {
+    crate::config::check_cluster(s).map(|()| s.to_string())
+}
 
 fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
     if s.is_empty() {
@@ -342,6 +348,22 @@ mod tests {
     fn a_config_file_value_can_start_with_a_dash() {
         let args = load_with_file("cluster: \"-x\"\n", &[]).unwrap();
         assert_eq!(args.cluster, "-x");
+    }
+
+    #[test]
+    fn a_cluster_name_must_be_one_key_segment() {
+        for bad in ["", ".", "..", "a/b", "prod cluster"] {
+            assert!(
+                load_with_file(&format!("cluster: {bad:?}\n"), &[]).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            load_with_file("cluster: eu-west_1.prod\n", &[])
+                .unwrap()
+                .cluster,
+            "eu-west_1.prod"
+        );
     }
 
     #[test]

@@ -75,6 +75,25 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
 /// Default cluster name, the first segment of every object key.
 pub const DEFAULT_CLUSTER: &str = "local";
 
+/// Check a cluster name. It is the first segment of every object key, so it
+/// must be one non-empty segment: ASCII letters, digits, `.`, `_` and `-`,
+/// and not `.` or `..`.
+///
+/// # Errors
+///
+/// Returns the reason when `name` is not a valid cluster name.
+pub fn check_cluster(name: &str) -> Result<(), String> {
+    let chars_ok = name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if name.is_empty() || name == "." || name == ".." || !chars_ok {
+        return Err(format!(
+            "{name:?} must be non-empty, use only ASCII letters, digits, `.`, `_` and `-`, and not be `.` or `..`"
+        ));
+    }
+    Ok(())
+}
+
 /// Default `/proc` root.
 pub const DEFAULT_PROC_ROOT: &str = "/proc";
 
@@ -217,7 +236,8 @@ impl HandlerConfig {
         }
     }
 
-    /// Validate that paths are absolute and the free-space floor is a percent.
+    /// Validate that paths are absolute, the cluster name fits an object key
+    /// and the free-space floor is a percent.
     /// Called by [`Self::write`], so the daemon fails at startup on a config
     /// the handler would ignore, and by [`Self::read`] before trusting a
     /// daemon-written config file.
@@ -237,6 +257,9 @@ impl HandlerConfig {
             must_be_absolute(event_socket_path, "event_socket_path")?;
         }
         must_be_absolute(&self.spool_dir, "spool_dir")?;
+        if let Err(e) = check_cluster(&self.cluster) {
+            bail!("cluster: {e}");
+        }
         self.filter.validate()?;
         if self.spool_min_free_percent > 100 {
             bail!(

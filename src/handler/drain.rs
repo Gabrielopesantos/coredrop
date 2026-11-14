@@ -93,6 +93,10 @@ impl CaptureBackend for SpoolBackend {
     }
 }
 
+/// Time to finish a truncated core when the deadline passes while the rest
+/// of the stream is read only to count it.
+const FINALIZE_GRACE: Duration = Duration::from_secs(5);
+
 /// Put `deadline_at` on one await.
 async fn race<T>(
     fut: impl std::future::Future<Output = T>,
@@ -178,27 +182,38 @@ where
     let mut written = 0u64;
     let mut unflushed = 0u64;
     let mut checked_at = 0u64;
-    let mut storing = true;
-    let mut truncated_reason: Option<String> = None;
+    // Set when storing stops; the rest of the stream is only counted.
+    let mut truncated_reason: Option<&'static str> = None;
+    let mut finalize_by = deadline_at;
     loop {
         match race(core.read(&mut buf), deadline_at).await {
             Err(_elapsed) => {
-                warn!(drained, "core drain exceeded the deadline while reading");
-                return Err(DrainDeadline { bytes: drained }.into());
+                if truncated_reason.is_none() {
+                    warn!(drained, "core drain exceeded the deadline while reading");
+                    return Err(DrainDeadline { bytes: drained }.into());
+                }
+                // Past the size cap or the spool budget, the rest is only read
+                // to count it. The stored prefix is complete: keep it, and
+                // give the encoder a short time to finish it.
+                warn!(
+                    drained,
+                    "drain deadline passed after truncation; keeping the stored part"
+                );
+                finalize_by = Some(Instant::now() + FINALIZE_GRACE);
+                break;
             }
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
                 drained += n as u64;
-                if storing && encoder.get_ref().bytes >= max_stored_bytes {
+                if truncated_reason.is_none() && encoder.get_ref().bytes >= max_stored_bytes {
                     warn!(
                         max_stored_bytes,
                         "spool budget used up - keeping the core so far, draining the rest"
                     );
-                    storing = false;
-                    truncated_reason = Some("spool_full".to_string());
+                    truncated_reason = Some("spool_full");
                 }
                 // min() keeps the value <= n, so the conversion back to usize cannot fail.
-                let take = if storing {
+                let take = if truncated_reason.is_none() {
                     usize::try_from((n as u64).min(cap.saturating_sub(written))).unwrap_or(n)
                 } else {
                     0
@@ -219,29 +234,27 @@ where
                         // The flush put the stored bytes on disk, so the
                         // spool's usage includes them.
                         if spool_filled(budget, encoder.get_ref().bytes, &mut checked_at) {
-                            storing = false;
-                            truncated_reason = Some("spool_full".to_string());
+                            truncated_reason = Some("spool_full");
                         }
                     }
                 }
-                if storing && take < n {
+                if truncated_reason.is_none() && take < n {
                     warn!(
                         cap,
                         "core exceeds size cap - storing first {cap} bytes, draining the rest"
                     );
-                    storing = false;
-                    truncated_reason = Some("size_cap".to_string());
+                    truncated_reason = Some("size_cap");
                 }
             }
             Ok(Err(e)) => {
                 warn!(error = %e, drained, "core stream read error - finalizing partial core as truncated");
-                truncated_reason = Some("stream_error".to_string());
+                truncated_reason = Some("stream_error");
                 break;
             }
         }
     }
 
-    encoder_step(encoder.shutdown(), deadline_at, drained, "finalizing").await?;
+    encoder_step(encoder.shutdown(), finalize_by, drained, "finalizing").await?;
 
     let HashingWriter {
         inner,
@@ -254,7 +267,7 @@ where
             stored_bytes,
             sha256: Some(hex_lower(&hasher.finalize())),
             truncated: truncated_reason.is_some(),
-            truncated_reason,
+            truncated_reason: truncated_reason.map(str::to_string),
         },
         inner,
     ))
@@ -489,6 +502,29 @@ mod tests {
             "spool holds {} bytes, cap {MAX}",
             spool.usage_bytes()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_after_the_size_cap_keeps_the_stored_part() {
+        let core: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let (_dir, _spool, bundle) = bundle();
+        // The kernel sends the first part of the core, then stalls.
+        let mut reader = (&core[..]).chain(StallReader);
+
+        let stats = drain(
+            &bundle,
+            &mut reader,
+            10_000,
+            u64::MAX,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.truncated_reason.as_deref(), Some("size_cap"));
+        assert_eq!(stats.bytes, 50_000, "the bytes read before the deadline");
+        let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
+        assert_eq!(unzstd(&stored).await, &core[..10_000]);
     }
 
     #[tokio::test(start_paused = true)]

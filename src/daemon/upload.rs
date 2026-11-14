@@ -217,10 +217,8 @@ pub fn object_store_from_url_opts(
             }
             builder.build().map(|s| Arc::new(s) as _)
         }
-        // Local backends: no HTTP, no retry policy to apply.
-        object_store::ObjectStoreScheme::Memory => {
-            Ok(Arc::new(object_store::memory::InMemory::new()) as _)
-        }
+        // No HTTP, no retry policy to apply. `memory://` is not offered: it
+        // would keep every core in the daemon's RAM and lose it on exit.
         object_store::ObjectStoreScheme::Local => {
             object_store::local::LocalFileSystem::new_with_prefix(url.path())
                 .map(|s| Arc::new(s) as _)
@@ -304,10 +302,10 @@ mod tests {
             ("NOT_A_REAL_KEY".to_string(), "ignored".to_string()),
         ];
         assert!(object_store_from_url_opts("s3://some-bucket", s3_opts).is_some());
-        assert!(object_store_from_url_opts("memory:///", vec![]).is_some());
 
-        // Not a URL, and a URL whose scheme has no backend.
+        // Not a URL, a URL whose scheme has no backend, and RAM.
         assert!(object_store_from_url_opts("not a url", vec![]).is_none());
+        assert!(object_store_from_url_opts("memory:///", vec![]).is_none());
         assert!(object_store_from_url_opts("bogus://x", vec![]).is_none());
     }
 

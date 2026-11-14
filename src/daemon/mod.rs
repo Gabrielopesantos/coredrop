@@ -427,7 +427,7 @@ mod tests {
     /// crash to the handler: running on would discard every core.
     #[tokio::test]
     async fn errors_when_the_store_url_is_unusable() {
-        for url in ["not a url", "memory://bucket"] {
+        for url in ["not a url", "memory://bucket", "memory:///"] {
             let dir = TempDir::new().unwrap();
             let (pattern, pipe) = sysctls(dir.path());
             let config_path = dir.path().join("run").join("handler.json");

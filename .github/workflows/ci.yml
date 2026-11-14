@@ -1,14 +1,14 @@
 name: CI
 
-# Docs-only changes skip CI. It is a denylist (paths-ignore, not paths), so new
-# code paths are checked by default.
+# Changes to only the top-level README or the LICENSE skip CI. It is a
+# denylist (paths-ignore, not paths), so new code paths are checked by default.
 on:
   push:
     branches: [main]
-    paths-ignore: ["README.md", "LICENSE", "deploy/**"]
+    paths-ignore: ["README.md", "LICENSE"]
   pull_request:
     branches: [main]
-    paths-ignore: ["README.md", "LICENSE", "deploy/**"]
+    paths-ignore: ["README.md", "LICENSE"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,6 +29,14 @@ jobs:
         run: nix develop -c cargo clippy --all-targets -- -D warnings
       - name: Test
         run: nix develop -c cargo test
+      - name: Docs
+        run: RUSTDOCFLAGS="-D warnings" nix develop -c cargo doc --no-deps
+      # The chart and the daemon agree: each config the chart renders loads
+      # in the daemon's parser (needs helm, so it is an ignored test).
+      - name: Chart config loads in the daemon
+        run: nix develop -c cargo test --lib -- --ignored chart_config
+      - name: shellcheck
+        run: nix develop -c shellcheck -x -P deploy/local --severity=warning deploy/local/*.sh
 
       # Gate on the flake package + image building reproducibly.
       - name: Nix build (binary)
@@ -43,12 +51,37 @@ jobs:
           git diff --exit-code charts/coredrop/README.md
       - name: helm lint
         run: nix develop -c helm lint charts/coredrop
+      # values.schema.json must reject bad values. Each line is one bad value.
+      - name: helm template rejects bad values
+        run: |
+          fail=0
+          while read -r bad; do
+            if nix develop -c helm template coredrop charts/coredrop --set "$bad" >/dev/null 2>&1; then
+              echo "accepted a bad value: $bad"; fail=1
+            fi
+          done <<'BAD'
+          spool.maxSize=10GB
+          upload.concurrency=0
+          capture.maxCoresPerHour=1.5
+          spool.minFreePercent=101
+          spool.hostDir=/
+          corePattern.hostBinDir=/bin
+          capture.cluster=a/b
+          capture.objectStore.config.AWS_SECRET_ACCESS_KEY=x
+          capture.objectStore.config.TYPO=x
+          capture.filter.exlude=x
+          BAD
+          exit "$fail"
       # The optional PodMonitor must render too, the dashboard must be the
       # output of its generator, and the alert rules must load.
       - name: helm template (PodMonitor) + dashboard JSON
         run: |
           nix develop -c helm template coredrop charts/coredrop \
             --set metrics.podMonitor.enabled=true >/dev/null
+          nix develop -c helm template coredrop charts/coredrop \
+            --set events.enabled=false --set cleanup.enabled=false \
+            --set capture.objectStore.url=s3://bucket \
+            --set capture.objectStore.credentials.AWS_SECRET_ACCESS_KEY=x >/dev/null
           nix develop -c jq empty dashboards/coredrop.json
           nix develop -c sh -c 'python3 dashboards/generate.py | diff -u dashboards/coredrop.json -'
       - name: promtool check rules

@@ -95,7 +95,7 @@ fn is_dns1123_label(s: &str) -> bool {
 /// failure path is best-effort: logged and swallowed, never propagated - a
 /// broken API server must never crash the daemon.
 ///
-/// The Events are posted by a separate task (see [`post_events`]), so a slow
+/// The Events are posted by a separate task (see `post_events`), so a slow
 /// API server never delays the capture log, the metrics or the reports.
 ///
 /// When `stop` fires, the listener handles the reports still queued, then

@@ -7,7 +7,7 @@
 //! or PEM block). The match is not a greedy substring over
 //! the whole entry: `API_TIMEOUT=30` must survive while `API_KEY=...` must not.
 //!
-//! Values that parse as URLs get a second pass ([`Redactor::redact_url`]):
+//! Values that parse as URLs get a second pass (`Redactor::redact_url`):
 //! userinfo passwords, a lone high-entropy userinfo token, and query-parameter
 //! values under secret-keyword names are rewritten in place, so
 //! `DATABASE_URL=postgres://u:pw@h/db?password=x` leaks neither.

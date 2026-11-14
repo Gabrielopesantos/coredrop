@@ -20,8 +20,7 @@ cluster_up() {
   fi
   kube_context
   # Wait for the API server to answer through the forwarded port.
-  local i
-  for i in $(seq 1 60); do
+  for _ in $(seq 1 60); do
     kubectl get --raw='/readyz' >/dev/null 2>&1 && break
     sleep 2
   done

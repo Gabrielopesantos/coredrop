@@ -38,8 +38,12 @@ pub(crate) struct DaemonArgs {
     #[arg(long, default_value = crate::DEFAULT_HANDLER_PATH)]
     pub(crate) handler_path: PathBuf,
 
-    /// hostPath the daemon serializes the handler config to.
-    #[arg(long, default_value = crate::config::DEFAULT_CONFIG_PATH)]
+    /// Host path the daemon writes the handler config to. Not a flag: the
+    /// kernel runs the handler with an empty environment and only the
+    /// `core_pattern` arguments, so the handler can only find the config at
+    /// [`DEFAULT_CONFIG_PATH`](crate::config::DEFAULT_CONFIG_PATH). Tests set
+    /// a temp path.
+    #[arg(skip = PathBuf::from(crate::config::DEFAULT_CONFIG_PATH))]
     pub(crate) handler_config_path: PathBuf,
 
     /// Cluster name - the first path segment of the object key. ASCII

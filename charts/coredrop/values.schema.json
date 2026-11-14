@@ -111,8 +111,7 @@
       "additionalProperties": false,
       "properties": {
         "pipeLimit": { "$ref": "#/definitions/uint32" },
-        "hostBinDir": { "$ref": "#/definitions/hostDir" },
-        "hostRunDir": { "$ref": "#/definitions/hostDir" }
+        "hostBinDir": { "$ref": "#/definitions/hostDir" }
       }
     },
     "spool": {

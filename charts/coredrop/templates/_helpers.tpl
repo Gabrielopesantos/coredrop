@@ -55,7 +55,8 @@ cleanup-hook.yaml for why a Job has to be the thing driving it.
 */}}
 {{- define "coredrop.cleanupWorkerManifest" -}}
 {{- $binDir := clean .Values.corePattern.hostBinDir -}}
-{{- $runDir := clean .Values.corePattern.hostRunDir -}}
+{{- /* Fixed: the kernel-exec'd handler reads its config only here. */ -}}
+{{- $runDir := "/run/coredrop" -}}
 {{- $spoolDir := clean .Values.spool.hostDir -}}
 apiVersion: apps/v1
 kind: DaemonSet

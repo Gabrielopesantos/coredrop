@@ -1,8 +1,8 @@
 # Capture log and Events
 
 The kernel gives the handler no stdout, so the handler reports every capture
-to the daemon over a unix datagram socket (`/run/coredrop/events.sock` by
-default). The daemon logs `capture spooled` when a capture reaches the spool,
+to the daemon over a unix datagram socket (`/run/coredrop/events.sock`).
+The daemon logs `capture spooled` when a capture reaches the spool,
 and one `capture complete` line per capture once it is done - uploaded, or
 ended without an upload. Failures, non-pod crashes and crashes the
 [capture filter](configuration.md#capture-filter) drops
@@ -10,8 +10,8 @@ ended without an upload. Failures, non-pod crashes and crashes the
 
 ```sh
 $ kubectl -n <namespace> logs ds/coredrop | grep 'capture complete'
-INFO coredrop::k8s_events: capture complete outcome="uploaded" namespace="default" pod="my-app-7f8b9c" container="app" ... manifest_key="local/<podUID>/<containerID>/1717000000-4242-manifest.json"
-WARN coredrop::k8s_events: capture complete outcome="failed" ... error="draining core stream: ..."
+INFO coredrop::daemon::k8s_events::log: capture complete outcome="uploaded" namespace="default" pod="my-app-7f8b9c" container="app" ... manifest_key="local/<podUID>/<containerID>/1717000000-4242-manifest.json"
+WARN coredrop::daemon::k8s_events::log: capture complete outcome="failed" ... error="draining core stream: ..."
 ```
 
 The first failed upload of a capture is logged as a warning, `bundle upload

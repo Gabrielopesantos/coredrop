@@ -1,5 +1,6 @@
 {{- $binDir := clean .Values.corePattern.hostBinDir }}
-{{- $runDir := clean .Values.corePattern.hostRunDir }}
+{{- /* Fixed: the kernel-exec'd handler reads its config only here. */}}
+{{- $runDir := "/run/coredrop" }}
 {{- $spoolDir := clean .Values.spool.hostDir }}
 {{- $criUnixSocket := "" }}
 {{- if hasPrefix "unix://" .Values.cri.runtimeEndpoint }}
@@ -132,8 +133,8 @@ spec:
               mountPath: /etc/coredrop/config.yaml
               subPath: config.yaml
               readOnly: true
-            # hostPath for the daemon-written handler config and the handler binary
-            # install dir (the handler reads the config path from here).
+            # hostPath for the daemon-written handler config, events.sock and the
+            # rate-limit state. The handler reads its config from this fixed path.
             - name: host-run
               mountPath: {{ $runDir | quote }}
             # The spool, at its host path: the handler writes host paths, and

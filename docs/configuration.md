@@ -31,7 +31,6 @@ For the Helm values that set these flags, see the
 | `--no-events` | off | Disable k8s Event emission on capture; captures are still logged |
 | `--metrics-addr` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |
 | `--handler-path` | `/opt/coredrop/bin/coredrop` | Host path of the handler binary that `core_pattern` runs; absolute, no whitespace |
-| `--handler-config-path` | `/run/coredrop/handler.json` | Host path the daemon writes the handler config to; `events.sock` and the rate-limit state go next to it |
 | `--crictl-path` | `/usr/local/bin/crictl` | Path of crictl on the node, for the handler |
 | `--proc-root` | `/proc` | `/proc` root the handler reads |
 | `--core-pattern-path` | `/proc/sys/kernel/core_pattern` | File the `core_pattern` sysctl is written through |

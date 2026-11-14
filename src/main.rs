@@ -13,8 +13,6 @@
 //!   - health check (`coredrop check`): what the chart's readiness and
 //!     liveness probes exec. Exits non-zero when the capture path has drifted.
 
-use std::path::PathBuf;
-
 use anyhow::Result;
 
 use coredrop::config::HandlerConfig;
@@ -41,9 +39,8 @@ async fn main() -> Result<()> {
             let capture_args = CaptureArgs::parse(&argv[2..])?;
             // The kernel exec's with a clean environment, so read the daemon-written
             // hostPath config. Without it, the defaults store nothing.
-            let config_path =
-                env_path("CAPTURE_CONFIG_PATH", coredrop::config::DEFAULT_CONFIG_PATH);
-            let config = HandlerConfig::read(&config_path).unwrap_or_default();
+            let config =
+                HandlerConfig::read(coredrop::config::DEFAULT_CONFIG_PATH).unwrap_or_default();
             run_handler(capture_args, &config, KernelPipe::stdin()).await
         }
         // Run by the readiness/liveness probes, with the daemon's flags (in
@@ -53,8 +50,4 @@ async fn main() -> Result<()> {
         }
         _ => coredrop::daemon::main(argv).await,
     }
-}
-
-fn env_path(key: &str, default: &str) -> PathBuf {
-    std::env::var_os(key).map_or_else(|| PathBuf::from(default), PathBuf::from)
 }

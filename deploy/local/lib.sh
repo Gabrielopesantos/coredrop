@@ -36,8 +36,8 @@ SEGFAULT_IMAGE="${SEGFAULT_IMAGE:-docker.io/library/coredrop-segfault:dev}"
 CLEANUP_IMAGE="${CLEANUP_IMAGE:-docker.io/rancher/kubectl:v1.35.6}"
 
 # The node paths the chart's post-delete hook is supposed to remove; lifecycle.sh
-# asserts they are gone. Must match `corePattern.hostBinDir`/`hostRunDir` and
-# `spool.hostDir`.
+# asserts they are gone. Must match `corePattern.hostBinDir`, the fixed
+# /run/coredrop, and `spool.hostDir`.
 HOST_BIN_DIR="${HOST_BIN_DIR:-/opt/coredrop/bin}"
 HOST_RUN_DIR="${HOST_RUN_DIR:-/run/coredrop}"
 HOST_SPOOL_DIR="${HOST_SPOOL_DIR:-/var/lib/coredrop/spool}"

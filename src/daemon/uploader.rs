@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use object_store::ObjectStore;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -46,6 +46,11 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// Age past which a bundle left in `incoming/` is deleted. A handler finishes
 /// in seconds, so an older bundle belongs to a handler that was killed.
 const INCOMING_MAX_AGE: Duration = Duration::from_hours(1);
+
+/// When the flush time is up, how long the uploads in progress get to abort
+/// their multipart uploads. S3/GCS keep (and bill) the parts of an upload
+/// that nobody completes or aborts.
+const ABORT_WAIT: Duration = Duration::from_secs(2);
 
 /// Default first retry delay; it doubles per failed attempt up to
 /// [`MAX_BACKOFF`].
@@ -130,8 +135,10 @@ impl Uploader {
 
     /// Upload until `shutdown` completes, then keep going until the spool is
     /// empty or `flush` has passed. `wake` triggers an immediate scan.
-    /// Bundles left at the end stay in the spool for the next daemon; an
-    /// upload cut off mid-way leaves parts for the bucket's lifecycle rule.
+    /// Bundles left at the end stay in the spool for the next daemon. The
+    /// uploads in progress then get [`ABORT_WAIT`] to abort their multipart
+    /// uploads; parts of one that does not finish in time stay for the
+    /// bucket's lifecycle rule.
     pub async fn run(
         self,
         wake: Arc<Notify>,
@@ -144,10 +151,11 @@ impl Uploader {
         let mut scan = tokio::time::interval(SCAN_INTERVAL);
         scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut flush_deadline: Option<Instant> = None;
+        let (cancel_tx, cancel) = watch::channel(false);
         tokio::pin!(shutdown);
 
         loop {
-            self.dispatch(&mut pending, &mut tasks, &mut task_names);
+            self.dispatch(&mut pending, &mut tasks, &mut task_names, &cancel);
             if flush_deadline.is_some() && pending.is_empty() {
                 info!("spool flushed");
                 return;
@@ -162,6 +170,14 @@ impl Uploader {
                 }
                 () = sleep_until(flush_deadline), if flush_deadline.is_some() => {
                     warn!(pending = pending.len(), "flush time is up; remaining bundles stay in the spool");
+                    let _ = cancel_tx.send(true);
+                    let aborted = tokio::time::timeout(ABORT_WAIT, async {
+                        while tasks.join_next().await.is_some() {}
+                    })
+                    .await;
+                    if aborted.is_err() {
+                        warn!("uploads did not stop in time; their parts stay for the bucket's lifecycle rule");
+                    }
                     return;
                 }
                 () = wake.notified() => self.scan(&mut pending),
@@ -217,6 +233,7 @@ impl Uploader {
         pending: &mut BTreeMap<String, Pending>,
         tasks: &mut JoinSet<Result<Attempt>>,
         task_names: &mut HashMap<tokio::task::Id, String>,
+        cancel: &upload::Cancel,
     ) {
         let now = Instant::now();
         let limit = self.settings.concurrency.max(1);
@@ -232,12 +249,13 @@ impl Uploader {
             let store = self.store.clone();
             let deadline_at = self.settings.attempt_timeout.map(|t| now + t);
             let reported = p.reported;
+            let mut cancel = cancel.clone();
             let handle = tasks.spawn(async move {
                 let report = if reported {
                     None
                 } else {
                     let started = Instant::now();
-                    let payload = upload_bundle(&store, &dir, deadline_at).await?;
+                    let payload = upload_bundle(&store, &dir, deadline_at, &mut cancel).await?;
                     Some((payload, started.elapsed()))
                 };
                 let deleted = tokio::fs::remove_dir_all(&dir)
@@ -361,6 +379,7 @@ async fn upload_bundle(
     store: &Arc<dyn ObjectStore>,
     dir: &Path,
     deadline_at: Option<Instant>,
+    cancel: &mut upload::Cancel,
 ) -> Result<CaptureEventPayload> {
     let payload = read_capture(dir)?;
     let manifest_json = tokio::fs::read(dir.join(spool::MANIFEST_FILE))
@@ -373,7 +392,14 @@ async fn upload_bundle(
     };
 
     if let Some(core_key) = &manifest.core.object_key {
-        upload::upload_file(store, &dir.join(spool::CORE_FILE), core_key, deadline_at).await?;
+        upload::upload_file(
+            store,
+            &dir.join(spool::CORE_FILE),
+            core_key,
+            deadline_at,
+            cancel,
+        )
+        .await?;
     }
     if let Some(snapshot) = &manifest.proc_snapshot {
         upload::upload_file(
@@ -381,6 +407,7 @@ async fn upload_bundle(
             &dir.join(spool::SNAPSHOT_FILE),
             &snapshot.object_key,
             deadline_at,
+            cancel,
         )
         .await?;
     }

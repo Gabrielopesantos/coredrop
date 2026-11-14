@@ -69,7 +69,7 @@ upload:
   concurrency: 2
   # -- Time limit in seconds for one upload attempt of one capture; it is retried after. `0` = no limit.
   timeoutSeconds: 600
-  # -- On pod shutdown, seconds the daemon keeps uploading the spool. The pod's termination grace period is this plus 5.
+  # -- On pod shutdown, seconds the daemon keeps uploading the spool. The pod's termination grace period is this plus 10.
   shutdownFlushSeconds: 25
 
 # What happens to a crash once the handler captures it: where it's counted

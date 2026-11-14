@@ -4,7 +4,7 @@
 //! on a timer, and when the handler reports a spooled capture), uploads at
 //! most `concurrency` of them at a time, and deletes each bundle once its
 //! manifest is uploaded. A failed bundle stays in the spool and is retried
-//! with exponential backoff until it is older than `max_age`. Object keys are
+//! with exponential backoff until it is older than `max_age` (if set). Object keys are
 //! fixed per capture, so a bundle uploaded twice (daemon killed after the
 //! upload, before the delete) overwrites the same objects.
 //!
@@ -59,8 +59,9 @@ pub struct UploadSettings {
     pub concurrency: usize,
     /// Time limit for one upload attempt of one bundle; `None` = no limit.
     pub attempt_timeout: Option<Duration>,
-    /// Age past which a bundle that still fails to upload is deleted.
-    pub max_age: Duration,
+    /// Age past which a bundle that still fails to upload is deleted;
+    /// `None` = never.
+    pub max_age: Option<Duration>,
     /// Delay before the first retry of a failed bundle; it doubles per
     /// failed attempt, up to 10 minutes.
     pub retry_backoff: Duration,
@@ -71,7 +72,7 @@ impl Default for UploadSettings {
         Self {
             concurrency: DEFAULT_UPLOAD_CONCURRENCY,
             attempt_timeout: Some(Duration::from_secs(DEFAULT_UPLOAD_TIMEOUT_SECS)),
-            max_age: Duration::from_secs(DEFAULT_SPOOL_MAX_AGE_SECS),
+            max_age: Some(Duration::from_secs(DEFAULT_SPOOL_MAX_AGE_SECS)),
             retry_backoff: DEFAULT_RETRY_BACKOFF,
         }
     }
@@ -306,7 +307,10 @@ impl Uploader {
                     self.metrics.upload_attempt(false);
                 }
                 let age = bundle_age(&self.spool.ready_dir(), name);
-                if !p.reported && age.is_some_and(|age| age > self.settings.max_age) {
+                let expired = age
+                    .zip(self.settings.max_age)
+                    .is_some_and(|(age, max_age)| age > max_age);
+                if !p.reported && expired {
                     warn!(bundle = name, attempts = p.attempts, error = %format!("{e:#}"), "bundle is past the spool max age; deleting it");
                     // Report and count the capture once. The entry stays, so
                     // a failed delete is retried and not uploaded again.

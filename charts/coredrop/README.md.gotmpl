@@ -331,7 +331,8 @@ the pattern still points at the handler.
 
 Uninstalling deletes every capture still in the spool. Wait for the spool to
 drain first if those captures matter: the daemon logs `capture complete` for
-each upload.
+each upload. Without `helm uninstall --wait`, the cleanup can also run while
+a daemon still flushes the spool, and delete bundles it is uploading.
 
 Two details:
 
@@ -340,7 +341,7 @@ Two details:
   the container, and `rmdir` on a mount point fails with `EBUSY` - the files
   would be removed but the directories would survive.
 - Nothing owns that worker DaemonSet: `kubectl` creates it after the release is
-  already deleted. If the hook fails partway (its deadline is 180s), the worker
+  already deleted. If the hook fails partway (its deadline is 300s), the worker
   can be left running. The next `helm uninstall` reaps it before starting, but
   if you reinstall in between, delete it first - it will wipe
   the handler you just installed:

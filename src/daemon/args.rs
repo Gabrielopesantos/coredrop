@@ -102,7 +102,7 @@ pub(crate) struct DaemonArgs {
     pub(crate) spool_min_free_percent: u8,
 
     /// Age in seconds past which a spooled capture that still fails to
-    /// upload is deleted.
+    /// upload is deleted; 0 = never.
     #[arg(long, env = "CAPTURE_SPOOL_MAX_AGE_SECS", default_value_t = crate::daemon::uploader::DEFAULT_SPOOL_MAX_AGE_SECS)]
     pub(crate) spool_max_age_secs: u64,
 
@@ -238,7 +238,8 @@ impl DaemonArgs {
             concurrency: self.upload_concurrency,
             attempt_timeout: (self.upload_timeout_secs != 0)
                 .then(|| Duration::from_secs(self.upload_timeout_secs)),
-            max_age: Duration::from_secs(self.spool_max_age_secs),
+            max_age: (self.spool_max_age_secs != 0)
+                .then(|| Duration::from_secs(self.spool_max_age_secs)),
             ..UploadSettings::default()
         }
     }
@@ -335,6 +336,12 @@ mod tests {
             args.spool_dir,
             PathBuf::from(crate::spool::DEFAULT_SPOOL_DIR)
         );
+    }
+
+    #[test]
+    fn a_config_file_value_can_start_with_a_dash() {
+        let args = load_with_file("cluster: \"-x\"\n", &[]).unwrap();
+        assert_eq!(args.cluster, "-x");
     }
 
     #[test]

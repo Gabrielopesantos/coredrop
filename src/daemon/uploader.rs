@@ -4,7 +4,7 @@
 //! on a timer, and when the handler reports a spooled capture), uploads at
 //! most `concurrency` of them at a time, and deletes each bundle once its
 //! manifest is uploaded. A failed bundle stays in the spool and is retried
-//! with exponential backoff until it is older than `max_age`. Object keys are
+//! with exponential backoff until it is older than `max_age` (if set). Object keys are
 //! fixed per capture, so a bundle uploaded twice (daemon killed after the
 //! upload, before the delete) overwrites the same objects.
 //!
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use object_store::ObjectStore;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -47,6 +47,11 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// in seconds, so an older bundle belongs to a handler that was killed.
 const INCOMING_MAX_AGE: Duration = Duration::from_hours(1);
 
+/// When the flush time is up, how long the uploads in progress get to abort
+/// their multipart uploads. S3/GCS keep (and bill) the parts of an upload
+/// that nobody completes or aborts.
+const ABORT_WAIT: Duration = Duration::from_secs(2);
+
 /// Default first retry delay; it doubles per failed attempt up to
 /// [`MAX_BACKOFF`].
 const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_secs(10);
@@ -59,8 +64,9 @@ pub struct UploadSettings {
     pub concurrency: usize,
     /// Time limit for one upload attempt of one bundle; `None` = no limit.
     pub attempt_timeout: Option<Duration>,
-    /// Age past which a bundle that still fails to upload is deleted.
-    pub max_age: Duration,
+    /// Age past which a bundle that still fails to upload is deleted;
+    /// `None` = never.
+    pub max_age: Option<Duration>,
     /// Delay before the first retry of a failed bundle; it doubles per
     /// failed attempt, up to 10 minutes.
     pub retry_backoff: Duration,
@@ -71,7 +77,7 @@ impl Default for UploadSettings {
         Self {
             concurrency: DEFAULT_UPLOAD_CONCURRENCY,
             attempt_timeout: Some(Duration::from_secs(DEFAULT_UPLOAD_TIMEOUT_SECS)),
-            max_age: Duration::from_secs(DEFAULT_SPOOL_MAX_AGE_SECS),
+            max_age: Some(Duration::from_secs(DEFAULT_SPOOL_MAX_AGE_SECS)),
             retry_backoff: DEFAULT_RETRY_BACKOFF,
         }
     }
@@ -129,8 +135,10 @@ impl Uploader {
 
     /// Upload until `shutdown` completes, then keep going until the spool is
     /// empty or `flush` has passed. `wake` triggers an immediate scan.
-    /// Bundles left at the end stay in the spool for the next daemon; an
-    /// upload cut off mid-way leaves parts for the bucket's lifecycle rule.
+    /// Bundles left at the end stay in the spool for the next daemon. The
+    /// uploads in progress then get [`ABORT_WAIT`] to abort their multipart
+    /// uploads; parts of one that does not finish in time stay for the
+    /// bucket's lifecycle rule.
     pub async fn run(
         self,
         wake: Arc<Notify>,
@@ -143,19 +151,16 @@ impl Uploader {
         let mut scan = tokio::time::interval(SCAN_INTERVAL);
         scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut flush_deadline: Option<Instant> = None;
+        let (cancel_tx, cancel) = watch::channel(false);
         tokio::pin!(shutdown);
 
         loop {
-            self.dispatch(&mut pending, &mut tasks, &mut task_names);
+            self.dispatch(&mut pending, &mut tasks, &mut task_names, &cancel);
             if flush_deadline.is_some() && pending.is_empty() {
                 info!("spool flushed");
                 return;
             }
-            let next_retry = pending
-                .values()
-                .filter(|p| !p.in_flight)
-                .map(|p| p.next_at)
-                .min();
+            let next_retry = next_retry(&pending, tasks.len(), self.settings.concurrency.max(1));
 
             tokio::select! {
                 () = &mut shutdown, if flush_deadline.is_none() => {
@@ -165,6 +170,14 @@ impl Uploader {
                 }
                 () = sleep_until(flush_deadline), if flush_deadline.is_some() => {
                     warn!(pending = pending.len(), "flush time is up; remaining bundles stay in the spool");
+                    let _ = cancel_tx.send(true);
+                    let aborted = tokio::time::timeout(ABORT_WAIT, async {
+                        while tasks.join_next().await.is_some() {}
+                    })
+                    .await;
+                    if aborted.is_err() {
+                        warn!("uploads did not stop in time; their parts stay for the bucket's lifecycle rule");
+                    }
                     return;
                 }
                 () = wake.notified() => self.scan(&mut pending),
@@ -220,6 +233,7 @@ impl Uploader {
         pending: &mut BTreeMap<String, Pending>,
         tasks: &mut JoinSet<Result<Attempt>>,
         task_names: &mut HashMap<tokio::task::Id, String>,
+        cancel: &upload::Cancel,
     ) {
         let now = Instant::now();
         let limit = self.settings.concurrency.max(1);
@@ -235,12 +249,13 @@ impl Uploader {
             let store = self.store.clone();
             let deadline_at = self.settings.attempt_timeout.map(|t| now + t);
             let reported = p.reported;
+            let mut cancel = cancel.clone();
             let handle = tasks.spawn(async move {
                 let report = if reported {
                     None
                 } else {
                     let started = Instant::now();
-                    let payload = upload_bundle(&store, &dir, deadline_at).await?;
+                    let payload = upload_bundle(&store, &dir, deadline_at, &mut cancel).await?;
                     Some((payload, started.elapsed()))
                 };
                 let deleted = tokio::fs::remove_dir_all(&dir)
@@ -310,7 +325,10 @@ impl Uploader {
                     self.metrics.upload_attempt(false);
                 }
                 let age = bundle_age(&self.spool.ready_dir(), name);
-                if !p.reported && age.is_some_and(|age| age > self.settings.max_age) {
+                let expired = age
+                    .zip(self.settings.max_age)
+                    .is_some_and(|(age, max_age)| age > max_age);
+                if !p.reported && expired {
                     warn!(bundle = name, attempts = p.attempts, error = %format!("{e:#}"), "bundle is past the spool max age; deleting it");
                     // Report and count the capture once. The entry stays, so
                     // a failed delete is retried and not uploaded again.
@@ -361,6 +379,7 @@ async fn upload_bundle(
     store: &Arc<dyn ObjectStore>,
     dir: &Path,
     deadline_at: Option<Instant>,
+    cancel: &mut upload::Cancel,
 ) -> Result<CaptureEventPayload> {
     let payload = read_capture(dir)?;
     let manifest_json = tokio::fs::read(dir.join(spool::MANIFEST_FILE))
@@ -373,7 +392,14 @@ async fn upload_bundle(
     };
 
     if let Some(core_key) = &manifest.core.object_key {
-        upload::upload_file(store, &dir.join(spool::CORE_FILE), core_key, deadline_at).await?;
+        upload::upload_file(
+            store,
+            &dir.join(spool::CORE_FILE),
+            core_key,
+            deadline_at,
+            cancel,
+        )
+        .await?;
     }
     if let Some(snapshot) = &manifest.proc_snapshot {
         upload::upload_file(
@@ -381,6 +407,7 @@ async fn upload_bundle(
             &dir.join(spool::SNAPSHOT_FILE),
             &snapshot.object_key,
             deadline_at,
+            cancel,
         )
         .await?;
     }
@@ -459,6 +486,24 @@ fn bundle_age(ready_dir: &Path, name: &str) -> Option<Duration> {
     Some(SystemTime::now().duration_since(born).unwrap_or_default())
 }
 
+/// When the run loop must wake up to start a retry: the earliest `next_at`
+/// of a bundle that is not in flight. `None` while every upload slot is
+/// taken: a due bundle cannot start then, and a finished task wakes the loop.
+fn next_retry(
+    pending: &BTreeMap<String, Pending>,
+    running: usize,
+    limit: usize,
+) -> Option<Instant> {
+    if running >= limit {
+        return None;
+    }
+    pending
+        .values()
+        .filter(|p| !p.in_flight)
+        .map(|p| p.next_at)
+        .min()
+}
+
 fn backoff(base: Duration, attempts: u32) -> Duration {
     base.saturating_mul(2u32.saturating_pow(attempts.saturating_sub(1)))
         .min(MAX_BACKOFF)
@@ -475,6 +520,30 @@ async fn sleep_until(at: Option<Instant>) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn pending(next_at: Instant, in_flight: bool) -> Pending {
+        Pending {
+            attempts: 0,
+            next_at,
+            in_flight,
+            reported: false,
+        }
+    }
+
+    #[test]
+    fn no_retry_wakeup_while_every_slot_is_taken() {
+        let now = Instant::now();
+        let map: BTreeMap<String, Pending> = [
+            ("a".to_string(), pending(now, true)),
+            ("b".to_string(), pending(now, false)),
+        ]
+        .into_iter()
+        .collect();
+        // A due bundle that cannot start must not wake the loop, or the
+        // loop spins until a slot frees.
+        assert_eq!(next_retry(&map, 1, 1), None);
+        assert_eq!(next_retry(&map, 0, 1), Some(now));
+    }
 
     #[test]
     fn backoff_doubles_up_to_the_cap() {

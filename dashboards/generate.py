@@ -204,8 +204,9 @@ y += 8
 # --- Kubernetes Events ------------------------------------------------------
 panels.append(row("Kubernetes Events", y)); y += 1
 ev = ts("Events posted",
-        "Kubernetes Event create and patch requests per minute, by result.",
-        [target(f"sum by (result) (rate(coredrop_events_posted_total{{{S}}}[$__rate_interval])) * 60", "{{result}}")],
+        "Kubernetes Event create and patch requests per minute, by result, and Events dropped because the post queue was full.",
+        [target(f"sum by (result) (rate(coredrop_events_posted_total{{{S}}}[$__rate_interval])) * 60", "{{result}}"),
+         target(f"sum(rate(coredrop_events_dropped_total{{{S}}}[$__rate_interval])) * 60", "dropped")],
         0, y, 12)
 ev["fieldConfig"]["overrides"] = result_colors()
 panels.append(ev)

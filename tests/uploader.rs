@@ -48,7 +48,7 @@ fn settings() -> UploadSettings {
     UploadSettings {
         concurrency: 2,
         attempt_timeout: Some(Duration::from_secs(10)),
-        max_age: Duration::from_hours(1),
+        max_age: Some(Duration::from_hours(1)),
         retry_backoff: Duration::from_millis(20),
     }
 }
@@ -284,6 +284,26 @@ async fn deletes_a_bundle_past_max_age_and_reports_failed() {
         "{:?}",
         reports[0].error
     );
+}
+
+/// Without a max age, an old bundle that still fails stays in the spool.
+#[tokio::test]
+async fn keeps_a_failing_bundle_without_a_max_age() {
+    let pid = 5004;
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, now_ts() - 7200, b"core that never uploads").await;
+
+    let store: Arc<dyn ObjectStore> = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let settings = UploadSettings {
+        max_age: None,
+        ..settings()
+    };
+    let reports = flush(&config, store, settings, Duration::from_millis(200)).await;
+
+    assert_eq!(ready(&config).len(), 1, "the bundle stays for a retry");
+    assert!(reports.is_empty(), "{reports:?}");
 }
 
 /// An entry in `ready/` without a timestamp name is aged by its mtime, so a

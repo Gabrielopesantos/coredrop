@@ -197,6 +197,12 @@ pub(super) fn is_not_found(e: &anyhow::Error) -> bool {
         .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND)
 }
 
+/// Whether `e` is an API server `409 Conflict`: the object exists already.
+pub(super) fn is_conflict(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<ApiError>()
+        .is_some_and(|e| e.status == reqwest::StatusCode::CONFLICT)
+}
+
 /// Turn a non-2xx response into an [`ApiError`] carrying the API server's
 /// response body - the status code alone ("HTTP 400") gives no way to tell a
 /// bad request body from an RBAC/admission rejection.

@@ -9,7 +9,7 @@ metrics do not hold pod names, object keys or errors.
  handler --datagram--> daemon listener --> coredrop_captures_total{outcome}
                                        |-> coredrop_core_bytes_total, coredrop_stored_bytes_total
                                        |-> coredrop_cores_truncated_total
-                                       \-> coredrop_events_posted_total{result}
+                                       \-> coredrop_events_posted_total{result}, coredrop_events_dropped_total
  spool   <--scan------ daemon uploader --> coredrop_upload_attempts_total{result}
                                        |-> coredrop_upload_duration_seconds
                                        \-> coredrop_spool_bundles, coredrop_spool_bytes,
@@ -36,6 +36,7 @@ daemon, and the daemon counts it.
 | `coredrop_spool_max_bytes` | gauge | - | `--spool-max-size`; 0 = no limit |
 | `coredrop_core_pattern_installed` | gauge | - | 1 when the node's `core_pattern` routes cores to the handler, else 0 |
 | `coredrop_events_posted_total` | counter | `result` = `ok`/`error` | k8s Event create and patch requests |
+| `coredrop_events_dropped_total` | counter | - | k8s Events dropped before a request because the post queue was full |
 | `coredrop_event_payloads_dropped_total` | counter | - | Capture datagrams the daemon could not parse |
 | `coredrop_build_info` | gauge | `version` | Always 1 |
 

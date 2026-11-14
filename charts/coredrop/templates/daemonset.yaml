@@ -23,6 +23,8 @@ spec:
         # A config change rolls the DaemonSet: the daemon reads the file
         # only at startup.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # The store credentials reach the daemon as env, read at startup.
+        checksum/store: {{ include (print $.Template.BasePath "/store-secret.yaml") . | sha256sum }}
         {{- if .Values.metrics.enabled }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.metrics.port | quote }}

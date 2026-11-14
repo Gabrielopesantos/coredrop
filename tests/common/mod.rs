@@ -26,10 +26,16 @@ use tokio::io::AsyncReadExt;
 use coredrop::config::HandlerConfig;
 use coredrop::filter::CaptureFilter;
 
-/// Serializes tests that write executable scripts and spawn subprocesses.
+/// Serializes tests that write executable scripts or spawn subprocesses.
 /// Without it, a concurrent test's fork can inherit another test's open
 /// write-fd for a script, making that script's exec fail with ETXTBSY. The
 /// race is between threads of one process, so a per-binary lock is enough.
+///
+/// Every test that spawns must hold it, not only the ones that write a
+/// script: the fork that inherits the fd is the other test's. The handler's
+/// `run()` spawns crictl, so every test that calls it holds the lock. A
+/// failed crictl makes the capture filter fail open, which shows up as a
+/// test that reads a core it must not read.
 pub static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The fixture `/proc` root inside a test's temp dir.

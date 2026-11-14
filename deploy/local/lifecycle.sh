@@ -30,6 +30,8 @@ node_pattern() { node_exec cat /proc/sys/kernel/core_pattern; }
 pipe_failures() { node_exec dmesg | grep -c "$HOST_BIN_DIR/coredrop pipe failed" || true; }
 # stdin, not an argument: core_pattern values hold spaces and % characters.
 set_node_pattern() { printf '%s' "$1" | node_exec tee /proc/sys/kernel/core_pattern >/dev/null; }
+node_pipe_limit() { node_exec cat /proc/sys/kernel/core_pipe_limit; }
+set_node_pipe_limit() { printf '%s' "$1" | node_exec tee /proc/sys/kernel/core_pipe_limit >/dev/null; }
 
 # On an early exit, leave the stack usable: thaw a frozen daemon, and reinstall
 # a release that a failed phase left uninstalled.
@@ -118,6 +120,7 @@ assert_installed
 
 # --- B. unclean uninstall ----------------------------------------------------
 log "B: daemon dies without restoring core_pattern; the cleanup worker resets it"
+orig_pipe_limit="$(node_pipe_limit)"
 stopped_pid="$(daemon_host_pid)"
 node_exec kill -STOP "$stopped_pid"
 log "  daemon (host pid $stopped_pid) frozen with SIGSTOP"
@@ -135,10 +138,17 @@ if [ "$reset" = "core" ]; then
 else
   warn "  core_pattern is '$reset', expected the worker to reset it to 'core'"; fail=1
 fi
+reset_pipe_limit="$(node_pipe_limit)"
+if [ "$reset_pipe_limit" = "0" ]; then
+  log "  core_pipe_limit reset to 0 by the cleanup worker"
+else
+  warn "  core_pipe_limit is '$reset_pipe_limit', expected the worker to reset it to 0"; fail=1
+fi
 assert_node_clean
 
-# Give the node its pre-install value back, so the reinstall records it.
+# Give the node its pre-install values back, so the reinstall records them.
 set_node_pattern "$orig"
+set_node_pipe_limit "$orig_pipe_limit"
 install_coredrop >/dev/null
 assert_installed
 

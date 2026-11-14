@@ -114,6 +114,9 @@ spec:
               case "$pattern" in
                 *"$BIN_DIR/coredrop"*)
                   printf 'core' > /host/sysctl/core_pattern
+                  # The daemon raised core_pipe_limit too; put back the
+                  # kernel default.
+                  printf '0' > /host/sysctl/core_pipe_limit
                   ;;
               esac
 
@@ -151,9 +154,12 @@ spec:
               mountPath: /host/run-parent
             - name: host-spool-parent
               mountPath: /host/spool-parent
-            # The node's core_pattern sysctl, writable; /proc/sys stays read-only.
+            # The node's core_pattern and core_pipe_limit sysctls, writable;
+            # /proc/sys stays read-only.
             - name: host-core-pattern
               mountPath: /host/sysctl/core_pattern
+            - name: host-core-pipe-limit
+              mountPath: /host/sysctl/core_pipe_limit
       volumes:
         - name: host-bin-parent
           hostPath:
@@ -170,5 +176,9 @@ spec:
         - name: host-core-pattern
           hostPath:
             path: /proc/sys/kernel/core_pattern
+            type: File
+        - name: host-core-pipe-limit
+          hostPath:
+            path: /proc/sys/kernel/core_pipe_limit
             type: File
 {{- end -}}

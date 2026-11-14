@@ -368,7 +368,8 @@ node, then deletes it. On each node that worker removes the handler binary,
 `ready/` directories, then the `corePattern.hostBinDir`,
 `/run/coredrop` and `spool.hostDir` directories themselves.
 If the daemon was killed without a clean shutdown, the worker also resets
-`core_pattern` to the kernel default `core` if it still points at the handler.
+`core_pattern` to the kernel default `core` and `core_pipe_limit` to `0` if
+the pattern still points at the handler.
 
 Uninstalling deletes every capture still in the spool. Wait for the spool to
 drain first if those captures matter: the daemon logs `capture complete` for

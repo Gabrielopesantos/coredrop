@@ -26,7 +26,6 @@
 //!    no stdout) and treats a spooled capture as a hint to scan the spool.
 //!    Best-effort.
 
-pub mod backend;
 pub mod buildid;
 pub mod crictl;
 pub mod drain;
@@ -47,8 +46,7 @@ use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::events::{self, CaptureEventPayload, Outcome};
 use crate::filter::Subject;
-use crate::handler::backend::{CaptureBackend, CoreStats, DrainDeadline};
-use crate::handler::drain::SpoolBackend;
+use crate::handler::drain::{CoreDrain, CoreStats, DrainDeadline};
 use crate::handler::ratelimit::{RateDecision, RateLimiter};
 use crate::handler::redact::Redactor;
 use crate::handler::snapshot::ProcSnapshot;
@@ -319,7 +317,7 @@ pub async fn run(
     let drained = match &target {
         Some(t) if !rate_suppressed && !spool_full => {
             info!(bundle = %t.bundle.path("").display(), "spooling core");
-            SpoolBackend::new(
+            CoreDrain::new(
                 t.bundle.path(spool::CORE_FILE),
                 config.max_core_bytes,
                 core_budget,
@@ -403,7 +401,7 @@ pub async fn run(
     info!(
         core_bytes = stats.bytes,
         stored_bytes = stats.stored_bytes,
-        truncated = stats.truncated,
+        truncated = stats.truncated.is_some(),
         stored,
         "core stream drained"
     );
@@ -480,7 +478,7 @@ pub async fn run(
         schema_version: 1,
         captured_at: format_timestamp(args.timestamp),
         cluster: cluster.to_string(),
-        node: node_hostname(),
+        node: crate::host::node_hostname(),
         signal: args.signal,
         signal_name: signal_name(args.signal).map(str::to_string),
         exe: args.exe.clone(),
@@ -492,8 +490,8 @@ pub async fn run(
             sha256: stats.sha256.clone(),
             size_bytes: stored.then_some(stats.bytes),
             stored_bytes: stored.then_some(stats.stored_bytes),
-            truncated: stats.truncated,
-            truncated_reason: stats.truncated_reason.clone(),
+            truncated: stats.truncated.is_some(),
+            truncated_reason: stats.truncated,
             skipped_reason: skipped_reason.map(str::to_string),
             codec: "zstd".to_string(),
         },
@@ -525,7 +523,7 @@ pub async fn run(
         manifest_key: target.as_ref().map(|t| t.keys.manifest()),
         core_bytes: stats.bytes,
         stored_bytes: stored.then_some(stats.stored_bytes),
-        truncated: stats.truncated,
+        truncated: stats.truncated.is_some(),
         ..base_payload(&args, outcome)
     };
 
@@ -631,19 +629,7 @@ fn report(config: &HandlerConfig, payload: &CaptureEventPayload) {
         error = payload.error.as_deref().unwrap_or(""),
         "capture complete"
     );
-    events::send_capture_event(config.event_socket_path.as_deref(), payload);
-}
-
-/// The UTS hostname: the node name for the handler, which the kernel runs in
-/// the host namespaces. The daemon pod prefers `NODE_NAME`. Reads
-/// `/proc/sys/kernel/hostname`; falls back to `localhost`.
-#[must_use]
-pub fn node_hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "localhost".to_string())
+    events::send_capture_event(&config.event_socket_path, payload);
 }
 
 fn read_cgroup_identity(proc_root: &Path, pid: i32) -> Option<CgroupIdentity> {

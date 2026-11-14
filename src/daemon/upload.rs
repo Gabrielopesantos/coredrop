@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use object_store::buffered::BufWriter;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
@@ -189,82 +189,69 @@ fn retry_config() -> object_store::RetryConfig {
 }
 
 /// Build an object store from a store URL (e.g. `s3://crash-artifacts`) plus
-/// `object_store` config options. `None` when the URL is invalid or the store
-/// can't be built; the reason is logged.
+/// `object_store` config options.
 ///
 /// Dispatches on scheme rather than `parse_url_opts` because retry config is
 /// builder-only; opts are folded the same way `parse_url_opts` does (lowercase
 /// key -> config key, unknown keys skipped).
+///
+/// # Errors
+///
+/// Fails when the URL is invalid, its scheme has no supported store, or the
+/// store cannot be built.
 pub fn object_store_from_url_opts(
     raw_url: &str,
     opts: Vec<(String, String)>,
-) -> Option<Arc<dyn ObjectStore>> {
-    let url = match url::Url::parse(raw_url) {
-        Ok(u) => u,
-        Err(e) => {
-            warn!(error = %e, url = %raw_url, "store url is not a valid URL");
-            return None;
-        }
-    };
-    let scheme = match object_store::ObjectStoreScheme::parse(&url) {
-        Ok((scheme, _path)) => scheme,
-        Err(e) => {
-            warn!(error = %e, url = %raw_url, "unrecognized store url scheme");
-            return None;
-        }
-    };
-    let built: object_store::Result<Arc<dyn ObjectStore>> = match scheme {
-        object_store::ObjectStoreScheme::AmazonS3 => {
-            let mut builder = object_store::aws::AmazonS3Builder::new()
-                .with_url(url.to_string())
+) -> Result<Arc<dyn ObjectStore>> {
+    use object_store::ObjectStoreScheme as Scheme;
+    use object_store::{aws, azure, gcp};
+
+    let url = url::Url::parse(raw_url).context("the store URL is not a valid URL")?;
+    let (scheme, _path) =
+        Scheme::parse(&url).context("the store URL scheme has no object store")?;
+    let url_str = url.to_string();
+    let store: Arc<dyn ObjectStore> = match scheme {
+        Scheme::AmazonS3 => {
+            let builder = aws::AmazonS3Builder::new()
+                .with_url(url_str)
                 .with_retry(retry_config());
-            for (k, v) in opts {
-                if let Ok(key) = k.to_ascii_lowercase().parse() {
-                    builder = builder.with_config(key, v);
-                }
-            }
-            builder.build().map(|s| Arc::new(s) as _)
+            Arc::new(with_opts(builder, opts, aws::AmazonS3Builder::with_config).build()?)
         }
-        object_store::ObjectStoreScheme::GoogleCloudStorage => {
-            let mut builder = object_store::gcp::GoogleCloudStorageBuilder::new()
-                .with_url(url.to_string())
+        Scheme::GoogleCloudStorage => {
+            let builder = gcp::GoogleCloudStorageBuilder::new()
+                .with_url(url_str)
                 .with_retry(retry_config());
-            for (k, v) in opts {
-                if let Ok(key) = k.to_ascii_lowercase().parse() {
-                    builder = builder.with_config(key, v);
-                }
-            }
-            builder.build().map(|s| Arc::new(s) as _)
+            Arc::new(with_opts(builder, opts, gcp::GoogleCloudStorageBuilder::with_config).build()?)
         }
-        object_store::ObjectStoreScheme::MicrosoftAzure => {
-            let mut builder = object_store::azure::MicrosoftAzureBuilder::new()
-                .with_url(url.to_string())
+        Scheme::MicrosoftAzure => {
+            let builder = azure::MicrosoftAzureBuilder::new()
+                .with_url(url_str)
                 .with_retry(retry_config());
-            for (k, v) in opts {
-                if let Ok(key) = k.to_ascii_lowercase().parse() {
-                    builder = builder.with_config(key, v);
-                }
-            }
-            builder.build().map(|s| Arc::new(s) as _)
+            Arc::new(with_opts(builder, opts, azure::MicrosoftAzureBuilder::with_config).build()?)
         }
-        // No HTTP, no retry policy to apply. `memory://` is not offered: it
-        // would keep every core in the daemon's RAM and lose it on exit.
-        object_store::ObjectStoreScheme::Local => {
-            object_store::local::LocalFileSystem::new_with_prefix(url.path())
-                .map(|s| Arc::new(s) as _)
-        }
-        other => {
-            warn!(scheme = ?other, url = %raw_url, "unsupported store url scheme");
-            return None;
-        }
+        // No HTTP, no retry policy to apply.
+        Scheme::Local => Arc::new(object_store::local::LocalFileSystem::new_with_prefix(
+            url.path(),
+        )?),
+        // `memory://` is not offered: it would keep every core in the
+        // daemon's RAM and lose it on exit.
+        other => bail!("the store URL scheme {other:?} is not supported"),
     };
-    match built {
-        Ok(store) => Some(store),
-        Err(e) => {
-            warn!(error = %e, url = %raw_url, "building object store failed");
-            None
-        }
-    }
+    Ok(store)
+}
+
+/// Apply each option whose lowercase key names a config key of the builder;
+/// skip the rest.
+fn with_opts<B, K: std::str::FromStr>(
+    builder: B,
+    opts: Vec<(String, String)>,
+    set: fn(B, K, String) -> B,
+) -> B {
+    opts.into_iter()
+        .fold(builder, |b, (k, v)| match k.to_ascii_lowercase().parse() {
+            Ok(key) => set(b, key, v),
+            Err(_) => b,
+        })
 }
 
 #[cfg(test)]
@@ -451,12 +438,12 @@ mod tests {
             ("AWS_REGION".to_string(), "us-east-1".to_string()),
             ("NOT_A_REAL_KEY".to_string(), "ignored".to_string()),
         ];
-        assert!(object_store_from_url_opts("s3://some-bucket", s3_opts).is_some());
+        assert!(object_store_from_url_opts("s3://some-bucket", s3_opts).is_ok());
 
         // Not a URL, a URL whose scheme has no backend, and RAM.
-        assert!(object_store_from_url_opts("not a url", vec![]).is_none());
-        assert!(object_store_from_url_opts("memory:///", vec![]).is_none());
-        assert!(object_store_from_url_opts("bogus://x", vec![]).is_none());
+        assert!(object_store_from_url_opts("not a url", vec![]).is_err());
+        assert!(object_store_from_url_opts("memory:///", vec![]).is_err());
+        assert!(object_store_from_url_opts("bogus://x", vec![]).is_err());
     }
 
     #[test]

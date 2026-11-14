@@ -136,7 +136,7 @@ impl Uploader {
     /// Upload until `shutdown` completes, then keep going until the spool is
     /// empty or `flush` has passed. `wake` triggers an immediate scan.
     /// Bundles left at the end stay in the spool for the next daemon. The
-    /// uploads in progress then get [`ABORT_WAIT`] to abort their multipart
+    /// uploads in progress then get `ABORT_WAIT` (2 s) to abort their multipart
     /// uploads; parts of one that does not finish in time stay for the
     /// bucket's lifecycle rule.
     pub async fn run(

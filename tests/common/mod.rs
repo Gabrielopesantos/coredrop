@@ -26,10 +26,16 @@ use tokio::io::AsyncReadExt;
 use coredrop::config::HandlerConfig;
 use coredrop::filter::CaptureFilter;
 
-/// Serializes tests that write executable scripts and spawn subprocesses.
+/// Serializes tests that write executable scripts or spawn subprocesses.
 /// Without it, a concurrent test's fork can inherit another test's open
 /// write-fd for a script, making that script's exec fail with ETXTBSY. The
 /// race is between threads of one process, so a per-binary lock is enough.
+///
+/// Every test that spawns must hold it, not only the ones that write a
+/// script: the fork that inherits the fd is the other test's. The handler's
+/// `run()` spawns crictl, so every test that calls it holds the lock. A
+/// failed crictl makes the capture filter fail open, which shows up as a
+/// test that reads a core it must not read.
 pub static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The fixture `/proc` root inside a test's temp dir.
@@ -59,8 +65,8 @@ pub fn write_fixture_proc(root: &Path, pid: i32, pod_uid: &str, container_id: &s
 /// Handler config rooted at a test's temp dir, with a store configured and an
 /// unlimited spool at `<root>/spool`. crictl is `/bin/false`, so enrichment
 /// fails and identity stays cgroup-only unless a test overrides it with
-/// [`write_fake_crictl`]. Events are off; a test that wants them sets
-/// `event_socket_path` after binding a listener.
+/// [`write_fake_crictl`]. Nothing listens on the event socket; a test that
+/// wants the reports binds a listener and sets `event_socket_path`.
 pub fn base_config(root: &Path) -> HandlerConfig {
     HandlerConfig {
         cluster: "test".into(),
@@ -77,7 +83,7 @@ pub fn base_config(root: &Path) -> HandlerConfig {
         spool_max_bytes: 0,
         spool_min_free_percent: 0,
         rate_state_path: root.join("recent.json"),
-        event_socket_path: None,
+        event_socket_path: root.join("events.sock"),
         filter: CaptureFilter::default(),
     }
 }

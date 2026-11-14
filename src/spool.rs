@@ -15,7 +15,7 @@
 //!   bundle is uploaded
 //!
 //! The handler writes the core into a bundle with
-//! [`SpoolBackend`](crate::handler::drain::SpoolBackend).
+//! [`CoreDrain`](crate::handler::drain::CoreDrain).
 
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use tracing::warn;
 
-use crate::config::ensure_private_dir;
+use crate::host::ensure_private_dir;
 
 /// Default spool root on the node. Not under `/run`: that is a tmpfs, so a
 /// spooled core would sit in RAM.
@@ -257,14 +257,14 @@ impl Bundle {
     }
 
     /// Move the complete bundle to `ready/`, where the daemon picks it up.
-    /// Returns the bundle's new path. The bundle directory is synced first,
+    /// The bundle directory is synced first,
     /// so after a node crash a bundle in `ready/` still holds its files.
     ///
     /// # Errors
     ///
     /// Fails when the sync or the rename fails; the bundle is then deleted,
     /// so it does not count against the spool cap.
-    pub fn commit(self) -> std::io::Result<PathBuf> {
+    pub fn commit(self) -> std::io::Result<()> {
         let moved = std::fs::File::open(&self.dir)
             .and_then(|d| d.sync_all())
             .and_then(|()| std::fs::rename(&self.dir, &self.ready));
@@ -279,7 +279,7 @@ impl Bundle {
         {
             warn!(error = %e, dir = %parent.display(), "syncing the spool ready dir failed");
         }
-        Ok(self.ready)
+        Ok(())
     }
 
     /// Delete the bundle. Used when the capture failed and nothing in it will
@@ -376,8 +376,8 @@ mod tests {
         );
         assert!(!spool.ready_dir().join("1-2-pod-cid").exists());
 
-        let ready = bundle.commit().unwrap();
-        assert_eq!(ready, spool.ready_dir().join("1-2-pod-cid"));
+        bundle.commit().unwrap();
+        let ready = spool.ready_dir().join("1-2-pod-cid");
         assert_eq!(std::fs::read(ready.join(MANIFEST_FILE)).unwrap(), b"{}");
         assert!(!spool.incoming_dir().join("1-2-pod-cid").exists());
     }

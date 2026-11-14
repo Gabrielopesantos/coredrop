@@ -11,7 +11,7 @@
 //! - The top-level modules are what both sides share: the handler config
 //!   ([`config`]), the spool layout ([`spool`]), the capture datagram
 //!   ([`events`]), the object keys ([`keys`]), the manifest, the capture
-//!   filter, and cgroup identity.
+//!   filter, cgroup identity, and host helpers ([`host`]).
 
 pub mod cgroup;
 pub mod config;
@@ -20,12 +20,13 @@ pub mod daemon;
 pub mod events;
 pub mod filter;
 pub mod handler;
+pub mod host;
 pub mod keys;
 pub mod manifest;
 pub mod spool;
 
 /// Host path the `DaemonSet` installs the binary to, so the kernel can exec it as
-/// the `core_pattern` pipe target. Overridable via `CAPTURE_HANDLER_PATH`.
+/// the `core_pattern` pipe target. Overridable via `--handler-path`.
 pub const DEFAULT_HANDLER_PATH: &str = "/opt/coredrop/bin/coredrop";
 
 /// Helpers shared by the unit-test modules in this crate.
@@ -38,7 +39,7 @@ pub(crate) mod testutil {
 
     /// A core stream that gives `chunk` one time and then fails the next read.
     /// It simulates a kernel pipe that fails during a dump. Use it to test the
-    /// stream-error paths of the two backends.
+    /// stream-error path of the core drain.
     pub(crate) struct FlakyReader {
         pub(crate) chunk: Vec<u8>,
         pub(crate) sent: bool,

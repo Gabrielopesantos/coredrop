@@ -97,23 +97,17 @@ impl Display for Outcome {
 /// resolved: `pod_uid`/`container_id` need a kubernetes cgroup, and
 /// `namespace`/`pod_name`/`container_name` need crictl enrichment. Only a
 /// payload with namespace + pod name can target a k8s Event.
-///
-/// The fields added after the first release have a serde default, so the
-/// daemon still parses a datagram from an older handler during an upgrade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs)] // DTO: undocumented fields are self-explanatory.
 pub struct CaptureEventPayload {
     pub namespace: Option<String>,
     pub pod_name: Option<String>,
     pub pod_uid: Option<String>,
-    #[serde(default)]
     pub container_id: Option<String>,
     pub container_name: Option<String>,
     /// PID of the crashed process in the host PID namespace (`%P`).
-    #[serde(default)]
     pub host_pid: i32,
     /// Executable name of the crashed process (`%E`).
-    #[serde(default)]
     pub exe: String,
     pub signal: i32,
     pub signal_name: Option<String>,
@@ -121,25 +115,18 @@ pub struct CaptureEventPayload {
     pub manifest_key: Option<String>,
     /// Uncompressed core bytes the handler read from the kernel; `0` when
     /// the core is not kept, because the handler does not read it.
-    #[serde(default)]
     pub core_bytes: u64,
     pub stored_bytes: Option<u64>,
-    #[serde(default)]
     pub truncated: bool,
     /// Why the capture failed, for `Outcome::Failed`.
-    #[serde(default)]
     pub error: Option<String>,
     /// Crash timestamp, unix epoch seconds (the kernel's `%t` specifier).
     pub timestamp: i64,
 }
 
 /// Send one capture event datagram to the daemon. Best-effort: any failure is
-/// logged and the capture is unaffected. `socket_path` is `None` when the
-/// config names no socket, which skips silently (no log noise on the hot path).
-pub fn send_capture_event(socket_path: Option<&Path>, payload: &CaptureEventPayload) {
-    let Some(socket_path) = socket_path else {
-        return;
-    };
+/// logged and the capture is unaffected.
+pub fn send_capture_event(socket_path: &Path, payload: &CaptureEventPayload) {
     let bytes = match serde_json::to_vec(payload) {
         Ok(b) => b,
         Err(e) => {
@@ -226,21 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn payload_from_an_older_handler_still_parses() {
-        // The shape before host_pid/exe/container_id/core_bytes/truncated/error.
-        let old = r#"{"namespace":"default","pod_name":"my-pod","pod_uid":"abc-123",
-            "container_name":"app","signal":11,"signal_name":"SIGSEGV",
-            "outcome":"uploaded","manifest_key":null,"stored_bytes":null,
-            "timestamp":1749600000}"#;
-        let p: CaptureEventPayload = serde_json::from_str(old).unwrap();
-        assert_eq!(p.namespace.as_deref(), Some("default"));
-        assert_eq!(p.outcome, Outcome::Uploaded);
-        assert_eq!(p.host_pid, 0);
-        assert!(p.exe.is_empty());
-        assert!(p.error.is_none());
-    }
-
-    #[test]
     fn send_capture_event_delivers_to_a_bound_socket() {
         let dir = TempDir::new().unwrap();
         let sock_path = dir.path().join("events.sock");
@@ -249,7 +221,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
-        send_capture_event(Some(&sock_path), &payload());
+        send_capture_event(&sock_path, &payload());
 
         let mut buf = vec![0u8; 64 * 1024];
         let n = listener.recv(&mut buf).unwrap();
@@ -259,13 +231,8 @@ mod tests {
 
     #[test]
     fn send_capture_event_is_best_effort() {
-        // No socket configured: nothing to do, and no log noise on the hot path.
-        send_capture_event(None, &payload());
-        // Enabled but nothing listening (daemon restarting, socket removed):
-        // the send fails, and the capture must be unaffected.
-        send_capture_event(
-            Some(Path::new("/run/coredrop/no-such-listener.sock")),
-            &payload(),
-        );
+        // Nothing listening (daemon restarting, socket removed): the send
+        // fails, and the capture must be unaffected.
+        send_capture_event(Path::new("/run/coredrop/no-such-listener.sock"), &payload());
     }
 }

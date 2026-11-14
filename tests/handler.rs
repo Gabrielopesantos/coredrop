@@ -91,6 +91,7 @@ fn recv_event(listener: &std::os::unix::net::UnixDatagram) -> CaptureEventPayloa
 /// daemon uploads them to.
 #[tokio::test]
 async fn run_spools_core_snapshot_and_manifest() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4242;
     let core_payload: &[u8] = b"fake core payload for testing - not a real ELF";
 
@@ -161,7 +162,7 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
     let mut config = base_config(tmp.path());
     config.crictl_path = crictl;
     config.crictl_timeout_secs = 10;
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
 
     let core_in: &[u8] = b"core payload for the enriched path";
     run(capture_args(pid, 11, TS), &config, core_in)
@@ -209,6 +210,7 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
 /// test covers spooling, rate-limit suppression and the no-store case.
 #[tokio::test]
 async fn run_reports_each_outcome_on_the_events_socket() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4248;
 
     let tmp = TempDir::new().unwrap();
@@ -216,7 +218,7 @@ async fn run_reports_each_outcome_on_the_events_socket() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
     config.max_cores_per_hour = 1;
 
     // The budget is 1. The first crash is spooled. The handler suppresses the
@@ -251,6 +253,7 @@ async fn run_reports_each_outcome_on_the_events_socket() {
 /// not contain it, unless `no_redact` is set.
 #[tokio::test]
 async fn run_redacts_snapshot_environ_unless_no_redact_is_set() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let (redacting_pid, raw_pid) = (4252, 4253);
 
     let tmp = TempDir::new().unwrap();
@@ -298,6 +301,7 @@ async fn run_redacts_snapshot_environ_unless_no_redact_is_set() {
 /// records the full drained size and the truncation reason.
 #[tokio::test]
 async fn run_size_cap_truncates_stored_core() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4243;
     let core_payload: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
 
@@ -320,7 +324,10 @@ async fn run_size_cap_truncates_stored_core() {
 
     let manifest = read_manifest(&bundle);
     assert!(manifest.core.truncated);
-    assert_eq!(manifest.core.truncated_reason.as_deref(), Some("size_cap"));
+    assert_eq!(
+        manifest.core.truncated_reason,
+        Some(coredrop::manifest::TruncatedReason::SizeCap)
+    );
     assert_eq!(
         manifest.core.size_bytes,
         Some(core_payload.len() as u64),
@@ -332,6 +339,7 @@ async fn run_size_cap_truncates_stored_core() {
 /// gets a proc snapshot and a manifest marked `rate_limit`.
 #[tokio::test]
 async fn run_rate_limit_suppresses_core_keeps_manifest() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4244;
 
     let tmp = TempDir::new().unwrap();
@@ -372,6 +380,7 @@ async fn run_rate_limit_suppresses_core_keeps_manifest() {
 /// a new container ID but keeps the same pod UID, so the budget must follow it.
 #[tokio::test]
 async fn run_rate_limit_keys_by_pod_uid_not_container_id() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let container_id_2 = "fedcba654321fedcba654321";
     let (pid_1, pid_2) = (4250, 4251);
 
@@ -406,6 +415,7 @@ async fn run_rate_limit_keys_by_pod_uid_not_container_id() {
 /// the rate-limit budget back: nothing was kept.
 #[tokio::test]
 async fn run_full_spool_drops_core_keeps_manifest_and_refunds_budget() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4254;
 
     let tmp = TempDir::new().unwrap();
@@ -451,6 +461,7 @@ async fn run_full_spool_drops_core_keeps_manifest_and_refunds_budget() {
 #[tokio::test(start_paused = true)]
 async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
     use tokio::io::AsyncReadExt;
+    let _guard = common::SPAWN_LOCK.lock().await;
 
     let pid = 4246;
 
@@ -461,7 +472,7 @@ async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
     let mut config = base_config(tmp.path());
     config.drain_deadline_secs = 5;
     config.max_cores_per_hour = 1;
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
 
     // Some bytes arrive, then the pipe stalls.
     let core_in = (&b"partial core bytes"[..]).chain(StallReader);
@@ -500,6 +511,7 @@ async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
 /// snapshot and a `rate_limit` manifest.
 #[tokio::test]
 async fn run_rate_limited_capture_does_not_read_the_core() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4247;
 
     let tmp = TempDir::new().unwrap();
@@ -534,6 +546,7 @@ async fn run_rate_limited_capture_does_not_read_the_core() {
 /// still gets a `spool_full` manifest.
 #[tokio::test]
 async fn run_spool_full_capture_does_not_read_the_core() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4248;
 
     let tmp = TempDir::new().unwrap();
@@ -562,6 +575,7 @@ async fn run_spool_full_capture_does_not_read_the_core() {
 /// An unusable spool reports the capture as failed without reading the core.
 #[tokio::test]
 async fn run_unusable_spool_reports_failed_without_reading_the_core() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4249;
 
     let tmp = TempDir::new().unwrap();
@@ -569,7 +583,7 @@ async fn run_unusable_spool_reports_failed_without_reading_the_core() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
     // A file where the spool directory should be.
     std::fs::write(&config.spool_dir, b"not a directory").unwrap();
 
@@ -597,6 +611,7 @@ async fn run_unusable_spool_reports_failed_without_reading_the_core() {
 /// rate limiter, which is only consulted when a core would be kept.
 #[tokio::test]
 async fn run_without_store_discards_silently() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 100;
 
     let tmp = TempDir::new().unwrap();
@@ -625,6 +640,7 @@ async fn run_without_store_discards_silently() {
 /// reported, so the daemon can log it, even though no k8s Event can target it.
 #[tokio::test]
 async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 201;
 
     let tmp = TempDir::new().unwrap();
@@ -635,7 +651,7 @@ async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
 
     config.drain_deadline_secs = 0;
     run_without_reading(capture_args(pid, 9, 2_000_000), &config)
@@ -687,7 +703,7 @@ async fn run_filtered_capture_does_not_read_the_core_and_spools_nothing() {
     let mut config = base_config(tmp.path());
     config.crictl_path = counting_crictl(tmp.path(), "kube-system");
     config.crictl_timeout_secs = 10;
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
     config.filter = exclude(r#"{"namespace":"kube-*"}"#);
 
     run_without_reading(capture_args(pid, 11, TS), &config)
@@ -736,6 +752,7 @@ async fn run_kept_by_the_filter_spools_and_runs_crictl_once() {
 /// crictl fails, so the namespace is unknown: the filter keeps the crash.
 #[tokio::test]
 async fn run_filter_fails_open_when_crictl_fails() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4262;
 
     let tmp = TempDir::new().unwrap();
@@ -756,6 +773,7 @@ async fn run_filter_fails_open_when_crictl_fails() {
 /// An `exe` pattern matches the un-mangled path and needs no crictl.
 #[tokio::test]
 async fn run_filter_matches_the_exe_path() {
+    let _guard = common::SPAWN_LOCK.lock().await;
     let pid = 4263;
 
     let tmp = TempDir::new().unwrap();

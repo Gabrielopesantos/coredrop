@@ -10,13 +10,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_compression::tokio::write::ZstdEncoder;
-use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
-use crate::handler::backend::{CaptureBackend, CoreStats, DrainDeadline};
+use crate::handler::buildid::hex;
+use crate::manifest::TruncatedReason;
 use crate::spool::SpoolBudget;
 
 // Read the core in 256 KiB chunks.
@@ -28,12 +28,41 @@ const CORE_READ_CHUNK: usize = 256 * 1024;
 // the current block but keeps the window, so it costs almost no ratio.
 const BUDGET_FLUSH_INTERVAL: u64 = 1024 * 1024;
 
-// While a core is written, check the whole spool again after this many more
-// stored bytes. Concurrent captures and other disk users then count against
-// the cap, and each capture passes it by at most about this much.
-/// The spool capture backend: stream the core through zstd into the bundle's
-/// [`CORE_FILE`](crate::spool::CORE_FILE).
-pub struct SpoolBackend {
+/// Integrity stats for a drained core. The default value describes a core
+/// that was not read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreStats {
+    /// Uncompressed bytes drained from the kernel's core pipe.
+    pub bytes: u64,
+    /// Bytes stored (zstd-compressed).
+    pub stored_bytes: u64,
+    /// sha256 (hex) of the *stored* bytes - the zstd-compressed core.
+    /// `None` when nothing was stored.
+    pub sha256: Option<String>,
+    /// Why the stored core is incomplete; `None` when it is complete.
+    pub truncated: Option<TruncatedReason>,
+}
+
+/// The drain passed its deadline before the core stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainDeadline {
+    /// Bytes drained before the deadline.
+    pub bytes: u64,
+}
+
+impl std::fmt::Display for DrainDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("core drain exceeded the deadline")
+    }
+}
+
+impl std::error::Error for DrainDeadline {}
+
+/// Where and how much of a core is stored: the core goes through zstd into
+/// the bundle's [`CORE_FILE`](crate::spool::CORE_FILE). A core that is not
+/// kept is never read: the handler closes the pipe, and the kernel stops the
+/// dump.
+pub struct CoreDrain {
     path: PathBuf,
     /// Max uncompressed bytes stored per core; `0` = unlimited.
     max_core_bytes: u64,
@@ -43,8 +72,8 @@ pub struct SpoolBackend {
     budget: Option<SpoolBudget>,
 }
 
-impl SpoolBackend {
-    /// Build a backend that writes the core to `path`, capped at
+impl CoreDrain {
+    /// A drain that writes the core to `path`, capped at
     /// `max_core_bytes` uncompressed (`0` = unlimited) and about
     /// `max_stored_bytes` compressed. With a `budget`, it also stops storing
     /// once the spool as a whole is full.
@@ -62,15 +91,23 @@ impl SpoolBackend {
             budget,
         }
     }
-}
 
-#[async_trait]
-impl CaptureBackend for SpoolBackend {
-    async fn drain_core(
+    /// Drain `reader` to its end and store the core. `deadline`, when set,
+    /// bounds the whole drain: the handler holds a `core_pipe_limit` slot
+    /// while this call runs.
+    ///
+    /// # Errors
+    ///
+    /// [`DrainDeadline`] when `deadline` passes before a core is truncated,
+    /// and otherwise only when the core file cannot be created or written.
+    pub async fn drain_core<R>(
         &self,
-        reader: &mut (dyn AsyncRead + Unpin + Send),
+        reader: &mut R,
         deadline: Option<Duration>,
-    ) -> Result<CoreStats> {
+    ) -> Result<CoreStats>
+    where
+        R: AsyncRead + Unpin + ?Sized,
+    {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -183,7 +220,7 @@ where
     let mut unflushed = 0u64;
     let mut checked_at = 0u64;
     // Set when storing stops; the rest of the stream is only counted.
-    let mut truncated_reason: Option<&'static str> = None;
+    let mut truncated_reason: Option<TruncatedReason> = None;
     let mut finalize_by = deadline_at;
     loop {
         match race(core.read(&mut buf), deadline_at).await {
@@ -210,7 +247,7 @@ where
                         max_stored_bytes,
                         "spool budget used up - keeping the core so far, draining the rest"
                     );
-                    truncated_reason = Some("spool_full");
+                    truncated_reason = Some(TruncatedReason::SpoolFull);
                 }
                 // min() keeps the value <= n, so the conversion back to usize cannot fail.
                 let take = if truncated_reason.is_none() {
@@ -234,7 +271,7 @@ where
                         // The flush put the stored bytes on disk, so the
                         // spool's usage includes them.
                         if spool_filled(budget, encoder.get_ref().bytes, &mut checked_at) {
-                            truncated_reason = Some("spool_full");
+                            truncated_reason = Some(TruncatedReason::SpoolFull);
                         }
                     }
                 }
@@ -243,12 +280,12 @@ where
                         cap,
                         "core exceeds size cap - storing first {cap} bytes, draining the rest"
                     );
-                    truncated_reason = Some("size_cap");
+                    truncated_reason = Some(TruncatedReason::SizeCap);
                 }
             }
             Ok(Err(e)) => {
                 warn!(error = %e, drained, "core stream read error - finalizing partial core as truncated");
-                truncated_reason = Some("stream_error");
+                truncated_reason = Some(TruncatedReason::StreamError);
                 break;
             }
         }
@@ -265,9 +302,8 @@ where
         CoreStats {
             bytes: drained,
             stored_bytes,
-            sha256: Some(hex_lower(&hasher.finalize())),
-            truncated: truncated_reason.is_some(),
-            truncated_reason: truncated_reason.map(str::to_string),
+            sha256: Some(hex(&hasher.finalize())),
+            truncated: truncated_reason,
         },
         inner,
     ))
@@ -305,15 +341,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for HashingWriter<W> {
     }
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -344,7 +371,7 @@ mod tests {
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
-        hex_lower(&Sha256::digest(bytes))
+        hex(&Sha256::digest(bytes))
     }
 
     async fn drain(
@@ -354,7 +381,7 @@ mod tests {
         max_stored_bytes: u64,
         deadline: Option<Duration>,
     ) -> Result<CoreStats> {
-        SpoolBackend::new(
+        CoreDrain::new(
             bundle.path(CORE_FILE),
             max_core_bytes,
             max_stored_bytes,
@@ -375,7 +402,7 @@ mod tests {
             .unwrap();
 
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
-        assert!(!stats.truncated);
+        assert_eq!(stats.truncated, None);
         assert_eq!(stats.bytes, core.len() as u64);
         assert_eq!(stats.stored_bytes, stored.len() as u64);
         assert!(
@@ -401,8 +428,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(stats.truncated);
-        assert_eq!(stats.truncated_reason.as_deref(), Some("stream_error"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::StreamError));
         assert_eq!(stats.bytes, chunk.len() as u64);
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         assert_eq!(unzstd(&stored).await, chunk);
@@ -419,8 +445,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(stats.bytes, 50_000, "full stream drained and counted");
-        assert!(stats.truncated);
-        assert_eq!(stats.truncated_reason.as_deref(), Some("size_cap"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::SizeCap));
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         assert_eq!(
             unzstd(&stored).await,
@@ -452,8 +477,7 @@ mod tests {
         let stats = drain(&bundle, &mut reader, 0, 300_000, None).await.unwrap();
 
         assert_eq!(stats.bytes, core.len() as u64, "full stream drained");
-        assert!(stats.truncated);
-        assert_eq!(stats.truncated_reason.as_deref(), Some("spool_full"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::SpoolFull));
         assert!(
             stats.stored_bytes < 300_000 + 2 * BUDGET_FLUSH_INTERVAL,
             "stored {} bytes",
@@ -477,22 +501,22 @@ mod tests {
         let b = spool.create_bundle("1-2-pod-b").unwrap();
         let budget = spool.core_budget(MAX, 0);
         assert_eq!(budget, MAX);
-        let backend = |bundle: &Bundle| {
+        let drain_for = |bundle: &Bundle| {
             let mut spool_budget = SpoolBudget::new(spool.clone(), MAX, 0);
             spool_budget.recheck_every = 0;
-            SpoolBackend::new(bundle.path(CORE_FILE), 0, budget, Some(spool_budget))
+            CoreDrain::new(bundle.path(CORE_FILE), 0, budget, Some(spool_budget))
         };
-        let (backend_a, backend_b) = (backend(&a), backend(&b));
+        let (drain_a, drain_b) = (drain_for(&a), drain_for(&b));
 
         let (mut reader_a, mut reader_b): (&[u8], &[u8]) = (&core, &core);
         let (stats_a, stats_b) = tokio::join!(
-            backend_a.drain_core(&mut reader_a, None),
-            backend_b.drain_core(&mut reader_b, None),
+            drain_a.drain_core(&mut reader_a, None),
+            drain_b.drain_core(&mut reader_b, None),
         );
         let (stats_a, stats_b) = (stats_a.unwrap(), stats_b.unwrap());
 
         for stats in [&stats_a, &stats_b] {
-            assert_eq!(stats.truncated_reason.as_deref(), Some("spool_full"));
+            assert_eq!(stats.truncated, Some(TruncatedReason::SpoolFull));
         }
         // Each capture can pass the cap by one flush interval plus one read
         // chunk before its next check.
@@ -521,7 +545,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(stats.truncated_reason.as_deref(), Some("size_cap"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::SizeCap));
         assert_eq!(stats.bytes, 50_000, "the bytes read before the deadline");
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         assert_eq!(unzstd(&stored).await, &core[..10_000]);

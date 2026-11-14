@@ -32,9 +32,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::cgroup::is_pod_uid;
-use crate::config::ensure_private_dir;
 use crate::daemon::metrics::Metrics;
 use crate::events::CaptureEventPayload;
+use crate::host::ensure_private_dir;
 
 use self::aggregate::{AGGREGATION_SWEEP_INTERVAL, AggKey, Aggregator};
 use self::client::{EventClient, is_conflict, is_not_found};
@@ -261,10 +261,10 @@ async fn post_events(
                 let Some(payload) = payload else {
                     return;
                 };
-                handle_payload(Some(&client), &mut aggregator, &node, &metrics, &payload).await;
+                handle_payload(&client, &mut aggregator, &node, &metrics, &payload).await;
             }
             _ = sweep_interval.tick() => {
-                aggregator.sweep(Instant::now());
+                aggregator.prune(Instant::now());
             }
         }
     }
@@ -278,7 +278,7 @@ struct EventTarget<'a> {
 }
 
 async fn handle_payload(
-    client: Option<&EventClient>,
+    client: &EventClient,
     aggregator: &mut Aggregator,
     node: &str,
     metrics: &Metrics,
@@ -286,9 +286,6 @@ async fn handle_payload(
 ) {
     let Some(reason) = Reason::from_outcome(payload.outcome) else {
         debug!(outcome = %payload.outcome, "capture outcome has no k8s Event mapping; ignoring");
-        return;
-    };
-    let Some(client) = client else {
         return;
     };
     // An Event targets a pod object, so it needs the crictl-enriched identity.
@@ -625,7 +622,7 @@ mod tests {
             ("default", "0F1E2D3C", "uppercase pod uid"),
         ] {
             handle_payload(
-                Some(&client),
+                &client,
                 &mut agg,
                 "test-node",
                 &metrics,
@@ -638,7 +635,7 @@ mod tests {
         // A valid payload is recorded even though the API call itself fails -
         // a broken API server must not lose the aggregation state.
         handle_payload(
-            Some(&client),
+            &client,
             &mut agg,
             "test-node",
             &metrics,
@@ -680,7 +677,7 @@ mod tests {
         let metrics = Metrics::new();
         let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
         handle_payload(
-            Some(&client),
+            &client,
             &mut agg,
             "test-node",
             &metrics,
@@ -754,7 +751,7 @@ mod tests {
         third.timestamp = 1_749_600_120;
 
         for p in [&first, &second, &third] {
-            handle_payload(Some(&client), &mut agg, "test-node", &metrics, p).await;
+            handle_payload(&client, &mut agg, "test-node", &metrics, p).await;
         }
 
         let events = "/apis/events.k8s.io/v1/namespaces/default/events";
@@ -803,7 +800,7 @@ mod tests {
         let mut no_pod_uid = payload("default", uid);
         no_pod_uid.pod_uid = None;
         for p in [no_namespace, no_pod_name, no_pod_uid] {
-            handle_payload(Some(&client), &mut agg, "test-node", &Metrics::new(), &p).await;
+            handle_payload(&client, &mut agg, "test-node", &Metrics::new(), &p).await;
         }
         assert!(agg.entries.is_empty());
     }

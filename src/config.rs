@@ -6,28 +6,25 @@
 //! the handler reads it ([`HandlerConfig::read`]) from the same host path.
 
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::filter::CaptureFilter;
+use crate::host::ensure_private_dir;
 use crate::spool;
 
 /// Host path the daemon writes the serialized [`HandlerConfig`] to, and the
 /// handler reads it back from.
 pub const DEFAULT_CONFIG_PATH: &str = "/run/coredrop/handler.json";
 
-/// Create `dir` (and parents) mode `0700` if missing - `create_dir_all`
-/// is a no-op on an existing dir and does not touch its mode.
-///
-/// # Errors
-///
-/// Fails when the directory cannot be created or its mode cannot be set.
-pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+/// The filesystem path of a `unix://` CRI endpoint, or `None` for any other
+/// scheme (crictl also accepts e.g. `tcp://`, which has no path to check).
+#[must_use]
+pub fn unix_socket_path(endpoint: &str) -> Option<&str> {
+    endpoint.strip_prefix("unix://").filter(|p| !p.is_empty())
 }
 
 /// Parse a size in Kubernetes quantity form into bytes: a whole number with
@@ -149,6 +146,7 @@ pub fn event_socket_path_for(config_path: &Path) -> PathBuf {
 /// daemon fills it from its own env and writes it; the handler reads it. It
 /// holds no credentials: only the daemon talks to the object store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandlerConfig {
     /// Cluster name - the first path segment of the object key.
     pub cluster: String,
@@ -168,7 +166,7 @@ pub struct HandlerConfig {
     /// remainder is drained but not stored.
     pub max_core_bytes: u64,
     /// Max core uploads per pod per hour; `0` = unlimited. Suppressed
-    /// crashes still get a proc snapshot and manifest, just no core.
+    /// crashes still get a manifest, but no core and no proc snapshot.
     pub max_cores_per_hour: u32,
     /// Deadline in seconds for draining the core into the spool; `0` = no
     /// deadline. On expiry the handler drops the core and exits, freeing its
@@ -184,19 +182,17 @@ pub struct HandlerConfig {
     /// the daemon to upload.
     pub spool_dir: PathBuf,
     /// Cap on the spool's total size in bytes; `0` = no cap. A core that does
-    /// not fit is dropped; its snapshot and manifest are still spooled.
+    /// not fit is dropped, with its proc snapshot; its manifest is still
+    /// spooled.
     pub spool_max_bytes: u64,
     /// Free-space floor of the spool's filesystem, in percent.
     pub spool_min_free_percent: u8,
     /// Rate-limit state file, sibling of the handler config on the hostPath.
     pub rate_state_path: PathBuf,
     /// Capture-event unix datagram socket the daemon listens on, sibling of
-    /// the handler config on the hostPath. The daemon always sets it; `None`
-    /// (tests, a hand-written config) means the handler reports nothing.
-    pub event_socket_path: Option<PathBuf>,
-    /// Which crashes the handler keeps. A config without the field keeps
-    /// every crash.
-    #[serde(default)]
+    /// the handler config on the hostPath.
+    pub event_socket_path: PathBuf,
+    /// Which crashes the handler keeps. Empty keeps every crash.
     pub filter: CaptureFilter,
 }
 
@@ -217,7 +213,7 @@ impl Default for HandlerConfig {
             spool_max_bytes: spool::DEFAULT_SPOOL_MAX_BYTES,
             spool_min_free_percent: spool::DEFAULT_SPOOL_MIN_FREE_PERCENT,
             rate_state_path: default_rate_state_path(),
-            event_socket_path: Some(default_event_socket_path()),
+            event_socket_path: default_event_socket_path(),
             filter: CaptureFilter::default(),
         }
     }
@@ -253,9 +249,7 @@ impl HandlerConfig {
         must_be_absolute(&self.crictl_path, "crictl_path")?;
         must_be_absolute(&self.proc_root, "proc_root")?;
         must_be_absolute(&self.rate_state_path, "rate_state_path")?;
-        if let Some(event_socket_path) = &self.event_socket_path {
-            must_be_absolute(event_socket_path, "event_socket_path")?;
-        }
+        must_be_absolute(&self.event_socket_path, "event_socket_path")?;
         must_be_absolute(&self.spool_dir, "spool_dir")?;
         if let Err(e) = check_cluster(&self.cluster) {
             bail!("cluster: {e}");
@@ -350,7 +344,7 @@ impl HandlerConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     use tempfile::TempDir;
 
@@ -362,6 +356,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("handler.json");
         (dir, path)
+    }
+
+    #[test]
+    fn unix_socket_path_extracts_only_unix_endpoints() {
+        assert_eq!(
+            unix_socket_path("unix:///run/containerd/containerd.sock"),
+            Some("/run/containerd/containerd.sock")
+        );
+        assert_eq!(unix_socket_path("tcp://127.0.0.1:1234"), None);
+        assert_eq!(unix_socket_path("/run/containerd/containerd.sock"), None);
+        assert_eq!(unix_socket_path("unix://"), None);
+        assert_eq!(unix_socket_path(""), None);
     }
 
     #[test]
@@ -398,7 +404,7 @@ mod tests {
             spool_max_bytes: 1 << 30,
             spool_min_free_percent: 20,
             rate_state_path: "/run/coredrop/recent.json".into(),
-            event_socket_path: Some("/run/coredrop/events.sock".into()),
+            event_socket_path: "/run/coredrop/events.sock".into(),
             filter: CaptureFilter::parse(r#"{"exclude":[{"namespace":"kube-system"}]}"#).unwrap(),
         };
         let (_dir, path) = tmp_config();
@@ -546,7 +552,7 @@ mod tests {
                 ..Default::default()
             },
             HandlerConfig {
-                event_socket_path: Some("events.sock".into()),
+                event_socket_path: "events.sock".into(),
                 ..Default::default()
             },
             HandlerConfig {

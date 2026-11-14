@@ -57,6 +57,6 @@ instead of creating a new object per crash. Events require crictl-enriched
 identity (namespace + pod name) - a cgroup-only identity has no pod object to
 target and is skipped.
 
-Disable Events with `--no-events`/`CAPTURE_NO_EVENTS`, or the chart's
+Disable Events with `--no-events`, or the chart's
 `events.enabled: false` (also skips rendering the events RBAC). The capture
 log stays on.

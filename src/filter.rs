@@ -150,12 +150,6 @@ impl CaptureFilter {
         Ok(())
     }
 
-    /// Whether the filter keeps every crash.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.include.is_empty() && self.exclude.is_empty()
-    }
-
     /// Whether an entry matches on a field only `crictl inspect` knows.
     #[must_use]
     pub fn needs_crictl(&self) -> bool {
@@ -259,7 +253,6 @@ mod tests {
     #[test]
     fn empty_filter_keeps_everything() {
         let filter = CaptureFilter::default();
-        assert!(filter.is_empty());
         assert!(!filter.needs_crictl());
         assert!(filter.keeps(&subject("a", "b", "c")));
         assert!(filter.keeps(&Subject::default()));

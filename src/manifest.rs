@@ -51,6 +51,18 @@ pub struct ManifestIdentity {
 }
 
 /// Reference to the captured core object.
+/// Why a stored core is incomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncatedReason {
+    /// The core is larger than `--max-core-size`.
+    SizeCap,
+    /// The spool filled up while the core was written.
+    SpoolFull,
+    /// The core stream failed during the dump.
+    StreamError,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct CoreRef {
@@ -64,10 +76,9 @@ pub struct CoreRef {
     /// Compressed size in bytes (what's stored in the object store).
     pub stored_bytes: Option<u64>,
     pub truncated: bool,
-    /// Why the core is truncated: `size_cap` | `spool_full` | `stream_error`.
-    /// Absent when not truncated.
+    /// Why the core is truncated. Absent when not truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncated_reason: Option<String>,
+    pub truncated_reason: Option<TruncatedReason>,
     /// Why no core was stored despite a configured store: `rate_limit` |
     /// `spool_full` | `drain_deadline`. Absent when a core is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,7 +163,7 @@ mod tests {
 
         let mut m = sample();
         m.core.truncated = true;
-        m.core.truncated_reason = Some("size_cap".into());
+        m.core.truncated_reason = Some(TruncatedReason::SizeCap);
         m.core.skipped_reason = Some("rate_limit".into());
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains(r#""truncated_reason":"size_cap""#), "{json}");
@@ -160,7 +171,7 @@ mod tests {
 
         // Both still round-trip, and an absent key deserializes to None.
         let back: Manifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.core.truncated_reason.as_deref(), Some("size_cap"));
+        assert_eq!(back.core.truncated_reason, Some(TruncatedReason::SizeCap));
     }
 
     #[test]

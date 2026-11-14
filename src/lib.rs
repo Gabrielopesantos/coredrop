@@ -38,7 +38,7 @@ pub(crate) mod testutil {
 
     /// A core stream that gives `chunk` one time and then fails the next read.
     /// It simulates a kernel pipe that fails during a dump. Use it to test the
-    /// stream-error paths of the two backends.
+    /// stream-error path of the core drain.
     pub(crate) struct FlakyReader {
         pub(crate) chunk: Vec<u8>,
         pub(crate) sent: bool,

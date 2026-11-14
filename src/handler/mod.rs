@@ -26,7 +26,6 @@
 //!    no stdout) and treats a spooled capture as a hint to scan the spool.
 //!    Best-effort.
 
-pub mod backend;
 pub mod buildid;
 pub mod crictl;
 pub mod drain;
@@ -47,8 +46,7 @@ use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::events::{self, CaptureEventPayload, Outcome};
 use crate::filter::Subject;
-use crate::handler::backend::{CaptureBackend, CoreStats, DrainDeadline};
-use crate::handler::drain::SpoolBackend;
+use crate::handler::drain::{CoreDrain, CoreStats, DrainDeadline};
 use crate::handler::ratelimit::{RateDecision, RateLimiter};
 use crate::handler::redact::Redactor;
 use crate::handler::snapshot::ProcSnapshot;
@@ -319,7 +317,7 @@ pub async fn run(
     let drained = match &target {
         Some(t) if !rate_suppressed && !spool_full => {
             info!(bundle = %t.bundle.path("").display(), "spooling core");
-            SpoolBackend::new(
+            CoreDrain::new(
                 t.bundle.path(spool::CORE_FILE),
                 config.max_core_bytes,
                 core_budget,

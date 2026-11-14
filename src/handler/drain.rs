@@ -10,13 +10,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_compression::tokio::write::ZstdEncoder;
-use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
-use crate::handler::backend::{CaptureBackend, CoreStats, DrainDeadline};
 use crate::spool::SpoolBudget;
 
 // Read the core in 256 KiB chunks.
@@ -31,9 +29,44 @@ const BUDGET_FLUSH_INTERVAL: u64 = 1024 * 1024;
 // While a core is written, check the whole spool again after this many more
 // stored bytes. Concurrent captures and other disk users then count against
 // the cap, and each capture passes it by at most about this much.
-/// The spool capture backend: stream the core through zstd into the bundle's
-/// [`CORE_FILE`](crate::spool::CORE_FILE).
-pub struct SpoolBackend {
+/// Integrity stats for a drained core. The default value describes a core
+/// that was not read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreStats {
+    /// Uncompressed bytes drained from the kernel's core pipe.
+    pub bytes: u64,
+    /// Bytes stored (zstd-compressed).
+    pub stored_bytes: u64,
+    /// sha256 (hex) of the *stored* bytes - the zstd-compressed core.
+    /// `None` when nothing was stored.
+    pub sha256: Option<String>,
+    /// The stored core is incomplete (stream error or size cap).
+    pub truncated: bool,
+    /// Why the core is truncated: `size_cap` | `spool_full` | `stream_error`.
+    /// `None` when not truncated.
+    pub truncated_reason: Option<String>,
+}
+
+/// The drain passed its deadline before the core stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainDeadline {
+    /// Bytes drained before the deadline.
+    pub bytes: u64,
+}
+
+impl std::fmt::Display for DrainDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("core drain exceeded the deadline")
+    }
+}
+
+impl std::error::Error for DrainDeadline {}
+
+/// Where and how much of a core is stored: the core goes through zstd into
+/// the bundle's [`CORE_FILE`](crate::spool::CORE_FILE). A core that is not
+/// kept is never read: the handler closes the pipe, and the kernel stops the
+/// dump.
+pub struct CoreDrain {
     path: PathBuf,
     /// Max uncompressed bytes stored per core; `0` = unlimited.
     max_core_bytes: u64,
@@ -43,8 +76,8 @@ pub struct SpoolBackend {
     budget: Option<SpoolBudget>,
 }
 
-impl SpoolBackend {
-    /// Build a backend that writes the core to `path`, capped at
+impl CoreDrain {
+    /// A drain that writes the core to `path`, capped at
     /// `max_core_bytes` uncompressed (`0` = unlimited) and about
     /// `max_stored_bytes` compressed. With a `budget`, it also stops storing
     /// once the spool as a whole is full.
@@ -62,15 +95,23 @@ impl SpoolBackend {
             budget,
         }
     }
-}
 
-#[async_trait]
-impl CaptureBackend for SpoolBackend {
-    async fn drain_core(
+    /// Drain `reader` to its end and store the core. `deadline`, when set,
+    /// bounds the whole drain: the handler holds a `core_pipe_limit` slot
+    /// while this call runs.
+    ///
+    /// # Errors
+    ///
+    /// [`DrainDeadline`] when `deadline` passes before a core is truncated,
+    /// and otherwise only when the core file cannot be created or written.
+    pub async fn drain_core<R>(
         &self,
-        reader: &mut (dyn AsyncRead + Unpin + Send),
+        reader: &mut R,
         deadline: Option<Duration>,
-    ) -> Result<CoreStats> {
+    ) -> Result<CoreStats>
+    where
+        R: AsyncRead + Unpin + ?Sized,
+    {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -354,7 +395,7 @@ mod tests {
         max_stored_bytes: u64,
         deadline: Option<Duration>,
     ) -> Result<CoreStats> {
-        SpoolBackend::new(
+        CoreDrain::new(
             bundle.path(CORE_FILE),
             max_core_bytes,
             max_stored_bytes,
@@ -477,17 +518,17 @@ mod tests {
         let b = spool.create_bundle("1-2-pod-b").unwrap();
         let budget = spool.core_budget(MAX, 0);
         assert_eq!(budget, MAX);
-        let backend = |bundle: &Bundle| {
+        let drain_for = |bundle: &Bundle| {
             let mut spool_budget = SpoolBudget::new(spool.clone(), MAX, 0);
             spool_budget.recheck_every = 0;
-            SpoolBackend::new(bundle.path(CORE_FILE), 0, budget, Some(spool_budget))
+            CoreDrain::new(bundle.path(CORE_FILE), 0, budget, Some(spool_budget))
         };
-        let (backend_a, backend_b) = (backend(&a), backend(&b));
+        let (drain_a, drain_b) = (drain_for(&a), drain_for(&b));
 
         let (mut reader_a, mut reader_b): (&[u8], &[u8]) = (&core, &core);
         let (stats_a, stats_b) = tokio::join!(
-            backend_a.drain_core(&mut reader_a, None),
-            backend_b.drain_core(&mut reader_b, None),
+            drain_a.drain_core(&mut reader_a, None),
+            drain_b.drain_core(&mut reader_b, None),
         );
         let (stats_a, stats_b) = (stats_a.unwrap(), stats_b.unwrap());
 

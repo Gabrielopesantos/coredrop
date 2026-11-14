@@ -15,7 +15,7 @@
 //!   bundle is uploaded
 //!
 //! The handler writes the core into a bundle with
-//! [`SpoolBackend`](crate::handler::drain::SpoolBackend).
+//! [`CoreDrain`](crate::handler::drain::CoreDrain).
 
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};

@@ -339,6 +339,12 @@ mod tests {
     }
 
     #[test]
+    fn a_config_file_value_can_start_with_a_dash() {
+        let args = load_with_file("cluster: \"-x\"\n", &[]).unwrap();
+        assert_eq!(args.cluster, "-x");
+    }
+
+    #[test]
     fn a_flag_wins_over_the_config_file() {
         let args = load_with_file(
             "cluster: prod\nmax-cores-per-hour: 7\n",

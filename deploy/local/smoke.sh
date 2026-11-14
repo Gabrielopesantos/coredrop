@@ -445,20 +445,29 @@ else
 fi
 # A kept crash takes about 10s to reach the bucket; give a wrong one time to land.
 sleep 15
-f_objects="$(mc ls --recursive "$MC_ALIAS/$BUCKET" 2>/dev/null | awk '{print $NF}' \
-  | grep -F -- "/$f_uid/" || true)"
-if [ -z "$f_objects" ]; then
-  log "  no objects in s3://$BUCKET for the filtered pod (uid $f_uid)"
+# A failed listing or query is a failure, not an empty result.
+if f_listing="$(mc ls --recursive "$MC_ALIAS/$BUCKET" 2>/dev/null)"; then
+  f_objects="$(printf '%s\n' "$f_listing" | awk '{print $NF}' \
+    | grep -F -- "/$f_uid/" || true)"
+  if [ -z "$f_objects" ]; then
+    log "  no objects in s3://$BUCKET for the filtered pod (uid $f_uid)"
+  else
+    warn "  the filtered pod has objects in the bucket: $f_objects"; fail=1
+  fi
 else
-  warn "  the filtered pod has objects in the bucket: $f_objects"; fail=1
+  warn "  could not list s3://$BUCKET"; fail=1
 fi
-f_events="$(kubectl -n "$DEMO_NAMESPACE" get events.events.k8s.io \
-  --field-selector "regarding.name=$f_pod" -o json 2>/dev/null \
-  | jq -r '.items[] | select(.reportingController == "coredrop") | .reason' || true)"
-if [ -z "$f_events" ]; then
-  log "  no coredrop Event on the filtered pod"
+if f_events_json="$(kubectl -n "$DEMO_NAMESPACE" get events.events.k8s.io \
+     --field-selector "regarding.name=$f_pod" -o json 2>/dev/null)" \
+   && f_events="$(printf '%s' "$f_events_json" \
+     | jq -r '.items[] | select(.reportingController == "coredrop") | .reason')"; then
+  if [ -z "$f_events" ]; then
+    log "  no coredrop Event on the filtered pod"
+  else
+    warn "  coredrop posted Events on the filtered pod: $f_events"; fail=1
+  fi
 else
-  warn "  coredrop posted Events on the filtered pod: $f_events"; fail=1
+  warn "  could not query Events for $f_pod"; fail=1
 fi
 f_value="$(kubectl get --raw \
   "/api/v1/namespaces/$NAMESPACE/pods/$f_daemon:9464/proxy/metrics" 2>/dev/null \

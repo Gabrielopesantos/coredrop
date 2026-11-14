@@ -285,7 +285,9 @@ where
             }
             Ok(Err(e)) => {
                 warn!(error = %e, drained, "core stream read error - finalizing partial core as truncated");
-                truncated_reason = Some(TruncatedReason::StreamError);
+                // A core cut at the size cap or the spool budget keeps that
+                // reason: the stored prefix is complete.
+                truncated_reason.get_or_insert(TruncatedReason::StreamError);
                 break;
             }
         }
@@ -432,6 +434,22 @@ mod tests {
         assert_eq!(stats.bytes, chunk.len() as u64);
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         assert_eq!(unzstd(&stored).await, chunk);
+    }
+
+    #[tokio::test]
+    async fn a_read_error_after_the_cap_keeps_the_size_cap_reason() {
+        let chunk = vec![0x5Au8; 50_000];
+        let (_dir, _spool, bundle) = bundle();
+
+        let mut reader = FlakyReader {
+            chunk: chunk.clone(),
+            sent: false,
+        };
+        let stats = drain(&bundle, &mut reader, 1_000, u64::MAX, None).await.unwrap();
+
+        assert_eq!(stats.truncated, Some(TruncatedReason::SizeCap));
+        let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
+        assert_eq!(unzstd(&stored).await, chunk[..1_000]);
     }
 
     #[tokio::test]

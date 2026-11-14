@@ -78,13 +78,13 @@ pub fn build_id_from_bytes(elf: &[u8]) -> Option<String> {
         }
         let (p_offset, p_filesz) = if is64 {
             (
-                usize::try_from(read_u64(elf, off + 8, le)?).ok()?,
-                usize::try_from(read_u64(elf, off + 32, le)?).ok()?,
+                usize::try_from(read_u64(elf, off.checked_add(8)?, le)?).ok()?,
+                usize::try_from(read_u64(elf, off.checked_add(32)?, le)?).ok()?,
             )
         } else {
             (
-                read_u32(elf, off + 4, le)? as usize,
-                read_u32(elf, off + 16, le)? as usize,
+                read_u32(elf, off.checked_add(4)?, le)? as usize,
+                read_u32(elf, off.checked_add(16)?, le)? as usize,
             )
         };
         let notes = elf.get(p_offset..p_offset.checked_add(p_filesz)?)?;
@@ -119,7 +119,7 @@ fn scan_notes(notes: &[u8], le: bool) -> Option<String> {
 }
 
 fn read_u16(b: &[u8], o: usize, le: bool) -> Option<u16> {
-    let s: [u8; 2] = b.get(o..o + 2)?.try_into().ok()?;
+    let s: [u8; 2] = b.get(o..o.checked_add(2)?)?.try_into().ok()?;
     Some(if le {
         u16::from_le_bytes(s)
     } else {
@@ -128,7 +128,7 @@ fn read_u16(b: &[u8], o: usize, le: bool) -> Option<u16> {
 }
 
 fn read_u32(b: &[u8], o: usize, le: bool) -> Option<u32> {
-    let s: [u8; 4] = b.get(o..o + 4)?.try_into().ok()?;
+    let s: [u8; 4] = b.get(o..o.checked_add(4)?)?.try_into().ok()?;
     Some(if le {
         u32::from_le_bytes(s)
     } else {
@@ -137,7 +137,7 @@ fn read_u32(b: &[u8], o: usize, le: bool) -> Option<u32> {
 }
 
 fn read_u64(b: &[u8], o: usize, le: bool) -> Option<u64> {
-    let s: [u8; 8] = b.get(o..o + 8)?.try_into().ok()?;
+    let s: [u8; 8] = b.get(o..o.checked_add(8)?)?.try_into().ok()?;
     Some(if le {
         u64::from_le_bytes(s)
     } else {

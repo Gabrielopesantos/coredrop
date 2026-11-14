@@ -135,10 +135,31 @@ impl Redactor {
         if self.key_is_secret(key) || looks_secret_value(value) {
             return format!("{key}={REDACTED}").into_bytes();
         }
-        if let Some(rewritten) = self.redact_url(value) {
+        if let Some(rewritten) = self.redact_url(value).or_else(|| self.redact_pairs(value)) {
             return format!("{key}={rewritten}").into_bytes();
         }
         entry.to_vec()
+    }
+
+    /// Redact secret-keyword values in a `;`-separated connection string
+    /// (`Server=db;Password=x`). `None` when there is nothing to redact.
+    fn redact_pairs(&self, value: &str) -> Option<String> {
+        if !value.contains(';') {
+            return None;
+        }
+        let mut changed = false;
+        let pairs = value
+            .split(';')
+            .map(|pair| match pair.split_once('=') {
+                Some((key, v)) if !v.is_empty() && self.key_is_secret(key.trim()) => {
+                    changed = true;
+                    format!("{key}={REDACTED}")
+                }
+                _ => pair.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        changed.then_some(pairs)
     }
 
     /// A valueless flag whose name matches a secret keyword (`--password`), so
@@ -152,6 +173,11 @@ impl Redactor {
 
     fn key_is_secret(&self, key: &str) -> bool {
         let upper = key.to_ascii_uppercase();
+        // The shell's working directories match `PWD` but hold no secret,
+        // and they help to read a crash.
+        if matches!(upper.as_str(), "PWD" | "OLDPWD") {
+            return false;
+        }
         self.keywords.iter().any(|kw| upper.contains(kw.as_str()))
     }
 
@@ -163,12 +189,18 @@ impl Redactor {
         let scheme_end = value.find("://")?;
         let scheme = &value[..scheme_end];
         let rest = &value[scheme_end + 3..];
-        let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        // A password can hold `@` and `/`, so the userinfo ends at the last
+        // `@` before the query, and the host ends at the first `/` after it.
+        let tail_start = rest.find(['?', '#']).unwrap_or(rest.len());
+        let host_start = rest[..tail_start].rfind('@').map_or(0, |at| at + 1);
+        let auth_end = rest[host_start..tail_start]
+            .find('/')
+            .map_or(tail_start, |slash| host_start + slash);
         let authority = &rest[..auth_end];
         let tail = &rest[auth_end..];
 
         let mut changed = false;
-        let authority = match authority.split_once('@') {
+        let authority = match authority.rsplit_once('@') {
             // `user:pass@host` - keep the user, drop the password.
             Some((userinfo, host)) => match userinfo.split_once(':') {
                 Some((user, password)) if !password.is_empty() => {
@@ -354,6 +386,40 @@ mod tests {
                 "REDIS_URL=redis://cache.host:6379/0",
                 "PROXY=http://justuser@proxy.host:8080",
             ],
+        );
+    }
+
+    #[test]
+    fn redacts_passwords_in_a_semicolon_connection_string() {
+        let raw = environ(&[
+            "CONN=Server=db;User Id=app;Password=hunter2;Encrypt=true",
+            "PWD=/srv/app",
+            "OLDPWD=/root",
+            "MYSQL_PWD=hunter2",
+        ]);
+        assert_eq!(
+            parse(&Redactor::default().redact_environ(&raw)),
+            vec![
+                "CONN=Server=db;User Id=app;Password=<redacted>;Encrypt=true",
+                "PWD=/srv/app",
+                "OLDPWD=/root",
+                "MYSQL_PWD=<redacted>",
+            ]
+        );
+    }
+
+    #[test]
+    fn redacts_a_url_password_that_holds_at_or_slash() {
+        let raw = environ(&[
+            "A=postgres://u:p@ss@h/db",
+            "B=postgres://u:pa/ss@h/db?sslmode=require",
+        ]);
+        assert_eq!(
+            parse(&Redactor::default().redact_environ(&raw)),
+            vec![
+                "A=postgres://u:<redacted>@h/db",
+                "B=postgres://u:<redacted>@h/db?sslmode=require",
+            ]
         );
     }
 

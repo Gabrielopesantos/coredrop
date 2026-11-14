@@ -356,8 +356,11 @@ async fn run_rate_limit_suppresses_core_keeps_manifest() {
         !second.join(spool::CORE_FILE).exists(),
         "suppressed crash must not spool a core"
     );
-    // ...but proc snapshot and manifest are still spooled.
-    assert!(second.join(spool::SNAPSHOT_FILE).exists());
+    // ...and no proc snapshot, but the manifest is still spooled.
+    assert!(
+        !second.join(spool::SNAPSHOT_FILE).exists(),
+        "no snapshot without a core"
+    );
     let manifest = read_manifest(&second);
     assert!(!manifest.core.present);
     assert!(manifest.core.object_key.is_none());
@@ -419,7 +422,10 @@ async fn run_full_spool_drops_core_keeps_manifest_and_refunds_budget() {
 
     let bundle = ready_bundle(&config, CONTAINER_ID, TS, pid);
     assert!(!bundle.join(spool::CORE_FILE).exists());
-    assert!(bundle.join(spool::SNAPSHOT_FILE).exists());
+    assert!(
+        !bundle.join(spool::SNAPSHOT_FILE).exists(),
+        "no snapshot without a core"
+    );
     let manifest = read_manifest(&bundle);
     assert!(!manifest.core.present);
     assert_eq!(manifest.core.skipped_reason.as_deref(), Some("spool_full"));
@@ -512,7 +518,10 @@ async fn run_rate_limited_capture_does_not_read_the_core() {
 
     let bundle = ready_bundle(&config, CONTAINER_ID, TS + 10, pid);
     assert!(!bundle.join(spool::CORE_FILE).exists());
-    assert!(bundle.join(spool::SNAPSHOT_FILE).exists());
+    assert!(
+        !bundle.join(spool::SNAPSHOT_FILE).exists(),
+        "no snapshot without a core"
+    );
     let manifest = read_manifest(&bundle);
     assert!(!manifest.core.present);
     assert_eq!(manifest.core.skipped_reason.as_deref(), Some("rate_limit"));
@@ -521,8 +530,8 @@ async fn run_rate_limited_capture_does_not_read_the_core() {
     assert_eq!(capture.core_bytes, 0);
 }
 
-/// A spool-full capture does not read the core pipe, and still gets its
-/// snapshot and a `spool_full` manifest.
+/// A spool-full capture does not read the core pipe, keeps no snapshot, and
+/// still gets a `spool_full` manifest.
 #[tokio::test]
 async fn run_spool_full_capture_does_not_read_the_core() {
     let pid = 4248;
@@ -540,7 +549,10 @@ async fn run_spool_full_capture_does_not_read_the_core() {
 
     let bundle = ready_bundle(&config, CONTAINER_ID, TS, pid);
     assert!(!bundle.join(spool::CORE_FILE).exists());
-    assert!(bundle.join(spool::SNAPSHOT_FILE).exists());
+    assert!(
+        !bundle.join(spool::SNAPSHOT_FILE).exists(),
+        "no snapshot without a core"
+    );
     let manifest = read_manifest(&bundle);
     assert!(!manifest.core.present);
     assert_eq!(manifest.core.skipped_reason.as_deref(), Some("spool_full"));

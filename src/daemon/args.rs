@@ -75,7 +75,7 @@ pub(crate) struct DaemonArgs {
     pub(crate) max_core_bytes: u64,
 
     /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
-    /// crashes still get a proc snapshot and manifest, just no core.
+    /// crashes still get a manifest, but no core and no proc snapshot.
     #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = crate::config::DEFAULT_MAX_CORES_PER_HOUR)]
     pub(crate) max_cores_per_hour: u32,
 
@@ -92,8 +92,8 @@ pub(crate) struct DaemonArgs {
     pub(crate) spool_dir: PathBuf,
 
     /// Cap on the spool's total size, as a quantity (`10Gi`, `500M`, bytes
-    /// without a suffix); 0 = no cap. A core that does not fit is dropped;
-    /// its snapshot and manifest are still spooled.
+    /// without a suffix); 0 = no cap. A core that does not fit is dropped,
+    /// with its proc snapshot; its manifest is still spooled.
     #[arg(long = "spool-max-size", env = "CAPTURE_SPOOL_MAX_SIZE", default_value = "10Gi", value_name = "SIZE", value_parser = crate::config::parse_size)]
     pub(crate) spool_max_bytes: u64,
 

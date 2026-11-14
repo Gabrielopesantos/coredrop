@@ -34,7 +34,7 @@ at startup.
 | capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
-| capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload. |
+| capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix. Empty disables upload. |
 | cleanup.enabled | bool | `true` | Run the post-delete cleanup DaemonSet on `helm uninstall`. |
 | cleanup.image | string | `"rancher/kubectl:v1.35.6"` | Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl. |
 | corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |

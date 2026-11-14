@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// The UTS hostname: the node name for the handler, which the kernel runs in
-/// the host namespaces. The daemon pod prefers `NODE_NAME`. Reads
+/// the host namespaces. The daemon pod prefers `--node-name`. Reads
 /// `/proc/sys/kernel/hostname`; falls back to `localhost`.
 #[must_use]
 pub fn node_hostname() -> String {

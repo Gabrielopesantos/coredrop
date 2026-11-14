@@ -43,7 +43,7 @@ url = "2"
 
 # CLI config: flags, with config-file values as their defaults. `string`
 # lets those defaults be built at runtime. Secrets (store creds) stay env-only.
-clap = { version = "4", features = ["derive", "env", "string"] }
+clap = { version = "4", features = ["derive", "string"] }
 
 # Timestamp formatting in manifest (RFC3339)
 chrono = { version = "0.4", default-features = false, features = ["std"] }

@@ -79,9 +79,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          # Every daemon setting is in the config file (configmap.yaml); env
-          # holds only what the file must not or cannot hold.
-          args: ["--config", "/etc/coredrop/config.yaml"]
+          # Every daemon setting is in the config file (configmap.yaml), except
+          # the node name, which only the downward API knows. Kubernetes
+          # expands $(NODE_NAME) from the env below. Env holds only what the
+          # file must not or cannot hold.
+          args: ["--config", "/etc/coredrop/config.yaml", "--node-name=$(NODE_NAME)"]
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}

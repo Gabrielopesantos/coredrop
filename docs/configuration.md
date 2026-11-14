@@ -1,8 +1,8 @@
 # Configuration
 
 Every knob is a CLI flag, and can also be set in a YAML config file (see
-[Config file](#config-file)). Only `--node-name` also reads an env var
-(`NODE_NAME`). Secrets are env-only.
+[Config file](#config-file)). No knob reads an env var. Secrets are
+env-only.
 Sizes take a Kubernetes quantity: a byte count, or a whole number with a
 binary (`Ki`, `Mi`, `Gi`, ...) or decimal (`k`, `M`, `G`, ...) suffix.
 For the Helm values that set these flags, see the
@@ -35,7 +35,7 @@ For the Helm values that set these flags, see the
 | `--proc-root` | `/proc` | `/proc` root the handler reads |
 | `--core-pattern-path` | `/proc/sys/kernel/core_pattern` | File the `core_pattern` sysctl is written through |
 | `--core-pipe-limit-path` | `/proc/sys/kernel/core_pipe_limit` | File the `core_pipe_limit` sysctl is written through |
-| `--node-name` | env `NODE_NAME`, else the host name | Node name on k8s Events |
+| `--node-name` | the host name | Node name on k8s Events. The chart passes `spec.nodeName` |
 
 ## Config file
 
@@ -67,8 +67,9 @@ The daemon reads the file once, at startup. `coredrop check` (the probes)
 takes the same flags, so it finds the same paths. The Helm chart renders
 every setting into a ConfigMap mounted at `/etc/coredrop/config.yaml`, and a
 `checksum/config` pod annotation restarts the daemons when it changes. Env
-on the pod holds only `RUST_LOG`, `NODE_NAME` (downward API) and the
-object-store client options and credentials. Do not put credentials in the
+on the pod holds only `RUST_LOG`, `NODE_NAME` (downward API, passed as
+`--node-name=$(NODE_NAME)`) and the object-store client options and
+credentials. Do not put credentials in the
 file: anyone who can read the namespace can read a ConfigMap.
 
 ## Observe-only mode

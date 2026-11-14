@@ -78,6 +78,19 @@ filter would drop it silently at runtime, leaving no error anywhere.
 {{- end -}}
 
 {{/*
+Fail rendering on an unrecognized capture.filter key. The template reads only
+include and exclude, so another key (a typo) would be dropped silently, and
+the filter would keep every crash.
+*/}}
+{{- define "coredrop.validateFilter" -}}
+{{- range $key, $_ := (.Values.capture.filter | default dict) -}}
+{{- if not (has $key (list "include" "exclude")) -}}
+{{- fail (printf "capture.filter: unknown key %q. Valid keys: include, exclude" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Fail rendering on a spool directory that is not an absolute path below the
 root. The handler only accepts absolute paths, and the cleanup worker mounts
 the directory's parent.

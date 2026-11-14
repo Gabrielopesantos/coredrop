@@ -1,6 +1,7 @@
 {{- include "coredrop.validateStoreOpts" . }}
 {{- include "coredrop.validateSpool" . }}
 {{- include "coredrop.validateUpload" . }}
+{{- include "coredrop.validateFilter" . }}
 {{- $criUnixSocket := "" }}
 {{- if hasPrefix "unix://" .Values.cri.runtimeEndpoint }}
 {{- $criUnixSocket = clean (trimPrefix "unix://" .Values.cri.runtimeEndpoint) }}

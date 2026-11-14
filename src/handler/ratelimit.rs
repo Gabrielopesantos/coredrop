@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::config::ensure_private_dir;
+use crate::host::ensure_private_dir;
 
 /// Sliding window the per-pod budget applies to.
 pub const RATE_WINDOW_SECS: i64 = 3600;

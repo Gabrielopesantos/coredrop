@@ -478,7 +478,7 @@ pub async fn run(
         schema_version: 1,
         captured_at: format_timestamp(args.timestamp),
         cluster: cluster.to_string(),
-        node: node_hostname(),
+        node: crate::host::node_hostname(),
         signal: args.signal,
         signal_name: signal_name(args.signal).map(str::to_string),
         exe: args.exe.clone(),
@@ -630,18 +630,6 @@ fn report(config: &HandlerConfig, payload: &CaptureEventPayload) {
         "capture complete"
     );
     events::send_capture_event(&config.event_socket_path, payload);
-}
-
-/// The UTS hostname: the node name for the handler, which the kernel runs in
-/// the host namespaces. The daemon pod prefers `NODE_NAME`. Reads
-/// `/proc/sys/kernel/hostname`; falls back to `localhost`.
-#[must_use]
-pub fn node_hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "localhost".to_string())
 }
 
 fn read_cgroup_identity(proc_root: &Path, pid: i32) -> Option<CgroupIdentity> {

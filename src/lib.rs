@@ -11,7 +11,7 @@
 //! - The top-level modules are what both sides share: the handler config
 //!   ([`config`]), the spool layout ([`spool`]), the capture datagram
 //!   ([`events`]), the object keys ([`keys`]), the manifest, the capture
-//!   filter, and cgroup identity.
+//!   filter, cgroup identity, and host helpers ([`host`]).
 
 pub mod cgroup;
 pub mod config;
@@ -20,6 +20,7 @@ pub mod daemon;
 pub mod events;
 pub mod filter;
 pub mod handler;
+pub mod host;
 pub mod keys;
 pub mod manifest;
 pub mod spool;

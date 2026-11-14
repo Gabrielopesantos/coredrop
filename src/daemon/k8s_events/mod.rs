@@ -32,9 +32,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::cgroup::is_pod_uid;
-use crate::config::ensure_private_dir;
 use crate::daemon::metrics::Metrics;
 use crate::events::CaptureEventPayload;
+use crate::host::ensure_private_dir;
 
 use self::aggregate::{AGGREGATION_SWEEP_INTERVAL, AggKey, Aggregator};
 use self::client::{EventClient, is_conflict, is_not_found};

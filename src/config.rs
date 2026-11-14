@@ -6,28 +6,25 @@
 //! the handler reads it ([`HandlerConfig::read`]) from the same host path.
 
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::filter::CaptureFilter;
+use crate::host::ensure_private_dir;
 use crate::spool;
 
 /// Host path the daemon writes the serialized [`HandlerConfig`] to, and the
 /// handler reads it back from.
 pub const DEFAULT_CONFIG_PATH: &str = "/run/coredrop/handler.json";
 
-/// Create `dir` (and parents) mode `0700` if missing - `create_dir_all`
-/// is a no-op on an existing dir and does not touch its mode.
-///
-/// # Errors
-///
-/// Fails when the directory cannot be created or its mode cannot be set.
-pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+/// The filesystem path of a `unix://` CRI endpoint, or `None` for any other
+/// scheme (crictl also accepts e.g. `tcp://`, which has no path to check).
+#[must_use]
+pub fn unix_socket_path(endpoint: &str) -> Option<&str> {
+    endpoint.strip_prefix("unix://").filter(|p| !p.is_empty())
 }
 
 /// Parse a size in Kubernetes quantity form into bytes: a whole number with
@@ -347,7 +344,7 @@ impl HandlerConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     use tempfile::TempDir;
 
@@ -359,6 +356,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("handler.json");
         (dir, path)
+    }
+
+    #[test]
+    fn unix_socket_path_extracts_only_unix_endpoints() {
+        assert_eq!(
+            unix_socket_path("unix:///run/containerd/containerd.sock"),
+            Some("/run/containerd/containerd.sock")
+        );
+        assert_eq!(unix_socket_path("tcp://127.0.0.1:1234"), None);
+        assert_eq!(unix_socket_path("/run/containerd/containerd.sock"), None);
+        assert_eq!(unix_socket_path("unix://"), None);
+        assert_eq!(unix_socket_path(""), None);
     }
 
     #[test]

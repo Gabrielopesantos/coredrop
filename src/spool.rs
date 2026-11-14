@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use tracing::warn;
 
-use crate::config::ensure_private_dir;
+use crate::host::ensure_private_dir;
 
 /// Default spool root on the node. Not under `/run`: that is a tmpfs, so a
 /// spooled core would sit in RAM.

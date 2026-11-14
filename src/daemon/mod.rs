@@ -93,7 +93,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
         // Say so, or a missing identity looks like a bug rather than a setting.
         None => info!("no CRI endpoint configured; crictl will resolve one on the node"),
         Some(endpoint) => {
-            if let Some(socket) = crate::handler::crictl::unix_socket_path(endpoint)
+            if let Some(socket) = crate::config::unix_socket_path(endpoint)
                 && !std::path::Path::new(socket).exists()
             {
                 warn!(
@@ -192,7 +192,7 @@ fn node_name(args: &DaemonArgs) -> String {
     args.node_name
         .clone()
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(crate::handler::node_hostname)
+        .unwrap_or_else(crate::host::node_hostname)
 }
 
 /// How often the daemon checks that `core_pattern` still routes to the handler.

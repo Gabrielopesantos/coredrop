@@ -5,8 +5,8 @@ anyone who can read the namespace can read a ConfigMap. The store
 credentials come from the Secret, the node name from the downward API.
 */ -}}
 {{- $config := dict
-  "handler-path" (printf "%s/coredrop" .Values.corePattern.hostBinDir)
-  "handler-config-path" (printf "%s/handler.json" .Values.corePattern.hostRunDir)
+  "handler-path" (printf "%s/coredrop" (clean .Values.corePattern.hostBinDir))
+  "handler-config-path" (printf "%s/handler.json" (clean .Values.corePattern.hostRunDir))
   "pipe-limit" (int64 .Values.corePattern.pipeLimit)
   "core-pattern-path" "/host/sysctl/core_pattern"
   "core-pipe-limit-path" "/host/sysctl/core_pipe_limit"
@@ -17,7 +17,7 @@ credentials come from the Secret, the node name from the downward API.
   "drain-deadline-secs" (int64 .Values.capture.drainDeadlineSeconds)
   "crictl-timeout-secs" (int64 .Values.capture.crictlTimeoutSeconds)
   "capture-filter" (dict "include" (.Values.capture.filter.include | default list) "exclude" (.Values.capture.filter.exclude | default list))
-  "spool-dir" .Values.spool.hostDir
+  "spool-dir" (clean .Values.spool.hostDir)
   "spool-max-size" (include "coredrop.size" (dict "name" "spool.maxSize" "value" .Values.spool.maxSize))
   "spool-min-free-percent" (int64 .Values.spool.minFreePercent)
   "spool-max-age-secs" (int64 .Values.spool.maxAgeSeconds)

@@ -207,13 +207,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            runAsUser: 0
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
+            {{- toYaml .Values.securityContext | nindent 12 }}
           # The configured paths reach the script as environment variables,
           # never as script text, so no character in them is shell syntax.
           env:
@@ -281,11 +275,11 @@ spec:
       volumes:
         - name: host-bin-parent
           hostPath:
-            path: {{ dir $binDir }}
+            path: {{ dir $binDir | quote }}
             type: DirectoryOrCreate
         - name: host-run-parent
           hostPath:
-            path: {{ dir $runDir }}
+            path: {{ dir $runDir | quote }}
             type: DirectoryOrCreate
         - name: host-spool-parent
           hostPath:

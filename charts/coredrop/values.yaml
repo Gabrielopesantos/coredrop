@@ -21,7 +21,7 @@ serviceAccount:
 # sysctl files, so it needs no capabilities. Root is still required: the
 # kernel allows a sysctl write only from uid 0 in the host user namespace.
 # SELinux nodes may also need `seLinuxOptions: {type: spc_t}`.
-# -- Daemon container securityContext.
+# -- securityContext of the daemon, its install-handler initContainer and the cleanup worker.
 securityContext:
   runAsUser: 0
   allowPrivilegeEscalation: false

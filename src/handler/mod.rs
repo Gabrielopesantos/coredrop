@@ -401,7 +401,7 @@ pub async fn run(
     info!(
         core_bytes = stats.bytes,
         stored_bytes = stats.stored_bytes,
-        truncated = stats.truncated,
+        truncated = stats.truncated.is_some(),
         stored,
         "core stream drained"
     );
@@ -490,8 +490,8 @@ pub async fn run(
             sha256: stats.sha256.clone(),
             size_bytes: stored.then_some(stats.bytes),
             stored_bytes: stored.then_some(stats.stored_bytes),
-            truncated: stats.truncated,
-            truncated_reason: stats.truncated_reason.clone(),
+            truncated: stats.truncated.is_some(),
+            truncated_reason: stats.truncated,
             skipped_reason: skipped_reason.map(str::to_string),
             codec: "zstd".to_string(),
         },
@@ -523,7 +523,7 @@ pub async fn run(
         manifest_key: target.as_ref().map(|t| t.keys.manifest()),
         core_bytes: stats.bytes,
         stored_bytes: stored.then_some(stats.stored_bytes),
-        truncated: stats.truncated,
+        truncated: stats.truncated.is_some(),
         ..base_payload(&args, outcome)
     };
 

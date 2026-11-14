@@ -16,6 +16,7 @@ use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
 use crate::handler::buildid::hex;
+use crate::manifest::TruncatedReason;
 use crate::spool::SpoolBudget;
 
 // Read the core in 256 KiB chunks.
@@ -38,11 +39,8 @@ pub struct CoreStats {
     /// sha256 (hex) of the *stored* bytes - the zstd-compressed core.
     /// `None` when nothing was stored.
     pub sha256: Option<String>,
-    /// The stored core is incomplete (stream error or size cap).
-    pub truncated: bool,
-    /// Why the core is truncated: `size_cap` | `spool_full` | `stream_error`.
-    /// `None` when not truncated.
-    pub truncated_reason: Option<String>,
+    /// Why the stored core is incomplete; `None` when it is complete.
+    pub truncated: Option<TruncatedReason>,
 }
 
 /// The drain passed its deadline before the core stream ended.
@@ -222,7 +220,7 @@ where
     let mut unflushed = 0u64;
     let mut checked_at = 0u64;
     // Set when storing stops; the rest of the stream is only counted.
-    let mut truncated_reason: Option<&'static str> = None;
+    let mut truncated_reason: Option<TruncatedReason> = None;
     let mut finalize_by = deadline_at;
     loop {
         match race(core.read(&mut buf), deadline_at).await {
@@ -249,7 +247,7 @@ where
                         max_stored_bytes,
                         "spool budget used up - keeping the core so far, draining the rest"
                     );
-                    truncated_reason = Some("spool_full");
+                    truncated_reason = Some(TruncatedReason::SpoolFull);
                 }
                 // min() keeps the value <= n, so the conversion back to usize cannot fail.
                 let take = if truncated_reason.is_none() {
@@ -273,7 +271,7 @@ where
                         // The flush put the stored bytes on disk, so the
                         // spool's usage includes them.
                         if spool_filled(budget, encoder.get_ref().bytes, &mut checked_at) {
-                            truncated_reason = Some("spool_full");
+                            truncated_reason = Some(TruncatedReason::SpoolFull);
                         }
                     }
                 }
@@ -282,12 +280,12 @@ where
                         cap,
                         "core exceeds size cap - storing first {cap} bytes, draining the rest"
                     );
-                    truncated_reason = Some("size_cap");
+                    truncated_reason = Some(TruncatedReason::SizeCap);
                 }
             }
             Ok(Err(e)) => {
                 warn!(error = %e, drained, "core stream read error - finalizing partial core as truncated");
-                truncated_reason = Some("stream_error");
+                truncated_reason = Some(TruncatedReason::StreamError);
                 break;
             }
         }
@@ -305,8 +303,7 @@ where
             bytes: drained,
             stored_bytes,
             sha256: Some(hex(&hasher.finalize())),
-            truncated: truncated_reason.is_some(),
-            truncated_reason: truncated_reason.map(str::to_string),
+            truncated: truncated_reason,
         },
         inner,
     ))
@@ -405,7 +402,7 @@ mod tests {
             .unwrap();
 
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
-        assert!(!stats.truncated);
+        assert_eq!(stats.truncated, None);
         assert_eq!(stats.bytes, core.len() as u64);
         assert_eq!(stats.stored_bytes, stored.len() as u64);
         assert!(
@@ -431,8 +428,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(stats.truncated);
-        assert_eq!(stats.truncated_reason.as_deref(), Some("stream_error"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::StreamError));
         assert_eq!(stats.bytes, chunk.len() as u64);
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         assert_eq!(unzstd(&stored).await, chunk);
@@ -449,8 +445,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(stats.bytes, 50_000, "full stream drained and counted");
-        assert!(stats.truncated);
-        assert_eq!(stats.truncated_reason.as_deref(), Some("size_cap"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::SizeCap));
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         assert_eq!(
             unzstd(&stored).await,
@@ -482,8 +477,7 @@ mod tests {
         let stats = drain(&bundle, &mut reader, 0, 300_000, None).await.unwrap();
 
         assert_eq!(stats.bytes, core.len() as u64, "full stream drained");
-        assert!(stats.truncated);
-        assert_eq!(stats.truncated_reason.as_deref(), Some("spool_full"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::SpoolFull));
         assert!(
             stats.stored_bytes < 300_000 + 2 * BUDGET_FLUSH_INTERVAL,
             "stored {} bytes",
@@ -522,7 +516,7 @@ mod tests {
         let (stats_a, stats_b) = (stats_a.unwrap(), stats_b.unwrap());
 
         for stats in [&stats_a, &stats_b] {
-            assert_eq!(stats.truncated_reason.as_deref(), Some("spool_full"));
+            assert_eq!(stats.truncated, Some(TruncatedReason::SpoolFull));
         }
         // Each capture can pass the cap by one flush interval plus one read
         // chunk before its next check.
@@ -551,7 +545,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(stats.truncated_reason.as_deref(), Some("size_cap"));
+        assert_eq!(stats.truncated, Some(TruncatedReason::SizeCap));
         assert_eq!(stats.bytes, 50_000, "the bytes read before the deadline");
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();
         assert_eq!(unzstd(&stored).await, &core[..10_000]);

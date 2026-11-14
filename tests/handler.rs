@@ -320,7 +320,10 @@ async fn run_size_cap_truncates_stored_core() {
 
     let manifest = read_manifest(&bundle);
     assert!(manifest.core.truncated);
-    assert_eq!(manifest.core.truncated_reason.as_deref(), Some("size_cap"));
+    assert_eq!(
+        manifest.core.truncated_reason,
+        Some(coredrop::manifest::TruncatedReason::SizeCap)
+    );
     assert_eq!(
         manifest.core.size_bytes,
         Some(core_payload.len() as u64),

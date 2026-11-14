@@ -37,7 +37,7 @@ use crate::daemon::metrics::Metrics;
 use crate::events::CaptureEventPayload;
 
 use self::aggregate::{AGGREGATION_SWEEP_INTERVAL, AggKey, Aggregator};
-use self::client::EventClient;
+use self::client::{EventClient, is_not_found};
 use self::event::{Reason, event_body, event_name, rfc3339_micro, series_patch};
 use self::log::{Stage, log_capture};
 
@@ -247,22 +247,39 @@ async fn handle_payload(
         pod_uid: pod_uid.to_string(),
         reason,
     };
-    let Some(recorded) = aggregator.record(key, Instant::now(), || {
-        event_name(pod_uid, reason, payload.timestamp)
-    }) else {
+    let now = Instant::now();
+    let make_name = || event_name(pod_uid, reason, payload.timestamp);
+    let Some(mut recorded) = aggregator.record(key.clone(), now, make_name) else {
         return;
     };
     let last_observed = rfc3339_micro(payload.timestamp);
 
-    let result = if recorded.is_new {
-        let body = event_body(node, &recorded.event_name, reason, &target, payload);
-        client.create_event(namespace, &body).await
+    // A failed create keeps the entry: the create can time out after the API
+    // server stored the Event. The next patch then finds out.
+    let mut result = if recorded.is_new {
+        Ok(())
     } else {
         let body = series_patch(recorded.count, &last_observed);
         client
             .patch_event_series(namespace, &recorded.event_name, &body)
             .await
     };
+    // No Event to patch: its create failed, or it was deleted. Start a new
+    // Event and count.
+    if let Err(e) = &result
+        && is_not_found(e)
+    {
+        debug!(event = %recorded.event_name, namespace = %namespace, "kubernetes event not found; creating a new one");
+        aggregator.forget(&key);
+        let Some(fresh) = aggregator.record(key, now, make_name) else {
+            return;
+        };
+        recorded = fresh;
+    }
+    if recorded.is_new {
+        let body = event_body(node, &recorded.event_name, reason, &target, payload);
+        result = client.create_event(namespace, &body).await;
+    }
     metrics.event_posted(result.is_ok());
     if let Err(e) = result {
         warn!(error = %e, event = %recorded.event_name, namespace = %namespace, "posting kubernetes event failed");
@@ -494,6 +511,92 @@ mod tests {
         assert!(
             text.contains("coredrop_events_posted_total{result=\"error\"} 1"),
             "only the valid payload reaches the API server: {text}"
+        );
+    }
+
+    /// A plain-HTTP API server. It answers each request with the next status
+    /// in `statuses` (then 500) and records `METHOD path` of each request.
+    async fn fake_api_server(statuses: Vec<u16>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let statuses = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            statuses,
+        )));
+        let server_seen = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let seen = Arc::clone(&server_seen);
+                let statuses = Arc::clone(&statuses);
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| {
+                            seen.lock().unwrap().push(format!(
+                                "{} {}",
+                                req.method(),
+                                req.uri().path()
+                            ));
+                            let status = statuses.lock().unwrap().pop_front().unwrap_or(500);
+                            let mut resp = hyper::Response::new(http_body_util::Full::new(
+                                hyper::body::Bytes::new(),
+                            ));
+                            *resp.status_mut() = hyper::StatusCode::from_u16(status).unwrap();
+                            async move { Ok::<_, std::convert::Infallible>(resp) }
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (origin, seen)
+    }
+
+    #[tokio::test]
+    async fn handle_payload_creates_a_new_event_when_the_patch_finds_none() {
+        // The first create fails, so the Event does not exist. The next
+        // capture's patch gets 404 and creates a new Event instead.
+        let (origin, seen) = fake_api_server(vec![500, 404, 201, 200]).await;
+        let client = EventClient::new_for_test(reqwest::Client::new(), &origin, "test".into());
+        let mut agg = Aggregator::default();
+        let metrics = Metrics::new();
+        let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        let mut first = payload("default", uid);
+        first.timestamp = 1_749_600_000;
+        let mut second = payload("default", uid);
+        second.timestamp = 1_749_600_060;
+        let mut third = payload("default", uid);
+        third.timestamp = 1_749_600_120;
+
+        for p in [&first, &second, &third] {
+            handle_payload(Some(&client), &mut agg, "test-node", &metrics, p).await;
+        }
+
+        let events = "/apis/events.k8s.io/v1/namespaces/default/events";
+        let first_name = event_name(uid, Reason::CoreDumped, first.timestamp);
+        let second_name = event_name(uid, Reason::CoreDumped, second.timestamp);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                format!("POST {events}"),
+                format!("PATCH {events}/{first_name}"),
+                format!("POST {events}"),
+                format!("PATCH {events}/{second_name}"),
+            ]
+        );
+        let entry = agg.entries.values().next().unwrap();
+        assert_eq!(entry.event_name, second_name);
+        assert_eq!(entry.count, 2);
+        let text = metrics.encode();
+        assert!(
+            text.contains("coredrop_events_posted_total{result=\"error\"} 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("coredrop_events_posted_total{result=\"ok\"} 2"),
+            "{text}"
         );
     }
 

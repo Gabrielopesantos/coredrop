@@ -147,17 +147,39 @@ impl EventClient {
     }
 }
 
-/// Turn a non-2xx response into an `Err` carrying the API server's response
-/// body - the status code alone ("HTTP 400") gives no way to tell a bad
-/// request body from an RBAC/admission rejection.
-pub(super) async fn api_result(resp: reqwest::Response, what: &str) -> Result<()> {
+/// A non-2xx response from the API server.
+#[derive(Debug)]
+struct ApiError {
+    what: &'static str,
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: HTTP {}: {}", self.what, self.status, self.body)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// Whether `e` is an API server `404 Not Found`.
+pub(super) fn is_not_found(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<ApiError>()
+        .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND)
+}
+
+/// Turn a non-2xx response into an [`ApiError`] carrying the API server's
+/// response body - the status code alone ("HTTP 400") gives no way to tell a
+/// bad request body from an RBAC/admission rejection.
+pub(super) async fn api_result(resp: reqwest::Response, what: &'static str) -> Result<()> {
     let status = resp.status();
     if status.is_success() {
         return Ok(());
     }
     let body = resp.text().await.unwrap_or_default();
     let body = body.chars().take(500).collect::<String>();
-    Err(anyhow!("{what}: HTTP {status}: {body}"))
+    Err(ApiError { what, status, body }.into())
 }
 
 #[cfg(test)]
@@ -251,5 +273,24 @@ Kf3s
             origin,
             "test".into(),
         )
+    }
+
+    #[test]
+    fn is_not_found_matches_only_an_api_404() {
+        let api = |status| -> anyhow::Error {
+            ApiError {
+                what: "patch event series",
+                status,
+                body: String::new(),
+            }
+            .into()
+        };
+        assert!(is_not_found(&api(reqwest::StatusCode::NOT_FOUND)));
+        assert!(!is_not_found(&api(reqwest::StatusCode::FORBIDDEN)));
+        assert!(!is_not_found(&anyhow!("connection refused")));
+        assert_eq!(
+            api(reqwest::StatusCode::NOT_FOUND).to_string(),
+            "patch event series: HTTP 404 Not Found: "
+        );
     }
 }

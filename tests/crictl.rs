@@ -9,7 +9,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use coredrop::config::HandlerConfig;
-use coredrop::crictl;
+use coredrop::handler::crictl;
 
 mod common;
 use common::{SPAWN_LOCK, fake_crictl_script, write_fake_crictl};

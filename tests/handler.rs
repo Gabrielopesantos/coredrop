@@ -11,9 +11,9 @@ use coredrop::config::HandlerConfig;
 use coredrop::events::{CaptureEventPayload, Outcome};
 use coredrop::filter::CaptureFilter;
 use coredrop::handler::{CaptureArgs, run};
+use coredrop::keys::ObjectKeys;
 use coredrop::manifest::Manifest;
 use coredrop::spool::{self, Spool};
-use coredrop::upload;
 
 mod common;
 use common::{
@@ -49,7 +49,7 @@ fn capture_args(pid: i32, signal: i32, timestamp: i64) -> CaptureArgs {
 
 /// The three object keys one capture produces, for the standard fixture identity.
 fn keys(container_id: &str, ts: i64, pid: i32) -> (String, String, String) {
-    let keys = upload::ObjectKeys::new("test", POD_UID, container_id, ts, pid);
+    let keys = ObjectKeys::new("test", POD_UID, container_id, ts, pid);
     (keys.core(), keys.proc_snapshot(), keys.manifest())
 }
 

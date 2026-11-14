@@ -1,0 +1,45 @@
+{{- /*
+The daemon's config file, mounted at /etc/coredrop/config.yaml. Keys are the
+daemon's long flag names (docs/configuration.md). Secrets stay out of it:
+anyone who can read the namespace can read a ConfigMap. The store
+credentials come from the Secret, the node name from the downward API.
+*/ -}}
+{{- $config := dict
+  "handler-path" (printf "%s/coredrop" .Values.corePattern.hostBinDir)
+  "handler-config-path" (printf "%s/handler.json" .Values.corePattern.hostRunDir)
+  "pipe-limit" (int64 .Values.corePattern.pipeLimit)
+  "core-pattern-path" "/host/sysctl/core_pattern"
+  "core-pipe-limit-path" "/host/sysctl/core_pipe_limit"
+  "cluster" .Values.capture.cluster
+  "no-redact" .Values.capture.noRedact
+  "max-core-size" (include "coredrop.size" (dict "name" "capture.maxCoreSize" "value" .Values.capture.maxCoreSize))
+  "max-cores-per-hour" (int64 .Values.capture.maxCoresPerHour)
+  "drain-deadline-secs" (int64 .Values.capture.drainDeadlineSeconds)
+  "crictl-timeout-secs" (int64 .Values.capture.crictlTimeoutSeconds)
+  "capture-filter" (dict "include" (.Values.capture.filter.include | default list) "exclude" (.Values.capture.filter.exclude | default list))
+  "spool-dir" .Values.spool.hostDir
+  "spool-max-size" (include "coredrop.size" (dict "name" "spool.maxSize" "value" .Values.spool.maxSize))
+  "spool-min-free-percent" (int64 .Values.spool.minFreePercent)
+  "spool-max-age-secs" (int64 .Values.spool.maxAgeSeconds)
+  "upload-concurrency" (int64 .Values.upload.concurrency)
+  "upload-timeout-secs" (int64 .Values.upload.timeoutSeconds)
+  "shutdown-flush-secs" (int64 .Values.upload.shutdownFlushSeconds)
+  "no-events" (not .Values.events.enabled)
+  "metrics-addr" (ternary (printf "0.0.0.0:%v" .Values.metrics.port) "" .Values.metrics.enabled)
+  "crictl-path" .Values.cri.crictlPath
+}}
+{{- with .Values.capture.objectStore.url }}
+{{- $_ := set $config "store-url" . }}
+{{- end }}
+{{- with .Values.cri.runtimeEndpoint }}
+{{- $_ := set $config "cri-runtime-endpoint" . }}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "coredrop.fullname" . }}-config
+  labels:
+    {{- include "coredrop.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- toYaml $config | nindent 4 }}

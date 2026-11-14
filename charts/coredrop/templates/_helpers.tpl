@@ -34,7 +34,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/*
 The object-store option keys the daemon forwards to the handler. Source of
-truth is ALLOWED_STORE_OPTS in src/upload.rs; the `helpers_store_opts_match_allowlist`
+truth is ALLOWED_STORE_OPTS in src/daemon/upload.rs; the `helpers_store_opts_match_allowlist`
 test there fails if this copy drifts from it.
 */}}
 {{- define "coredrop.allowedStoreOpts" -}}
@@ -113,6 +113,17 @@ startup.
 {{- include "coredrop.validateInt" (dict "name" "upload.shutdownFlushSeconds" "value" .Values.upload.shutdownFlushSeconds "min" 0) -}}
 {{- include "coredrop.validateInt" (dict "name" "spool.maxAgeSeconds" "value" .Values.spool.maxAgeSeconds "min" 0) -}}
 {{- include "coredrop.validateInt" (dict "name" "capture.drainDeadlineSeconds" "value" .Values.capture.drainDeadlineSeconds "min" 0) -}}
+{{- end -}}
+
+{{/*
+Fail rendering on a capture value the daemon would reject at startup. Without
+this check, int64 renders a non-number as 0 (no rate limit for
+maxCoresPerHour) and drops a fraction.
+*/}}
+{{- define "coredrop.validateCapture" -}}
+{{- include "coredrop.validateInt" (dict "name" "corePattern.pipeLimit" "value" .Values.corePattern.pipeLimit "min" 0 "max" 4294967295) -}}
+{{- include "coredrop.validateInt" (dict "name" "capture.maxCoresPerHour" "value" .Values.capture.maxCoresPerHour "min" 0 "max" 4294967295) -}}
+{{- include "coredrop.validateInt" (dict "name" "capture.crictlTimeoutSeconds" "value" .Values.capture.crictlTimeoutSeconds "min" 0) -}}
 {{- end -}}
 
 {{/*

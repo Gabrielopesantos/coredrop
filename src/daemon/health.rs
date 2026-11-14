@@ -36,9 +36,8 @@ pub fn check(handler_path: &Path, config_path: &Path, core_pattern_path: &Path) 
         );
     };
 
-    if let Some(socket) = &config.event_socket_path
-        && !socket.exists()
-    {
+    let socket = &config.event_socket_path;
+    if !socket.exists() {
         bail!("capture event socket {} is not bound", socket.display());
     }
 
@@ -59,11 +58,14 @@ mod tests {
     const INSTALLED: &str = "|/opt/coredrop/bin/coredrop capture %P %s %t %E\n";
     const HANDLER: &str = "/opt/coredrop/bin/coredrop";
 
-    /// A temp dir holding a `core_pattern` file and a written handler config,
-    /// plus the two paths `check` takes.
-    fn fixture(pattern: &str, event_socket_path: Option<PathBuf>) -> (TempDir, PathBuf, PathBuf) {
+    /// A temp dir holding a `core_pattern` file, a written handler config
+    /// and its bound event socket, plus the two paths `check` takes.
+    fn fixture(pattern: &str) -> (TempDir, PathBuf, PathBuf) {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("core_pattern"), pattern).unwrap();
+        let event_socket_path = dir.path().join("events.sock");
+        // A bound socket leaves its file after the socket is closed.
+        drop(std::os::unix::net::UnixDatagram::bind(&event_socket_path).unwrap());
         let config = HandlerConfig {
             event_socket_path,
             ..Default::default()
@@ -75,32 +77,22 @@ mod tests {
     }
 
     #[test]
-    fn passes_when_pattern_and_config_are_intact() {
+    fn passes_when_pattern_config_and_socket_are_intact() {
         // The kernel writes back a trailing newline; the check must tolerate it.
-        let (_dir, config, pattern) = fixture(INSTALLED, None);
-        check(Path::new(HANDLER), &config, &pattern).unwrap();
-    }
-
-    #[test]
-    fn passes_when_the_advertised_event_socket_is_bound() {
-        let dir = TempDir::new().unwrap();
-        let sock_path = dir.path().join("events.sock");
-        let _socket = std::os::unix::net::UnixDatagram::bind(&sock_path).unwrap();
-
-        let (_dir2, config, pattern) = fixture(INSTALLED, Some(sock_path));
+        let (_dir, config, pattern) = fixture(INSTALLED);
         check(Path::new(HANDLER), &config, &pattern).unwrap();
     }
 
     #[test]
     fn fails_when_core_pattern_drifted() {
-        let (_dir, config, pattern) = fixture("core\n", None);
+        let (_dir, config, pattern) = fixture("core\n");
         let err = check(Path::new(HANDLER), &config, &pattern).unwrap_err();
         assert!(format!("{err:#}").contains("core_pattern is"), "{err:#}");
     }
 
     #[test]
     fn fails_when_handler_config_is_gone() {
-        let (_dir, config, pattern) = fixture(INSTALLED, None);
+        let (_dir, config, pattern) = fixture(INSTALLED);
         std::fs::remove_file(&config).unwrap();
 
         let err = check(Path::new(HANDLER), &config, &pattern).unwrap_err();
@@ -109,10 +101,8 @@ mod tests {
 
     #[test]
     fn fails_when_advertised_event_socket_is_gone() {
-        let (_dir, config, pattern) = fixture(
-            INSTALLED,
-            Some(PathBuf::from("/run/coredrop/definitely-not-bound.sock")),
-        );
+        let (dir, config, pattern) = fixture(INSTALLED);
+        std::fs::remove_file(dir.path().join("events.sock")).unwrap();
 
         let err = check(Path::new(HANDLER), &config, &pattern).unwrap_err();
         assert!(format!("{err:#}").contains("is not bound"), "{err:#}");

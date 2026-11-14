@@ -59,8 +59,8 @@ pub fn write_fixture_proc(root: &Path, pid: i32, pod_uid: &str, container_id: &s
 /// Handler config rooted at a test's temp dir, with a store configured and an
 /// unlimited spool at `<root>/spool`. crictl is `/bin/false`, so enrichment
 /// fails and identity stays cgroup-only unless a test overrides it with
-/// [`write_fake_crictl`]. Events are off; a test that wants them sets
-/// `event_socket_path` after binding a listener.
+/// [`write_fake_crictl`]. Nothing listens on the event socket; a test that
+/// wants the reports binds a listener and sets `event_socket_path`.
 pub fn base_config(root: &Path) -> HandlerConfig {
     HandlerConfig {
         cluster: "test".into(),
@@ -77,7 +77,7 @@ pub fn base_config(root: &Path) -> HandlerConfig {
         spool_max_bytes: 0,
         spool_min_free_percent: 0,
         rate_state_path: root.join("recent.json"),
-        event_socket_path: None,
+        event_socket_path: root.join("events.sock"),
         filter: CaptureFilter::default(),
     }
 }

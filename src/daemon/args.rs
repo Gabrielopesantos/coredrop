@@ -266,9 +266,7 @@ impl DaemonArgs {
             spool_max_bytes: self.spool_max_bytes,
             spool_min_free_percent: self.spool_min_free_percent,
             rate_state_path: crate::config::rate_state_path_for(&self.handler_config_path),
-            event_socket_path: Some(crate::config::event_socket_path_for(
-                &self.handler_config_path,
-            )),
+            event_socket_path: crate::config::event_socket_path_for(&self.handler_config_path),
             filter: self.capture_filter.clone(),
         }
     }

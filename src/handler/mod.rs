@@ -631,7 +631,7 @@ fn report(config: &HandlerConfig, payload: &CaptureEventPayload) {
         error = payload.error.as_deref().unwrap_or(""),
         "capture complete"
     );
-    events::send_capture_event(config.event_socket_path.as_deref(), payload);
+    events::send_capture_event(&config.event_socket_path, payload);
 }
 
 /// The UTS hostname: the node name for the handler, which the kernel runs in

@@ -161,7 +161,7 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
     let mut config = base_config(tmp.path());
     config.crictl_path = crictl;
     config.crictl_timeout_secs = 10;
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
 
     let core_in: &[u8] = b"core payload for the enriched path";
     run(capture_args(pid, 11, TS), &config, core_in)
@@ -216,7 +216,7 @@ async fn run_reports_each_outcome_on_the_events_socket() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
     config.max_cores_per_hour = 1;
 
     // The budget is 1. The first crash is spooled. The handler suppresses the
@@ -461,7 +461,7 @@ async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
     let mut config = base_config(tmp.path());
     config.drain_deadline_secs = 5;
     config.max_cores_per_hour = 1;
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
 
     // Some bytes arrive, then the pipe stalls.
     let core_in = (&b"partial core bytes"[..]).chain(StallReader);
@@ -569,7 +569,7 @@ async fn run_unusable_spool_reports_failed_without_reading_the_core() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
     // A file where the spool directory should be.
     std::fs::write(&config.spool_dir, b"not a directory").unwrap();
 
@@ -635,7 +635,7 @@ async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
 
     config.drain_deadline_secs = 0;
     run_without_reading(capture_args(pid, 9, 2_000_000), &config)
@@ -687,7 +687,7 @@ async fn run_filtered_capture_does_not_read_the_core_and_spools_nothing() {
     let mut config = base_config(tmp.path());
     config.crictl_path = counting_crictl(tmp.path(), "kube-system");
     config.crictl_timeout_secs = 10;
-    config.event_socket_path = Some(sock_path);
+    config.event_socket_path = sock_path;
     config.filter = exclude(r#"{"namespace":"kube-*"}"#);
 
     run_without_reading(capture_args(pid, 11, TS), &config)

@@ -37,7 +37,7 @@ use crate::daemon::metrics::Metrics;
 use crate::events::CaptureEventPayload;
 
 use self::aggregate::{AGGREGATION_SWEEP_INTERVAL, AggKey, Aggregator};
-use self::client::EventClient;
+use self::client::{EventClient, is_not_found};
 use self::event::{Reason, event_body, event_name, rfc3339_micro, series_patch};
 use self::log::{Stage, log_capture};
 
@@ -69,6 +69,10 @@ pub fn bind_socket(path: &Path) -> std::io::Result<tokio::net::UnixDatagram> {
 /// Pause after a failed `recv` on the capture-event socket.
 const RECV_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 
+/// Captures whose k8s Event waits to be posted. Beyond this, while the API
+/// server is slow, new Events are dropped.
+const EVENT_QUEUE_CAPACITY: usize = 256;
+
 /// Maximum length of a namespace, which Kubernetes requires to be a DNS-1123
 /// label.
 const MAX_NAMESPACE_LEN: usize = 63;
@@ -86,25 +90,26 @@ fn is_dns1123_label(s: &str) -> bool {
 }
 
 /// Listen for capture-event datagrams and uploader reports: log each capture,
-/// and post/patch k8s Events when `post_events` is set. A datagram for a
-/// capture with a spool bundle wakes the uploader through `wake`. Every
+/// count it, and queue its k8s Event when `post_events` is set. A datagram
+/// for a capture with a spool bundle wakes the uploader through `wake`. Every
 /// failure path is best-effort: logged and swallowed, never propagated - a
 /// broken API server must never crash the daemon.
 ///
-/// Even when no events arrive, the aggregator is swept periodically so stale
-/// entries do not accumulate indefinitely.
+/// The Events are posted by a separate task (see [`post_events`]), so a slow
+/// API server never delays the capture log, the metrics or the reports.
 ///
 /// When `stop` fires, the listener handles the reports still queued, then
-/// returns. Uploads that finish during the shutdown flush are reported this
-/// way, and their bundles are already gone.
+/// waits for the Event task to post the queued Events. Uploads that finish
+/// during the shutdown flush are reported this way, and their bundles are
+/// already gone.
 pub async fn run_listener(
     socket: tokio::net::UnixDatagram,
-    mut reports: mpsc::UnboundedReceiver<CaptureEventPayload>,
+    reports: mpsc::UnboundedReceiver<CaptureEventPayload>,
     wake: Arc<Notify>,
     node: String,
     post_events: bool,
     metrics: Arc<Metrics>,
-    mut stop: oneshot::Receiver<()>,
+    stop: oneshot::Receiver<()>,
 ) {
     let client = if post_events {
         let client = EventClient::from_env();
@@ -118,10 +123,29 @@ pub async fn run_listener(
         info!("k8s Event emission disabled (--no-events); captures are still logged");
         None
     };
-    let mut aggregator = Aggregator::default();
+    listen(socket, reports, wake, client, node, metrics, stop).await;
+}
+
+/// [`run_listener`] with the Event client already built: `None` posts no
+/// Events.
+async fn listen(
+    socket: tokio::net::UnixDatagram,
+    mut reports: mpsc::UnboundedReceiver<CaptureEventPayload>,
+    wake: Arc<Notify>,
+    client: Option<EventClient>,
+    node: String,
+    metrics: Arc<Metrics>,
+    mut stop: oneshot::Receiver<()>,
+) {
+    let (events, poster) = match client {
+        Some(client) => {
+            let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+            let poster = tokio::spawn(post_events(rx, client, node, metrics.clone()));
+            (Some(tx), Some(poster))
+        }
+        None => (None, None),
+    };
     let mut buf = vec![0u8; 64 * 1024];
-    let mut sweep_interval = tokio::time::interval(AGGREGATION_SWEEP_INTERVAL);
-    sweep_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -148,17 +172,21 @@ pub async fn run_listener(
                     log_capture(&payload, Stage::Spooled);
                     wake.notify_one();
                 } else {
-                    complete(client.as_ref(), &mut aggregator, &node, &metrics, &payload).await;
+                    complete(events.as_ref(), &metrics, &payload);
                 }
             }
             Some(payload) = reports.recv() => {
-                complete(client.as_ref(), &mut aggregator, &node, &metrics, &payload).await;
-            }
-            _ = sweep_interval.tick() => {
-                aggregator.sweep(Instant::now());
+                complete(events.as_ref(), &metrics, &payload);
             }
             _ = &mut stop => {
-                drain_reports(&mut reports, client.as_ref(), &mut aggregator, &node, &metrics).await;
+                drain_reports(&mut reports, events.as_ref(), &metrics);
+                // Closing the queue ends the Event task after its last Event.
+                drop(events);
+                if let Some(poster) = poster
+                    && let Err(e) = poster.await
+                {
+                    warn!(error = %e, "k8s Event task failed");
+                }
                 return;
             }
         }
@@ -167,32 +195,69 @@ pub async fn run_listener(
 
 /// Handle every report already queued in `reports`. Returns how many there
 /// were.
-async fn drain_reports(
+fn drain_reports(
     reports: &mut mpsc::UnboundedReceiver<CaptureEventPayload>,
-    client: Option<&EventClient>,
-    aggregator: &mut Aggregator,
-    node: &str,
+    events: Option<&mpsc::Sender<CaptureEventPayload>>,
     metrics: &Metrics,
 ) -> usize {
     let mut handled = 0;
     while let Ok(payload) = reports.try_recv() {
-        complete(client, aggregator, node, metrics, &payload).await;
+        complete(events, metrics, &payload);
         handled += 1;
     }
     handled
 }
 
-/// A capture is done: log it, count it, and post its k8s Event.
-async fn complete(
-    client: Option<&EventClient>,
-    aggregator: &mut Aggregator,
-    node: &str,
+/// A capture is done: log it, count it, and queue its k8s Event. When the
+/// queue is full, the Event is dropped and counted as an error.
+fn complete(
+    events: Option<&mpsc::Sender<CaptureEventPayload>>,
     metrics: &Metrics,
     payload: &CaptureEventPayload,
 ) {
     log_capture(payload, Stage::Complete);
     metrics.capture_done(payload);
-    handle_payload(client, aggregator, node, metrics, payload).await;
+    let Some(events) = events else {
+        return;
+    };
+    if Reason::from_outcome(payload.outcome).is_none() {
+        return;
+    }
+    if let Err(mpsc::error::TrySendError::Full(_)) = events.try_send(payload.clone()) {
+        warn!(
+            capacity = EVENT_QUEUE_CAPACITY,
+            pod = payload.pod_name.as_deref().unwrap_or_default(),
+            "k8s Event queue full; dropping the Event"
+        );
+        metrics.event_posted(false);
+    }
+}
+
+/// Post the k8s Events that the listener queues, one at a time, so the
+/// repeats of one pod keep their order. Sweeps the aggregator on a timer,
+/// even when no Events arrive. Returns when the queue is closed and empty.
+async fn post_events(
+    mut queue: mpsc::Receiver<CaptureEventPayload>,
+    client: EventClient,
+    node: String,
+    metrics: Arc<Metrics>,
+) {
+    let mut aggregator = Aggregator::default();
+    let mut sweep_interval = tokio::time::interval(AGGREGATION_SWEEP_INTERVAL);
+    sweep_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            payload = queue.recv() => {
+                let Some(payload) = payload else {
+                    return;
+                };
+                handle_payload(Some(&client), &mut aggregator, &node, &metrics, &payload).await;
+            }
+            _ = sweep_interval.tick() => {
+                aggregator.sweep(Instant::now());
+            }
+        }
+    }
 }
 
 /// The pod a k8s Event is posted on.
@@ -247,22 +312,39 @@ async fn handle_payload(
         pod_uid: pod_uid.to_string(),
         reason,
     };
-    let Some(recorded) = aggregator.record(key, Instant::now(), || {
-        event_name(pod_uid, reason, payload.timestamp)
-    }) else {
+    let now = Instant::now();
+    let make_name = || event_name(pod_uid, reason, payload.timestamp);
+    let Some(mut recorded) = aggregator.record(key.clone(), now, make_name) else {
         return;
     };
     let last_observed = rfc3339_micro(payload.timestamp);
 
-    let result = if recorded.is_new {
-        let body = event_body(node, &recorded.event_name, reason, &target, payload);
-        client.create_event(namespace, &body).await
+    // A failed create keeps the entry: the create can time out after the API
+    // server stored the Event. The next patch then finds out.
+    let mut result = if recorded.is_new {
+        Ok(())
     } else {
         let body = series_patch(recorded.count, &last_observed);
         client
             .patch_event_series(namespace, &recorded.event_name, &body)
             .await
     };
+    // No Event to patch: its create failed, or it was deleted. Start a new
+    // Event and count.
+    if let Err(e) = &result
+        && is_not_found(e)
+    {
+        debug!(event = %recorded.event_name, namespace = %namespace, "kubernetes event not found; creating a new one");
+        aggregator.forget(&key);
+        let Some(fresh) = aggregator.record(key, now, make_name) else {
+            return;
+        };
+        recorded = fresh;
+    }
+    if recorded.is_new {
+        let body = event_body(node, &recorded.event_name, reason, &target, payload);
+        result = client.create_event(namespace, &body).await;
+    }
     metrics.event_posted(result.is_ok());
     if let Err(e) = result {
         warn!(error = %e, event = %recorded.event_name, namespace = %namespace, "posting kubernetes event failed");
@@ -274,6 +356,7 @@ async fn handle_payload(
 mod tests {
     use tempfile::TempDir;
 
+    use super::client::token_file;
     use super::*;
     use crate::events::Outcome;
 
@@ -303,10 +386,9 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         tx.send(payload("default", "abc-123")).unwrap();
         tx.send(payload("default", "def-456")).unwrap();
-        let mut aggregator = Aggregator::default();
         let metrics = Metrics::new();
 
-        let handled = drain_reports(&mut rx, None, &mut aggregator, "node-1", &metrics).await;
+        let handled = drain_reports(&mut rx, None, &metrics);
 
         assert_eq!(handled, 2);
         assert!(rx.try_recv().is_err(), "the queue is empty");
@@ -365,6 +447,63 @@ mod tests {
 
         stop_tx.send(()).unwrap();
         listener.await.unwrap();
+    }
+
+    /// An API server that accepts connections and never answers.
+    async fn stalled_api_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                held.push(stream);
+            }
+        });
+        (origin, server)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_api_server_does_not_delay_the_capture_log_or_metrics() {
+        let (origin, server) = stalled_api_server().await;
+        let token_dir = TempDir::new().unwrap();
+        let client =
+            EventClient::new_for_test(reqwest::Client::new(), &origin, token_file(&token_dir));
+        let dir = TempDir::new().unwrap();
+        let socket = bind_socket(&dir.path().join("events.sock")).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_stop_tx, stop_rx) = oneshot::channel();
+        let metrics = Arc::new(Metrics::new());
+        let listener = tokio::spawn(listen(
+            socket,
+            rx,
+            Arc::new(Notify::new()),
+            Some(client),
+            "node-1".into(),
+            metrics.clone(),
+            stop_rx,
+        ));
+
+        // Two uploader reports. Both get an Event, and the first Event
+        // request never finishes.
+        for uid in [
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            "1f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+        ] {
+            tx.send(payload("default", uid)).unwrap();
+        }
+
+        let expected = "coredrop_captures_total{outcome=\"uploaded\"} 2";
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metrics.encode().contains(expected) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("both captures are counted:\n{}", metrics.encode()));
+
+        listener.abort();
+        server.abort();
     }
 
     #[tokio::test]
@@ -442,7 +581,8 @@ mod tests {
             .timeout(Duration::from_secs(1))
             .build()
             .unwrap();
-        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", "test".into());
+        let token_dir = TempDir::new().unwrap();
+        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", token_file(&token_dir));
 
         let mut agg = Aggregator::default();
         let metrics = Metrics::new();
@@ -497,6 +637,94 @@ mod tests {
         );
     }
 
+    /// A plain-HTTP API server. It answers each request with the next status
+    /// in `statuses` (then 500) and records `METHOD path` of each request.
+    async fn fake_api_server(statuses: Vec<u16>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let statuses = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            statuses,
+        )));
+        let server_seen = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let seen = Arc::clone(&server_seen);
+                let statuses = Arc::clone(&statuses);
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| {
+                            seen.lock().unwrap().push(format!(
+                                "{} {}",
+                                req.method(),
+                                req.uri().path()
+                            ));
+                            let status = statuses.lock().unwrap().pop_front().unwrap_or(500);
+                            let mut resp = hyper::Response::new(http_body_util::Full::new(
+                                hyper::body::Bytes::new(),
+                            ));
+                            *resp.status_mut() = hyper::StatusCode::from_u16(status).unwrap();
+                            async move { Ok::<_, std::convert::Infallible>(resp) }
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (origin, seen)
+    }
+
+    #[tokio::test]
+    async fn handle_payload_creates_a_new_event_when_the_patch_finds_none() {
+        // The first create fails, so the Event does not exist. The next
+        // capture's patch gets 404 and creates a new Event instead.
+        let (origin, seen) = fake_api_server(vec![500, 404, 201, 200]).await;
+        let token_dir = TempDir::new().unwrap();
+        let client =
+            EventClient::new_for_test(reqwest::Client::new(), &origin, token_file(&token_dir));
+        let mut agg = Aggregator::default();
+        let metrics = Metrics::new();
+        let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        let mut first = payload("default", uid);
+        first.timestamp = 1_749_600_000;
+        let mut second = payload("default", uid);
+        second.timestamp = 1_749_600_060;
+        let mut third = payload("default", uid);
+        third.timestamp = 1_749_600_120;
+
+        for p in [&first, &second, &third] {
+            handle_payload(Some(&client), &mut agg, "test-node", &metrics, p).await;
+        }
+
+        let events = "/apis/events.k8s.io/v1/namespaces/default/events";
+        let first_name = event_name(uid, Reason::CoreDumped, first.timestamp);
+        let second_name = event_name(uid, Reason::CoreDumped, second.timestamp);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                format!("POST {events}"),
+                format!("PATCH {events}/{first_name}"),
+                format!("POST {events}"),
+                format!("PATCH {events}/{second_name}"),
+            ]
+        );
+        let entry = agg.entries.values().next().unwrap();
+        assert_eq!(entry.event_name, second_name);
+        assert_eq!(entry.count, 2);
+        let text = metrics.encode();
+        assert!(
+            text.contains("coredrop_events_posted_total{result=\"error\"} 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("coredrop_events_posted_total{result=\"ok\"} 2"),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn handle_payload_skips_a_capture_without_pod_identity() {
         // cgroup-only identity (crictl failed) or a host process: there is no
@@ -505,7 +733,8 @@ mod tests {
             .timeout(Duration::from_secs(1))
             .build()
             .unwrap();
-        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", "test".into());
+        let token_dir = TempDir::new().unwrap();
+        let client = EventClient::new_for_test(http, "http://127.0.0.1:1", token_file(&token_dir));
         let mut agg = Aggregator::default();
         let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
 

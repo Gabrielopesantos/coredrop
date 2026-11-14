@@ -58,10 +58,15 @@ impl Aggregator {
             .retain(|_, e| now.duration_since(e.created_at) < AGGREGATION_TTL);
     }
 
-    /// Sweep expired entries. Public so `run_listener` can call it on a
-    /// periodic timer even when no events are being recorded.
+    /// Sweep expired entries. `post_events` calls it on a periodic timer even
+    /// when no events are being recorded.
     pub(super) fn sweep(&mut self, now: Instant) {
         self.prune(now);
+    }
+
+    /// Drop the entry for `key`, so its next occurrence starts a new Event.
+    pub(super) fn forget(&mut self, key: &AggKey) {
+        self.entries.remove(key);
     }
 
     /// Record one occurrence for `key`. `make_name` is only called when a new
@@ -240,5 +245,24 @@ mod tests {
         let recorded = agg.record(key, after_ttl, || "ev-2".into()).unwrap();
         assert!(recorded.is_new);
         assert_eq!(recorded.event_name, "ev-2");
+    }
+
+    #[test]
+    fn aggregator_forget_starts_a_new_event() {
+        let mut agg = Aggregator::default();
+        let key = AggKey {
+            namespace: "default".into(),
+            pod_uid: "abc-123".into(),
+            reason: Reason::CoreDumped,
+        };
+        let t0 = Instant::now();
+        agg.record(key.clone(), t0, || "ev-1".into()).unwrap();
+        agg.record(key.clone(), t0, || "ev-x".into()).unwrap();
+
+        agg.forget(&key);
+        let next = agg.record(key, t0, || "ev-2".into()).unwrap();
+        assert!(next.is_new);
+        assert_eq!(next.count, 1);
+        assert_eq!(next.event_name, "ev-2");
     }
 }

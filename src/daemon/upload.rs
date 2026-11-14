@@ -401,27 +401,26 @@ mod tests {
     /// this test keeps the copy in sync: without it, adding a key here
     /// makes the chart reject a legitimate value.
     #[test]
-    fn helpers_store_opts_match_allowlist() {
-        const HELPERS: &str = include_str!("../../charts/coredrop/templates/_helpers.tpl");
-
-        let block = HELPERS
-            .split_once(r#"{{- define "coredrop.allowedStoreOpts" -}}"#)
-            .expect("_helpers.tpl defines coredrop.allowedStoreOpts")
-            .1
-            .split_once("{{- end -}}")
-            .expect("the allowedStoreOpts define is terminated")
-            .0;
-
-        let chart: std::collections::BTreeSet<&str> = block
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        let rust: std::collections::BTreeSet<&str> = ALLOWED_STORE_OPTS.iter().copied().collect();
-
+    fn chart_schema_store_keys_match_allowlist() {
+        const SCHEMA: &str = include_str!("../../charts/coredrop/values.schema.json");
+        let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+        let keys = |def: &str| -> std::collections::BTreeSet<String> {
+            schema["definitions"][def]["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("values.schema.json defines {def}"))
+                .iter()
+                .map(|k| k.as_str().unwrap().to_string())
+                .collect()
+        };
+        let config = keys("storeConfigKey");
+        let secret = keys("storeSecretKey");
+        assert!(config.is_disjoint(&secret), "a key is both secret and not");
+        let chart: std::collections::BTreeSet<String> = config.union(&secret).cloned().collect();
+        let rust: std::collections::BTreeSet<String> =
+            ALLOWED_STORE_OPTS.iter().map(ToString::to_string).collect();
         assert_eq!(
             chart, rust,
-            "coredrop.allowedStoreOpts in _helpers.tpl drifted from ALLOWED_STORE_OPTS"
+            "the store keys in values.schema.json drifted from ALLOWED_STORE_OPTS"
         );
     }
 

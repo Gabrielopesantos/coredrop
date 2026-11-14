@@ -5,6 +5,10 @@
 # ONE environment: single-node k3s inside a lima VM (see cluster-lima-k3s.sh).
 # Images are built on the host and imported into the VM's k3s containerd. See
 # README.md.
+#
+# The scripts that source this file use its variables, so shellcheck does not
+# see every use when it checks this file alone.
+# shellcheck disable=SC2034
 
 set -euo pipefail
 

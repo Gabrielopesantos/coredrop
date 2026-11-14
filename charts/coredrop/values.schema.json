@@ -1,0 +1,230 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "coredrop chart values",
+  "description": "Types and ranges of the chart values. The daemon checks what a value means (a store URL that builds, a tmpfs spool, filter patterns) when it starts.",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "uint": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "uint32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "size": {
+      "description": "A byte count, or a whole number with a Kubernetes quantity suffix (Ki to Ei, k to E).",
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "string", "pattern": "^[0-9]+(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$" }
+      ]
+    },
+    "hostDir": {
+      "description": "An absolute host path. It is mounted at the same path in the pod, so it must not hide a directory that the image needs.",
+      "type": "string",
+      "pattern": "^/",
+      "not": {
+        "pattern": "^/+((bin|boot|dev|etc|host|lib|lib64|nix|proc|sbin|sys|usr)/*)?$"
+      }
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "filterEntry": {
+      "description": "Glob patterns (`*`, `?`); all patterns of one entry must match.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "namespace": { "type": "string", "minLength": 1 },
+        "pod": { "type": "string", "minLength": 1 },
+        "container": { "type": "string", "minLength": 1 },
+        "image": { "type": "string", "minLength": 1 },
+        "exe": { "type": "string", "minLength": 1 }
+      }
+    },
+    "filterList": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/definitions/filterEntry" }
+    },
+    "storeOptionValue": {
+      "type": ["string", "boolean", "number"]
+    },
+    "storeConfigKey": {
+      "description": "Object-store options that are not secret. Source of truth: ALLOWED_STORE_OPTS in src/daemon/upload.rs, minus the secret keys.",
+      "enum": [
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_ENDPOINT",
+        "AWS_ALLOW_HTTP",
+        "AWS_VIRTUAL_HOSTED_STYLE_REQUEST",
+        "AWS_ROLE_ARN",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "GOOGLE_SERVICE_ACCOUNT",
+        "AZURE_STORAGE_ACCOUNT_NAME",
+        "AZURE_STORAGE_CLIENT_ID",
+        "AZURE_STORAGE_TENANT_ID",
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_FEDERATED_TOKEN_FILE",
+        "AZURE_AUTHORITY_HOST"
+      ]
+    },
+    "storeSecretKey": {
+      "description": "Object-store options that hold a secret. They go into the store Secret, never into plain env.",
+      "enum": [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "GOOGLE_SERVICE_ACCOUNT_KEY",
+        "AZURE_STORAGE_ACCESS_KEY",
+        "AZURE_STORAGE_CLIENT_SECRET"
+      ]
+    }
+  },
+  "properties": {
+    "global": { "type": "object" },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "annotations": { "$ref": "#/definitions/stringMap" }
+      }
+    },
+    "securityContext": { "type": "object" },
+    "corePattern": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pipeLimit": { "$ref": "#/definitions/uint32" },
+        "hostBinDir": { "$ref": "#/definitions/hostDir" },
+        "hostRunDir": { "$ref": "#/definitions/hostDir" }
+      }
+    },
+    "spool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostDir": { "$ref": "#/definitions/hostDir" },
+        "maxSize": { "$ref": "#/definitions/size" },
+        "minFreePercent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "maxAgeSeconds": { "$ref": "#/definitions/uint" }
+      }
+    },
+    "upload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "timeoutSeconds": { "$ref": "#/definitions/uint" },
+        "shutdownFlushSeconds": { "$ref": "#/definitions/uint" }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cluster": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "not": { "enum": [".", ".."] }
+        },
+        "maxCoreSize": { "$ref": "#/definitions/size" },
+        "maxCoresPerHour": { "$ref": "#/definitions/uint32" },
+        "drainDeadlineSeconds": { "$ref": "#/definitions/uint" },
+        "crictlTimeoutSeconds": { "$ref": "#/definitions/uint" },
+        "noRedact": { "type": "boolean" },
+        "filter": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "include": { "$ref": "#/definitions/filterList" },
+            "exclude": { "$ref": "#/definitions/filterList" }
+          }
+        },
+        "objectStore": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": { "type": "string" },
+            "config": {
+              "type": "object",
+              "propertyNames": { "$ref": "#/definitions/storeConfigKey" },
+              "additionalProperties": { "$ref": "#/definitions/storeOptionValue" }
+            },
+            "credentials": {
+              "type": "object",
+              "propertyNames": {
+                "anyOf": [
+                  { "$ref": "#/definitions/storeSecretKey" },
+                  { "$ref": "#/definitions/storeConfigKey" }
+                ]
+              },
+              "additionalProperties": { "$ref": "#/definitions/storeOptionValue" }
+            }
+          }
+        }
+      }
+    },
+    "cri": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runtimeEndpoint": { "type": "string" },
+        "crictlPath": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 }
+      }
+    },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "podMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string" },
+            "labels": { "$ref": "#/definitions/stringMap" }
+          }
+        }
+      }
+    },
+    "logLevel": { "type": "string", "minLength": 1 },
+    "resources": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "nodeSelector": { "$ref": "#/definitions/stringMap" },
+    "podLabels": { "$ref": "#/definitions/stringMap" },
+    "priorityClassName": { "type": "string" }
+  }
+}

@@ -1,24 +1,25 @@
 {{- /*
 The daemon's config file, mounted at /etc/coredrop/config.yaml. Keys are the
-daemon's long flag names (docs/configuration.md). Secrets stay out of it:
+daemon's long flag names (docs/configuration.md). values.schema.json checks
+the types and ranges of the values; the daemon checks the rest at startup. Secrets stay out of it:
 anyone who can read the namespace can read a ConfigMap. The store
 credentials come from the Secret, the node name from the downward API.
 */ -}}
 {{- $config := dict
-  "handler-path" (printf "%s/coredrop" .Values.corePattern.hostBinDir)
-  "handler-config-path" (printf "%s/handler.json" .Values.corePattern.hostRunDir)
+  "handler-path" (printf "%s/coredrop" (clean .Values.corePattern.hostBinDir))
+  "handler-config-path" (printf "%s/handler.json" (clean .Values.corePattern.hostRunDir))
   "pipe-limit" (int64 .Values.corePattern.pipeLimit)
   "core-pattern-path" "/host/sysctl/core_pattern"
   "core-pipe-limit-path" "/host/sysctl/core_pipe_limit"
   "cluster" .Values.capture.cluster
   "no-redact" .Values.capture.noRedact
-  "max-core-size" (include "coredrop.size" (dict "name" "capture.maxCoreSize" "value" .Values.capture.maxCoreSize))
+  "max-core-size" (include "coredrop.size" (dict "value" .Values.capture.maxCoreSize))
   "max-cores-per-hour" (int64 .Values.capture.maxCoresPerHour)
   "drain-deadline-secs" (int64 .Values.capture.drainDeadlineSeconds)
   "crictl-timeout-secs" (int64 .Values.capture.crictlTimeoutSeconds)
-  "capture-filter" (dict "include" (.Values.capture.filter.include | default list) "exclude" (.Values.capture.filter.exclude | default list))
-  "spool-dir" .Values.spool.hostDir
-  "spool-max-size" (include "coredrop.size" (dict "name" "spool.maxSize" "value" .Values.spool.maxSize))
+  "capture-filter" (.Values.capture.filter | default dict)
+  "spool-dir" (clean .Values.spool.hostDir)
+  "spool-max-size" (include "coredrop.size" (dict "value" .Values.spool.maxSize))
   "spool-min-free-percent" (int64 .Values.spool.minFreePercent)
   "spool-max-age-secs" (int64 .Values.spool.maxAgeSeconds)
   "upload-concurrency" (int64 .Values.upload.concurrency)

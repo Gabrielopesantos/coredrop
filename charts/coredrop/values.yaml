@@ -21,7 +21,7 @@ serviceAccount:
 # sysctl files, so it needs no capabilities. Root is still required: the
 # kernel allows a sysctl write only from uid 0 in the host user namespace.
 # SELinux nodes may also need `seLinuxOptions: {type: spc_t}`.
-# -- Daemon container securityContext.
+# -- securityContext of the daemon, its install-handler initContainer and the cleanup worker.
 securityContext:
   runAsUser: 0
   allowPrivilegeEscalation: false
@@ -49,8 +49,8 @@ corePattern:
 
 # The node-local spool. The handler writes each capture (core, /proc snapshot,
 # manifest) here and exits; the daemon uploads the spool to the object store.
-# The spool must be on disk, not tmpfs: /run is RAM. The daemon does not start
-# when hostDir is on tmpfs or ramfs. The spool shares the node's
+# The spool must be on disk, not tmpfs: /run is RAM. With an object store set,
+# the daemon does not start when hostDir is on tmpfs or ramfs. The spool shares the node's
 # filesystem with the kubelet, which evicts pods under disk pressure, so keep
 # maxSize and minFreePercent conservative.
 spool:
@@ -95,8 +95,8 @@ capture:
   # manifest, no Event; it is only logged. A filter on namespace,
   # pod, container or image runs crictl before the core is read, with a
   # timeout of `crictlTimeoutSeconds` but 10 s at most; when crictl fails,
-  # the crash is captured. A key other than `include` or `exclude` fails
-  # chart rendering.
+  # the crash is captured. values.schema.json rejects a key other than
+  # `include` or `exclude`, and an unknown key in an entry.
   filter:
     # -- Capture only crashes that match one of these entries; empty captures all. Example: `[{namespace: "team-*"}]`.
     include: []
@@ -107,9 +107,9 @@ capture:
   # credentials; the handler never does. Leave `url` empty to run
   # observe-only: crashes are logged and reported as Events, and nothing is
   # written to the spool.
-  # Both maps below take allowlisted keys only (listed in the chart README); an
-  # unknown key fails chart rendering with the valid set rather than being
-  # dropped silently at runtime.
+  # Both maps below take allowlisted keys only (listed in the chart README);
+  # values.schema.json rejects an unknown key, so a typo fails the install.
+  # Keys that hold a secret are accepted only in `credentials`.
   objectStore:
     # -- Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload.
     url: ""
@@ -187,6 +187,9 @@ resources:
     memory: 64Mi
   limits:
     memory: 256Mi
+
+# -- PriorityClass of the daemon pods. A node agent that should survive node pressure can use `system-node-critical`.
+priorityClassName: ""
 
 # -- Pod tolerations (defaults to tolerating everything so it runs on all nodes).
 tolerations:

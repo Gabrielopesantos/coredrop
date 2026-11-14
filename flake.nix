@@ -55,6 +55,7 @@
               python3 # dashboards/generate.py
               skopeo
               yq-go
+              shellcheck # deploy/local/*.sh
             ];
             env = {
               RUST_SRC_PATH = "${devPkgs.rust.packages.stable.rustPlatform.rustLibSrc}";

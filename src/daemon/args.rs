@@ -300,6 +300,77 @@ mod tests {
         assert_eq!(parse(&["coredrop", "--metrics-addr="]), MetricsAddr(None));
     }
 
+    /// The `config.yaml` of the chart's `ConfigMap`, rendered by `helm template`
+    /// with `set` as `--set` values.
+    fn render_chart_config(set: &[&str]) -> String {
+        let chart = concat!(env!("CARGO_MANIFEST_DIR"), "/charts/coredrop");
+        let mut cmd = std::process::Command::new("helm");
+        cmd.args([
+            "template",
+            "t",
+            chart,
+            "--show-only",
+            "templates/configmap.yaml",
+        ]);
+        for value in set {
+            cmd.args(["--set", value]);
+        }
+        let out = cmd.output().expect("helm runs (use `nix develop`)");
+        assert!(
+            out.status.success(),
+            "helm template {set:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let doc: serde_norway::Value = serde_norway::from_slice(&out.stdout).unwrap();
+        doc["data"]["config.yaml"].as_str().unwrap().to_string()
+    }
+
+    /// Every config the chart renders loads in the daemon: the chart and the
+    /// daemon agree on key names and value formats. Needs `helm`, so CI runs
+    /// it on its own: `cargo test --lib -- --ignored chart_config`.
+    #[test]
+    #[ignore = "needs helm"]
+    fn chart_config_loads_in_the_daemon() {
+        let defaults = load_with_file(&render_chart_config(&[]), &[]).unwrap();
+        assert_eq!(defaults.max_core_bytes, 2 << 30);
+        assert_eq!(defaults.spool_max_bytes, 10 << 30);
+
+        let edges = [
+            "spool.maxSize=8Ei",
+            "capture.maxCoreSize=0",
+            "capture.maxCoresPerHour=4294967295",
+            "corePattern.pipeLimit=4294967295",
+            "corePattern.hostBinDir=/opt/coredrop/bin/",
+            "upload.concurrency=64",
+            "upload.timeoutSeconds=0",
+            "spool.minFreePercent=100",
+            "spool.maxAgeSeconds=0",
+            "capture.cluster=eu-west_1.prod",
+            "capture.filter.exclude[0].namespace=kube-*",
+            "capture.filter.include[0].exe=*/server",
+            "capture.objectStore.url=s3://bucket",
+            "cri.runtimeEndpoint=unix:///run/containerd/containerd.sock",
+            "metrics.enabled=false",
+            "events.enabled=false",
+        ];
+        let args = load_with_file(&render_chart_config(&edges), &[]).unwrap();
+        assert_eq!(args.max_cores_per_hour, u32::MAX);
+        assert_eq!(args.upload_concurrency, 64);
+        assert_eq!(
+            args.handler_path,
+            PathBuf::from("/opt/coredrop/bin/coredrop")
+        );
+        assert_eq!(args.metrics_addr, MetricsAddr(None));
+        assert!(args.no_events);
+        assert_eq!(
+            args.capture_filter,
+            CaptureFilter::parse(
+                r#"{"include":[{"exe":"*/server"}],"exclude":[{"namespace":"kube-*"}]}"#
+            )
+            .unwrap()
+        );
+    }
+
     /// Writes `yaml` to a temp `config.yaml` and loads it with `flags`.
     fn load_with_file(yaml: &str, flags: &[&str]) -> Result<DaemonArgs, clap::Error> {
         let dir = TempDir::new().unwrap();

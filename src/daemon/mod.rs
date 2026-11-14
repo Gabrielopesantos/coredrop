@@ -121,7 +121,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     let config_path = &args.handler_config_path;
 
     if let Err(e) = config.write(config_path) {
-        error!(error = %e, path = %config_path.display(), "failed to write handler config; exiting for restart");
+        error!(error = %format!("{e:#}"), path = %config_path.display(), "failed to write handler config; exiting for restart");
         return Err(e);
     }
 

@@ -326,9 +326,31 @@ mod tests {
         doc["data"]["config.yaml"].as_str().unwrap().to_string()
     }
 
+    /// The chart refuses values that only it can check: paths whose cleanup
+    /// would delete host files, a secret rendered as plain env, and labels
+    /// that break the `DaemonSet` selector. Needs `helm`, so CI runs it on its
+    /// own: `cargo test --lib -- --ignored chart_`.
+    #[test]
+    #[ignore = "needs helm"]
+    fn chart_rejects_unsafe_values() {
+        let chart = concat!(env!("CARGO_MANIFEST_DIR"), "/charts/coredrop");
+        for bad in [
+            "spool.hostDir=/",
+            "corePattern.hostBinDir=/bin",
+            "capture.objectStore.config.AWS_SECRET_ACCESS_KEY=x",
+            "podLabels.app\\.kubernetes\\.io/name=x",
+        ] {
+            let out = std::process::Command::new("helm")
+                .args(["template", "t", chart, "--set", bad])
+                .output()
+                .expect("helm runs (use `nix develop`)");
+            assert!(!out.status.success(), "the chart accepted {bad}");
+        }
+    }
+
     /// Every config the chart renders loads in the daemon: the chart and the
     /// daemon agree on key names and value formats. Needs `helm`, so CI runs
-    /// it on its own: `cargo test --lib -- --ignored chart_config`.
+    /// it on its own: `cargo test --lib -- --ignored chart_`.
     #[test]
     #[ignore = "needs helm"]
     fn chart_config_loads_in_the_daemon() {

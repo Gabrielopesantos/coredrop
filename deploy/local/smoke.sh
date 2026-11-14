@@ -12,7 +12,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 require kubectl helm mc zstd jq tar sha256sum limactl
 kube_context
 require_release
-restart_demo
 
 LOCAL_PORT="${LOCAL_PORT:-19000}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
@@ -88,6 +87,10 @@ mc alias set "$MC_ALIAS" "http://127.0.0.1:$LOCAL_PORT" minioadmin minioadmin >/
 # Start from a clean slate: stale objects from a previous run would otherwise
 # satisfy (or break) the assertions below.
 mc rm --recursive --force "$MC_ALIAS/$BUCKET" >/dev/null 2>&1 || true
+# Restart the demo after the purge: a new pod uploads its first
+# max-cores-per-hour cores within seconds, and a purge after them would leave
+# only rate-limited manifests, which have no core.
+restart_demo
 
 # Scope the k8s Events (8c/8d below) to this run's crash pod. A CoreDumped
 # Event fires only for the first max-cores-per-hour captures of a pod, so it

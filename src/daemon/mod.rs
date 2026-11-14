@@ -52,7 +52,7 @@ pub fn check(argv: Vec<std::ffi::OsString>) -> Result<()> {
 }
 
 /// On shutdown, how long the daemon waits for the event listener to report
-/// the uploads that finished during the flush. It fits in the 5 s the pod's
+/// the uploads that finished during the flush and post their Events. It fits in the 5 s the pod's
 /// termination grace period leaves after the flush.
 const LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -262,9 +262,7 @@ async fn stop_listener(stop: oneshot::Sender<()>, listener: tokio::task::JoinHan
         .await
         .is_err()
     {
-        warn!(
-            "reporting the last uploads took too long; some captures have no completion log or Event"
-        );
+        warn!("posting the last k8s Events took too long; some captures have no Event");
     }
 }
 

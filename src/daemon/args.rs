@@ -42,8 +42,9 @@ pub(crate) struct DaemonArgs {
     #[arg(long, env = "CAPTURE_CONFIG_PATH", default_value = crate::config::DEFAULT_CONFIG_PATH)]
     pub(crate) handler_config_path: PathBuf,
 
-    /// Cluster name - the first path segment of the object key.
-    #[arg(long, env = "CAPTURE_CLUSTER", default_value = crate::config::DEFAULT_CLUSTER)]
+    /// Cluster name - the first path segment of the object key. ASCII
+    /// letters, digits, `.`, `_` and `-`.
+    #[arg(long, env = "CAPTURE_CLUSTER", default_value = crate::config::DEFAULT_CLUSTER, value_parser = parse_cluster)]
     pub(crate) cluster: String,
 
     /// Pass `environ` and `cmdline` through un-redacted.
@@ -172,6 +173,10 @@ pub(crate) struct DaemonArgs {
 /// because clap reads an `Option` field as "flag may be absent".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetricsAddr(pub(crate) Option<SocketAddr>);
+
+fn parse_cluster(s: &str) -> Result<String, String> {
+    crate::config::check_cluster(s).map(|()| s.to_string())
+}
 
 fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
     if s.is_empty() {
@@ -343,6 +348,22 @@ mod tests {
     fn a_config_file_value_can_start_with_a_dash() {
         let args = load_with_file("cluster: \"-x\"\n", &[]).unwrap();
         assert_eq!(args.cluster, "-x");
+    }
+
+    #[test]
+    fn a_cluster_name_must_be_one_key_segment() {
+        for bad in ["", ".", "..", "a/b", "prod cluster"] {
+            assert!(
+                load_with_file(&format!("cluster: {bad:?}\n"), &[]).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            load_with_file("cluster: eu-west_1.prod\n", &[])
+                .unwrap()
+                .cluster,
+            "eu-west_1.prod"
+        );
     }
 
     #[test]

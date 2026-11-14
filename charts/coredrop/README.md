@@ -24,7 +24,7 @@ at startup.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. |
+| capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. ASCII letters, digits, `.`, `_` and `-`. |
 | capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
 | capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables. |
 | capture.filter.exclude | list | `[]` | Never capture crashes that match one of these entries; wins over `include`. Example: `[{namespace: kube-system}, {container: istio-proxy}]`. |

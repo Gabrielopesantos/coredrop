@@ -75,7 +75,7 @@ upload:
 # What happens to a crash once the handler captures it: where it's counted
 # against, how much of it is kept, and where it's uploaded.
 capture:
-  # -- Cluster name - the first segment of every object key.
+  # -- Cluster name - the first segment of every object key. ASCII letters, digits, `.`, `_` and `-`.
   cluster: "local"
   # -- Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit.
   maxCoreSize: 2Gi

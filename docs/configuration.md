@@ -10,7 +10,7 @@ For the Helm values that set these flags, see the
 | Flag | Env | Default | Purpose |
 | --- | --- | --- | --- |
 | `--config` | `CAPTURE_CONFIG_FILE` | unset | YAML config file that sets the other flags |
-| `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key |
+| `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key: ASCII letters, digits, `.`, `_` and `-` |
 | `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = observe-only: crashes are logged and reported, no cores are kept |
 | `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |

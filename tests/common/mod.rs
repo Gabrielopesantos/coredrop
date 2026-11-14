@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_trait::async_trait;
@@ -184,6 +185,8 @@ pub struct FailingStore {
     /// multipart by payload size, so a core (which streams) needs both.
     fail_multipart: bool,
     failing: AtomicBool,
+    /// How long a PUT to `*fail_suffix` waits before it fails or lands.
+    delay: Duration,
 }
 
 impl FailingStore {
@@ -194,6 +197,7 @@ impl FailingStore {
             fail_suffix: "-manifest.json",
             fail_multipart: false,
             failing: AtomicBool::new(true),
+            delay: Duration::ZERO,
         }
     }
 
@@ -204,7 +208,15 @@ impl FailingStore {
             fail_suffix: "-core.zst",
             fail_multipart: true,
             failing: AtomicBool::new(true),
+            delay: Duration::ZERO,
         }
+    }
+
+    /// Make each PUT to `*fail_suffix` wait `delay` first.
+    #[must_use]
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     /// Switch the injected failure on or off.
@@ -247,6 +259,9 @@ impl ObjectStore for FailingStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if location.as_ref().ends_with(self.fail_suffix) {
+            tokio::time::sleep(self.delay).await;
+        }
         if self.rejects(location) {
             return Err(self.injected_failure());
         }

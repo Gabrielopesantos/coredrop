@@ -537,3 +537,87 @@ async fn spool_age_leaves_out_an_uploaded_bundle() {
         "{text}"
     );
 }
+
+/// An upload that is past its last cancel point when the flush time ends
+/// still lands. The uploader waits for it and reports it.
+#[tokio::test]
+async fn reports_an_upload_that_finishes_after_the_flush_time() {
+    let pid = 5020;
+    let ts = now_ts();
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, ts, b"core with a slow manifest").await;
+
+    let slow =
+        FailingStore::manifest(Arc::new(InMemory::new())).with_delay(Duration::from_millis(500));
+    slow.set_failing(false);
+    let reports = flush(
+        &config,
+        Arc::new(slow),
+        settings(),
+        Duration::from_millis(50),
+    )
+    .await;
+
+    assert_eq!(reports.len(), 1, "the late upload is reported");
+    assert_eq!(reports[0].outcome, Outcome::Uploaded);
+    assert!(ready(&config).is_empty());
+}
+
+/// On shutdown, a bundle that waits for its retry backoff is tried at once,
+/// not after the flush time is up.
+#[tokio::test]
+async fn the_flush_does_not_wait_out_a_retry_backoff() {
+    let pid = 5021;
+    let ts = now_ts();
+    let tmp = TempDir::new().unwrap();
+    write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
+    let config = base_config(tmp.path());
+    capture(&config, pid, ts, b"core that waits for its backoff").await;
+
+    let failing = Arc::new(FailingStore::core(Arc::new(InMemory::new())));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let metrics = Arc::new(Metrics::new());
+    let uploader = Uploader::new(
+        Spool::new(&config.spool_dir),
+        failing.clone(),
+        UploadSettings {
+            retry_backoff: Duration::from_hours(1),
+            ..settings()
+        },
+        tx,
+        metrics.clone(),
+    );
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let run = tokio::spawn(uploader.run(
+        Arc::new(Notify::new()),
+        async {
+            let _ = stop_rx.await;
+        },
+        Duration::from_secs(5),
+    ));
+    // Wait for the first attempt to fail.
+    let failed = "coredrop_upload_attempts_total{result=\"error\"} 1";
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !metrics.encode().contains(failed) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    failing.set_failing(false);
+    let started = std::time::Instant::now();
+    stop_tx.send(()).unwrap();
+    run.await.unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+    let report = rx.try_recv().unwrap();
+    assert_eq!(report.outcome, Outcome::Uploaded);
+    assert!(ready(&config).is_empty());
+}

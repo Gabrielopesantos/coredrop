@@ -151,11 +151,7 @@ impl Uploader {
                 info!("spool flushed");
                 return;
             }
-            let next_retry = pending
-                .values()
-                .filter(|p| !p.in_flight)
-                .map(|p| p.next_at)
-                .min();
+            let next_retry = next_retry(&pending, tasks.len(), self.settings.concurrency.max(1));
 
             tokio::select! {
                 () = &mut shutdown, if flush_deadline.is_none() => {
@@ -459,6 +455,24 @@ fn bundle_age(ready_dir: &Path, name: &str) -> Option<Duration> {
     Some(SystemTime::now().duration_since(born).unwrap_or_default())
 }
 
+/// When the run loop must wake up to start a retry: the earliest `next_at`
+/// of a bundle that is not in flight. `None` while every upload slot is
+/// taken: a due bundle cannot start then, and a finished task wakes the loop.
+fn next_retry(
+    pending: &BTreeMap<String, Pending>,
+    running: usize,
+    limit: usize,
+) -> Option<Instant> {
+    if running >= limit {
+        return None;
+    }
+    pending
+        .values()
+        .filter(|p| !p.in_flight)
+        .map(|p| p.next_at)
+        .min()
+}
+
 fn backoff(base: Duration, attempts: u32) -> Duration {
     base.saturating_mul(2u32.saturating_pow(attempts.saturating_sub(1)))
         .min(MAX_BACKOFF)
@@ -475,6 +489,30 @@ async fn sleep_until(at: Option<Instant>) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn pending(next_at: Instant, in_flight: bool) -> Pending {
+        Pending {
+            attempts: 0,
+            next_at,
+            in_flight,
+            reported: false,
+        }
+    }
+
+    #[test]
+    fn no_retry_wakeup_while_every_slot_is_taken() {
+        let now = Instant::now();
+        let map: BTreeMap<String, Pending> = [
+            ("a".to_string(), pending(now, true)),
+            ("b".to_string(), pending(now, false)),
+        ]
+        .into_iter()
+        .collect();
+        // A due bundle that cannot start must not wake the loop, or the
+        // loop spins until a slot frees.
+        assert_eq!(next_retry(&map, 1, 1), None);
+        assert_eq!(next_retry(&map, 0, 1), Some(now));
+    }
 
     #[test]
     fn backoff_doubles_up_to_the_cap() {

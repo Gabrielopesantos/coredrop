@@ -85,9 +85,9 @@ and about 1 GiB of the VM's memory.
    (binary, runtime, spool) are gone from the node.
 2. Unclean uninstall: the daemon is frozen with `SIGSTOP` on the node, then
    the release is uninstalled. SIGTERM stays pending, and the kubelet kills
-   the daemon with SIGKILL after the 30s grace period, so the daemon never
+   the daemon with SIGKILL after the grace period (shutdownFlushSeconds + 10 s), so the daemon never
    restores `core_pattern`. The post-delete hook's cleanup worker must reset
-   it to `core`. The three hostPath directories are gone.
+   it to `core`, and `core_pipe_limit` to `0`. The three hostPath directories are gone.
 3. After each phase, coredrop is reinstalled, and `core_pattern` points at
    the handler again. If a phase fails, the exit trap thaws the daemon and
    reinstalls.

@@ -124,7 +124,8 @@ orig_pipe_limit="$(node_pipe_limit)"
 stopped_pid="$(daemon_host_pid)"
 node_exec kill -STOP "$stopped_pid"
 log "  daemon (host pid $stopped_pid) frozen with SIGSTOP"
-# 30s default grace period before the kubelet sends SIGKILL, plus margin.
+# Grace period (shutdownFlushSeconds + 10 s) before the kubelet sends SIGKILL,
+# plus margin.
 uninstall_and_wait 90s
 if node_exec test -e "/proc/$stopped_pid"; then
   warn "  daemon (host pid $stopped_pid) is still alive after uninstall"; fail=1

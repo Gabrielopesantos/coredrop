@@ -82,6 +82,7 @@ pub(crate) struct DaemonArgs {
     /// Wall-clock deadline (seconds) for draining one core into the spool;
     /// 0 = no deadline. On expiry the handler drops the core and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
+    /// A core already truncated by a size limit keeps its stored part.
     #[arg(long, env = "CAPTURE_DRAIN_DEADLINE_SECS", default_value_t = crate::config::DEFAULT_DRAIN_DEADLINE_SECS)]
     pub(crate) drain_deadline_secs: u64,
 

@@ -141,10 +141,16 @@ spec:
               rmdir "$run_dir" 2>/dev/null || true
               rmdir "$spool_dir" 2>/dev/null || true
 
-              # Keep the pod alive so the orchestrator Job can observe the
-              # DaemonSet's rollout as ready - cleanup already ran above by
-              # the time this is reached. Cleanup is idempotent.
+              # Mark the pod ready only now, so the orchestrator Job's
+              # `rollout status` returns after the cleanup above, not when
+              # the script starts. Keep the pod alive until the Job deletes
+              # the DaemonSet. Cleanup is idempotent.
+              touch /done/ok
               exec sleep infinity
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /done/ok"]
+            periodSeconds: 2
           volumeMounts:
             # Fixed mount paths (not the configured ones) so that two configured
             # directories sharing a parent still yield two distinct mountPaths.
@@ -154,6 +160,9 @@ spec:
               mountPath: /host/run-parent
             - name: host-spool-parent
               mountPath: /host/spool-parent
+            # Writable for the ready marker; the root filesystem is read-only.
+            - name: done
+              mountPath: /done
             # The node's core_pattern and core_pipe_limit sysctls, writable;
             # /proc/sys stays read-only.
             - name: host-core-pattern
@@ -161,6 +170,10 @@ spec:
             - name: host-core-pipe-limit
               mountPath: /host/sysctl/core_pipe_limit
       volumes:
+        - name: done
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
         - name: host-bin-parent
           hostPath:
             path: {{ dir $binDir | quote }}

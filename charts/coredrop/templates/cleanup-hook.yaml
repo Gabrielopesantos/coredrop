@@ -8,7 +8,7 @@
 # hook-delete-policy before its pods ever ran). Instead a Job (weight "0")
 # drives the DaemonSet via kubectl: applies it, waits for
 # `kubectl rollout status` (which only succeeds once every node's cleanup
-# container is running, i.e. after that node's cleanup already ran), then
+# pod is ready, and a pod is ready only after its cleanup ran), then
 # deletes it. The ServiceAccount/RBAC/ConfigMap the Job needs (weight "-1")
 # are themselves post-delete hooks, since the release's normal ServiceAccount
 # is already gone by the time post-delete hooks run.
@@ -89,7 +89,8 @@ spec:
     metadata:
       labels:
         {{- include "coredrop.selectorLabels" . | nindent 8 }}
-        # Selectors for the daemon pods leave out cleanup pods by this label.
+        # The e2e scripts leave out cleanup pods by this label when they look
+        # for daemon pods.
         coredrop.io/cleanup: "true"
     spec:
       serviceAccountName: {{ include "coredrop.fullname" . }}-cleanup

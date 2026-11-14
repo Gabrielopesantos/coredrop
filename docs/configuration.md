@@ -1,34 +1,42 @@
 # Configuration
 
-Every knob is a CLI flag with an env-var fallback, and can also be set in a
-YAML config file (see [Config file](#config-file)). Secrets are env-only.
+Every knob is a CLI flag, and can also be set in a YAML config file (see
+[Config file](#config-file)). Only `--node-name` also reads an env var
+(`NODE_NAME`). Secrets are env-only.
 Sizes take a Kubernetes quantity: a byte count, or a whole number with a
 binary (`Ki`, `Mi`, `Gi`, ...) or decimal (`k`, `M`, `G`, ...) suffix.
 For the Helm values that set these flags, see the
 [chart README](../charts/coredrop/README.md#values).
 
-| Flag | Env | Default | Purpose |
-| --- | --- | --- | --- |
-| `--config` | `CAPTURE_CONFIG_FILE` | unset | YAML config file that sets the other flags |
-| `--cluster` | `CAPTURE_CLUSTER` | `local` | First segment of the object key: ASCII letters, digits, `.`, `_` and `-` |
-| `--store-url` | `CAPTURE_STORE_URL` | unset | `s3://...`/`gs://...`/`az://...`; unset = observe-only: crashes are logged and reported, no cores are kept |
-| `--max-core-size` | `CAPTURE_MAX_CORE_SIZE` | `2Gi` | Stored core cap per crash; 0 = unlimited |
-| `--max-cores-per-hour` | `CAPTURE_MAX_CORES_PER_HOUR` | 3 | Per-pod core budget; 0 = unlimited |
-| `--drain-deadline-secs` | `CAPTURE_DRAIN_DEADLINE_SECS` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled. A core already truncated by the size cap or the spool budget keeps its stored part; 0 = no deadline |
-| `--spool-dir` | `CAPTURE_SPOOL_DIR` | `/var/lib/coredrop/spool` | Spool root on the node |
-| `--spool-max-size` | `CAPTURE_SPOOL_MAX_SIZE` | `10Gi` | Spool size cap; 0 = no cap |
-| `--spool-min-free-percent` | `CAPTURE_SPOOL_MIN_FREE_PERCENT` | 15 | Free-space floor of the spool's filesystem |
-| `--spool-max-age-secs` | `CAPTURE_SPOOL_MAX_AGE_SECS` | 7 days | Age past which a capture that still fails to upload is deleted; 0 = never |
-| `--upload-concurrency` | `CAPTURE_UPLOAD_CONCURRENCY` | 2 | Captures uploaded at the same time |
-| `--upload-timeout-secs` | `CAPTURE_UPLOAD_TIMEOUT_SECS` | 600 | Time limit for one upload attempt of one capture; 0 = no limit |
-| `--shutdown-flush-secs` | `CAPTURE_SHUTDOWN_FLUSH_SECS` | 25 | Time the daemon keeps uploading after SIGTERM |
-| `--crictl-timeout-secs` | `CRICTL_TIMEOUT_SECS` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
-| `--capture-filter` | `CAPTURE_FILTER` | empty | JSON (in the config file, YAML) include/exclude lists of crashes to capture; empty = all. See [Capture filter](#capture-filter) |
-| `--pipe-limit` | `CAPTURE_PIPE_LIMIT` | 128 | `core_pipe_limit` sysctl the daemon installs |
-| `--no-redact` | `CAPTURE_NO_REDACT` | off | Pass `environ` and `cmdline` through un-redacted |
-| `--cri-runtime-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | unset | CRI socket for crictl enrichment |
-| `--no-events` | `CAPTURE_NO_EVENTS` | off | Disable k8s Event emission on capture; captures are still logged |
-| `--metrics-addr` | `CAPTURE_METRICS_ADDR` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--config` | unset | YAML config file that sets the other flags |
+| `--cluster` | `local` | First segment of the object key: ASCII letters, digits, `.`, `_` and `-` |
+| `--store-url` | unset | `s3://...`/`gs://...`/`az://...`; unset = observe-only: crashes are logged and reported, no cores are kept |
+| `--max-core-size` | `2Gi` | Stored core cap per crash; 0 = unlimited |
+| `--max-cores-per-hour` | 3 | Per-pod core budget; 0 = unlimited |
+| `--drain-deadline-secs` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled. A core already truncated by the size cap or the spool budget keeps its stored part; 0 = no deadline |
+| `--spool-dir` | `/var/lib/coredrop/spool` | Spool root on the node |
+| `--spool-max-size` | `10Gi` | Spool size cap; 0 = no cap |
+| `--spool-min-free-percent` | 15 | Free-space floor of the spool's filesystem |
+| `--spool-max-age-secs` | 7 days | Age past which a capture that still fails to upload is deleted; 0 = never |
+| `--upload-concurrency` | 2 | Captures uploaded at the same time |
+| `--upload-timeout-secs` | 600 | Time limit for one upload attempt of one capture; 0 = no limit |
+| `--shutdown-flush-secs` | 25 | Time the daemon keeps uploading after SIGTERM |
+| `--crictl-timeout-secs` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
+| `--capture-filter` | empty | JSON (in the config file, YAML) include/exclude lists of crashes to capture; empty = all. See [Capture filter](#capture-filter) |
+| `--pipe-limit` | 128 | `core_pipe_limit` sysctl the daemon installs |
+| `--no-redact` | off | Pass `environ` and `cmdline` through un-redacted |
+| `--cri-runtime-endpoint` | unset | CRI socket for crictl enrichment |
+| `--no-events` | off | Disable k8s Event emission on capture; captures are still logged |
+| `--metrics-addr` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |
+| `--handler-path` | `/opt/coredrop/bin/coredrop` | Host path of the handler binary that `core_pattern` runs; absolute, no whitespace |
+| `--handler-config-path` | `/run/coredrop/handler.json` | Host path the daemon writes the handler config to; `events.sock` and the rate-limit state go next to it |
+| `--crictl-path` | `/usr/local/bin/crictl` | Path of crictl on the node, for the handler |
+| `--proc-root` | `/proc` | `/proc` root the handler reads |
+| `--core-pattern-path` | `/proc/sys/kernel/core_pattern` | File the `core_pattern` sysctl is written through |
+| `--core-pipe-limit-path` | `/proc/sys/kernel/core_pipe_limit` | File the `core_pipe_limit` sysctl is written through |
+| `--node-name` | env `NODE_NAME`, else the host name | Node name on k8s Events |
 
 ## Config file
 
@@ -52,9 +60,8 @@ A value comes from the first of these that sets it:
 
 ```
 flag on the command line
-  -> env var
-    -> config file
-      -> built-in default
+  -> config file
+    -> built-in default
 ```
 
 The daemon reads the file once, at startup. `coredrop check` (the probes)

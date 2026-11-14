@@ -25,7 +25,7 @@ pub mod manifest;
 pub mod spool;
 
 /// Host path the `DaemonSet` installs the binary to, so the kernel can exec it as
-/// the `core_pattern` pipe target. Overridable via `CAPTURE_HANDLER_PATH`.
+/// the `core_pattern` pipe target. Overridable via `--handler-path`.
 pub const DEFAULT_HANDLER_PATH: &str = "/opt/coredrop/bin/coredrop";
 
 /// Helpers shared by the unit-test modules in this crate.

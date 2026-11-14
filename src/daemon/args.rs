@@ -19,9 +19,10 @@ use crate::filter::CaptureFilter;
 /// chart's termination grace period adds a margin on top.
 const DEFAULT_SHUTDOWN_FLUSH_SECS: u64 = 25;
 
-/// `coredrop` daemon config. Every knob is a flag with an env-var fallback,
-/// and `--config` names a YAML file that sets the same knobs (see
-/// [`DaemonArgs::load`]). Secrets (store creds) stay env-only: never flags
+/// `coredrop` daemon config. Every knob is a flag, and `--config` names a
+/// YAML file that sets the same knobs (see [`DaemonArgs::load`]). Only
+/// `--node-name` also reads an env var (`NODE_NAME`, from the downward API).
+/// Secrets (store creds) stay env-only: never flags
 /// (they leak via `ps`/cmdline) and never the file (a `ConfigMap` in the
 /// chart). The kernel-exec'd `capture` subcommand reads the daemon-written
 /// hostPath config file (see `src/main.rs`), not these flags.
@@ -29,101 +30,100 @@ const DEFAULT_SHUTDOWN_FLUSH_SECS: u64 = 25;
 #[command(name = "coredrop", version, about)]
 pub(crate) struct DaemonArgs {
     /// YAML config file. Its keys are the long flag names without `--`, for
-    /// example `max-core-size: 2Gi`. A flag or its env var wins over the
-    /// file.
-    #[arg(long, env = "CAPTURE_CONFIG_FILE", value_name = "FILE")]
+    /// example `max-core-size: 2Gi`. A flag wins over the file.
+    #[arg(long, value_name = "FILE")]
     pub(crate) config: Option<PathBuf>,
 
     /// Host path the kernel exec's as the `core_pattern` handler.
-    #[arg(long, env = "CAPTURE_HANDLER_PATH", default_value = crate::DEFAULT_HANDLER_PATH)]
+    #[arg(long, default_value = crate::DEFAULT_HANDLER_PATH)]
     pub(crate) handler_path: PathBuf,
 
     /// hostPath the daemon serializes the handler config to.
-    #[arg(long, env = "CAPTURE_CONFIG_PATH", default_value = crate::config::DEFAULT_CONFIG_PATH)]
+    #[arg(long, default_value = crate::config::DEFAULT_CONFIG_PATH)]
     pub(crate) handler_config_path: PathBuf,
 
     /// Cluster name - the first path segment of the object key. ASCII
     /// letters, digits, `.`, `_` and `-`.
-    #[arg(long, env = "CAPTURE_CLUSTER", default_value = crate::config::DEFAULT_CLUSTER, value_parser = parse_cluster)]
+    #[arg(long, default_value = crate::config::DEFAULT_CLUSTER, value_parser = parse_cluster)]
     pub(crate) cluster: String,
 
     /// Pass `environ` and `cmdline` through un-redacted.
-    #[arg(long, env = "CAPTURE_NO_REDACT")]
+    #[arg(long)]
     pub(crate) no_redact: bool,
 
     /// `/proc` root (overridable for tests/non-standard layouts).
-    #[arg(long, env = "CAPTURE_PROC_ROOT", default_value = crate::config::DEFAULT_PROC_ROOT)]
+    #[arg(long, default_value = crate::config::DEFAULT_PROC_ROOT)]
     pub(crate) proc_root: PathBuf,
 
     /// Object-store URL the daemon uploads spooled captures to (e.g.
     /// `s3://crash-artifacts`); unset disables upload. Store creds come from
     /// env (`AWS_*` etc.), not flags.
-    #[arg(long, env = "CAPTURE_STORE_URL")]
+    #[arg(long)]
     pub(crate) store_url: Option<String>,
 
     /// Path to the `crictl` binary for post-drain container enrichment.
-    #[arg(long, env = "CRICTL_PATH", default_value = crate::config::DEFAULT_CRICTL_PATH)]
+    #[arg(long, default_value = crate::config::DEFAULT_CRICTL_PATH)]
     pub(crate) crictl_path: PathBuf,
 
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
-    #[arg(long, env = "CONTAINER_RUNTIME_ENDPOINT")]
+    #[arg(long)]
     pub(crate) cri_runtime_endpoint: Option<String>,
 
     /// Max uncompressed core size stored per crash, as a quantity (`2Gi`,
     /// `500M`, bytes without a suffix); 0 = unlimited. The remainder of the
     /// stream is drained but not stored.
-    #[arg(long = "max-core-size", env = "CAPTURE_MAX_CORE_SIZE", default_value = "2Gi", value_name = "SIZE", value_parser = crate::config::parse_size)]
+    #[arg(long = "max-core-size", default_value = "2Gi", value_name = "SIZE", value_parser = crate::config::parse_size)]
     pub(crate) max_core_bytes: u64,
 
     /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
     /// crashes still get a manifest, but no core and no proc snapshot.
-    #[arg(long, env = "CAPTURE_MAX_CORES_PER_HOUR", default_value_t = crate::config::DEFAULT_MAX_CORES_PER_HOUR)]
+    #[arg(long, default_value_t = crate::config::DEFAULT_MAX_CORES_PER_HOUR)]
     pub(crate) max_cores_per_hour: u32,
 
     /// Wall-clock deadline (seconds) for draining one core into the spool;
     /// 0 = no deadline. On expiry the handler drops the core and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
     /// A core already truncated by a size limit keeps its stored part.
-    #[arg(long, env = "CAPTURE_DRAIN_DEADLINE_SECS", default_value_t = crate::config::DEFAULT_DRAIN_DEADLINE_SECS)]
+    #[arg(long, default_value_t = crate::config::DEFAULT_DRAIN_DEADLINE_SECS)]
     pub(crate) drain_deadline_secs: u64,
 
     /// Spool root on the node: the handler writes capture bundles here and
     /// the daemon uploads them.
-    #[arg(long, env = "CAPTURE_SPOOL_DIR", default_value = crate::spool::DEFAULT_SPOOL_DIR)]
+    #[arg(long, default_value = crate::spool::DEFAULT_SPOOL_DIR)]
     pub(crate) spool_dir: PathBuf,
 
     /// Cap on the spool's total size, as a quantity (`10Gi`, `500M`, bytes
     /// without a suffix); 0 = no cap. A core that does not fit is dropped,
     /// with its proc snapshot; its manifest is still spooled.
-    #[arg(long = "spool-max-size", env = "CAPTURE_SPOOL_MAX_SIZE", default_value = "10Gi", value_name = "SIZE", value_parser = crate::config::parse_size)]
+    #[arg(long = "spool-max-size", default_value = "10Gi", value_name = "SIZE", value_parser = crate::config::parse_size)]
     pub(crate) spool_max_bytes: u64,
 
     /// Free-space floor of the spool's filesystem, in percent. The handler
     /// stops writing cores below it.
-    #[arg(long, env = "CAPTURE_SPOOL_MIN_FREE_PERCENT", default_value_t = crate::spool::DEFAULT_SPOOL_MIN_FREE_PERCENT, value_parser = clap::value_parser!(u8).range(0..=100))]
+    #[arg(long, default_value_t = crate::spool::DEFAULT_SPOOL_MIN_FREE_PERCENT, value_parser = clap::value_parser!(u8).range(0..=100))]
     pub(crate) spool_min_free_percent: u8,
 
     /// Age in seconds past which a spooled capture that still fails to
     /// upload is deleted; 0 = never.
-    #[arg(long, env = "CAPTURE_SPOOL_MAX_AGE_SECS", default_value_t = crate::daemon::uploader::DEFAULT_SPOOL_MAX_AGE_SECS)]
+    #[arg(long, default_value_t = crate::daemon::uploader::DEFAULT_SPOOL_MAX_AGE_SECS)]
     pub(crate) spool_max_age_secs: u64,
 
     /// Spooled captures the daemon uploads at the same time.
-    #[arg(long, env = "CAPTURE_UPLOAD_CONCURRENCY", default_value_t = crate::daemon::uploader::DEFAULT_UPLOAD_CONCURRENCY, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64))]
+    #[arg(long, default_value_t = crate::daemon::uploader::DEFAULT_UPLOAD_CONCURRENCY, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64))]
     pub(crate) upload_concurrency: usize,
 
     /// Time limit in seconds for one upload attempt of one spooled capture;
     /// 0 = no limit. A timed-out capture is retried later.
-    #[arg(long, env = "CAPTURE_UPLOAD_TIMEOUT_SECS", default_value_t = crate::daemon::uploader::DEFAULT_UPLOAD_TIMEOUT_SECS)]
+    #[arg(long, default_value_t = crate::daemon::uploader::DEFAULT_UPLOAD_TIMEOUT_SECS)]
     pub(crate) upload_timeout_secs: u64,
 
     /// On SIGTERM, how long in seconds the daemon keeps uploading the spool
     /// before it exits. Keep it below the pod's termination grace period.
-    #[arg(long, env = "CAPTURE_SHUTDOWN_FLUSH_SECS", default_value_t = DEFAULT_SHUTDOWN_FLUSH_SECS)]
+    #[arg(long, default_value_t = DEFAULT_SHUTDOWN_FLUSH_SECS)]
     pub(crate) shutdown_flush_secs: u64,
 
     /// Timeout in seconds for `crictl inspect` in the handler; 0 = no timeout.
-    #[arg(long, env = "CRICTL_TIMEOUT_SECS", default_value_t = crate::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
+    #[arg(long, default_value_t = crate::config::DEFAULT_CRICTL_TIMEOUT_SECS)]
     pub(crate) crictl_timeout_secs: u64,
 
     /// Which crashes the handler keeps, as JSON:
@@ -131,19 +131,19 @@ pub(crate) struct DaemonArgs {
     /// mapping. Each entry holds glob patterns for `namespace`, `pod`,
     /// `container`, `image` and `exe`; all of an entry's patterns must match.
     /// Empty keeps every crash.
-    #[arg(long, env = "CAPTURE_FILTER", default_value = "", value_name = "JSON", value_parser = CaptureFilter::parse)]
+    #[arg(long, default_value = "", value_name = "JSON", value_parser = CaptureFilter::parse)]
     pub(crate) capture_filter: CaptureFilter,
 
     /// Disable k8s Event emission on capture (`kubectl describe pod`/
     /// `kubectl get events` surfacing). Events are on by default. Captures are
     /// still logged by the daemon either way.
-    #[arg(long, env = "CAPTURE_NO_EVENTS")]
+    #[arg(long)]
     pub(crate) no_events: bool,
 
     /// Max crashes concurrently held open for the handler via
     /// `core_pipe_limit` (node-global sysctl); beyond it the kernel skips the
     /// dump entirely rather than exec'ing the handler.
-    #[arg(long, env = "CAPTURE_PIPE_LIMIT", default_value_t = crate::core_pattern::DEFAULT_PIPE_LIMIT)]
+    #[arg(long, default_value_t = crate::core_pattern::DEFAULT_PIPE_LIMIT)]
     pub(crate) pipe_limit: u32,
 
     /// Node name reported on k8s Events (the chart sets it from
@@ -155,17 +155,17 @@ pub(crate) struct DaemonArgs {
     /// File the `core_pattern` sysctl is written through. The chart points it
     /// at a writable bind mount of the node's sysctl file, because the
     /// container's own `/proc/sys` is read-only.
-    #[arg(long, env = "CAPTURE_CORE_PATTERN_PATH", default_value = crate::core_pattern::CORE_PATTERN_PATH)]
+    #[arg(long, default_value = crate::core_pattern::CORE_PATTERN_PATH)]
     pub(crate) core_pattern_path: PathBuf,
 
     /// File the `core_pipe_limit` sysctl is written through. Same bind mount
     /// approach as `core_pattern_path`.
-    #[arg(long, env = "CAPTURE_CORE_PIPE_LIMIT_PATH", default_value = crate::core_pattern::CORE_PIPE_LIMIT_PATH)]
+    #[arg(long, default_value = crate::core_pattern::CORE_PIPE_LIMIT_PATH)]
     pub(crate) core_pipe_limit_path: PathBuf,
 
     /// Address of the Prometheus `/metrics` endpoint (`host:port`); empty
     /// turns the endpoint off.
-    #[arg(long, env = "CAPTURE_METRICS_ADDR", default_value = crate::daemon::metrics::DEFAULT_METRICS_ADDR, value_parser = parse_metrics_addr)]
+    #[arg(long, default_value = crate::daemon::metrics::DEFAULT_METRICS_ADDR, value_parser = parse_metrics_addr)]
     pub(crate) metrics_addr: MetricsAddr,
 }
 
@@ -188,9 +188,9 @@ fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
 }
 
 impl DaemonArgs {
-    /// Parse `argv` (program name first) and the env. With `--config`, the
-    /// file's values replace the built-in defaults, so the order is: flag,
-    /// env var, file, built-in default.
+    /// Parse `argv` (program name first). With `--config`, the file's values
+    /// replace the built-in defaults, so the order is: flag, file, built-in
+    /// default. `--node-name` also reads `NODE_NAME`.
     ///
     /// # Errors
     ///
@@ -435,6 +435,18 @@ mod tests {
                 .cluster,
             "eu-west_1.prod"
         );
+    }
+
+    #[test]
+    fn an_env_var_does_not_override_the_config_file() {
+        // Only the file and the flags set a knob, so a generic env var in
+        // the pod (`CRICTL_PATH`, ...) cannot change the config.
+        let _guard = crate::testutil::ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK serializes every test that touches the env.
+        unsafe { std::env::set_var("CAPTURE_CLUSTER", "from-env") };
+        let args = load_with_file("cluster: from-file\n", &[]);
+        unsafe { std::env::remove_var("CAPTURE_CLUSTER") };
+        assert_eq!(args.unwrap().cluster, "from-file");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The daemon's `--config` file: a YAML mapping of long flag names to
 //! values. [`apply`] turns its values into the defaults of a clap
-//! [`Command`], so a flag or its env var still wins over the file.
+//! [`Command`], so a flag still wins over the file.
 
 use std::path::Path;
 

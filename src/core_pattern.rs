@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use tracing::warn;
 
 /// Max crashes concurrently held open for a handler.
@@ -53,14 +53,24 @@ impl CorePatternGuard {
     ///
     /// # Errors
     ///
-    /// Fails when the pattern file cannot be read (to save the previous
-    /// value) or written. A failed `core_pipe_limit` write only warns.
+    /// Fails when `handler_path` is not absolute or contains whitespace (the
+    /// kernel would not run it), or when the pattern file cannot be read (to
+    /// save the previous value) or written. A failed `core_pipe_limit` write
+    /// only warns.
     pub fn install_at(
         handler_path: &Path,
         pipe_limit: u32,
         pattern_path: PathBuf,
         pipe_limit_path: PathBuf,
     ) -> Result<Self> {
+        // The kernel splits core_pattern on whitespace and runs the first
+        // word as an absolute path. Any other value installs fine but loses
+        // every crash.
+        let handler = handler_path.to_string_lossy();
+        ensure!(
+            handler_path.is_absolute() && !handler.contains(char::is_whitespace),
+            "handler path {handler:?} must be absolute and contain no whitespace"
+        );
         let mut prev_pattern = std::fs::read_to_string(&pattern_path)
             .with_context(|| format!("reading {}", pattern_path.display()))?;
         // A daemon killed without a clean shutdown leaves our pattern in place.
@@ -101,10 +111,20 @@ impl CorePatternGuard {
     }
 
     /// Restore the previous `core_pattern`/pipe-limit sysctl values. A write
-    /// failure is logged, not fatal.
+    /// failure is logged, not fatal. A pattern that another tool wrote after
+    /// the install stays: restoring over it would undo that tool's change.
     pub fn restore(&self) {
-        if let Err(e) = std::fs::write(&self.pattern_path, &self.prev_pattern) {
-            warn!(error = %e, "failed to restore core_pattern");
+        match self.checker().check() {
+            Ok(Some(current)) => warn!(
+                core_pattern = current,
+                "core_pattern was changed by another tool; leaving it in place"
+            ),
+            // Unreadable: try the write anyway, the handler may still be set.
+            Ok(None) | Err(_) => {
+                if let Err(e) = std::fs::write(&self.pattern_path, &self.prev_pattern) {
+                    warn!(error = %e, "failed to restore core_pattern");
+                }
+            }
         }
         if !self.prev_pipe_limit.is_empty()
             && let Err(e) = std::fs::write(&self.pipe_limit_path, &self.prev_pipe_limit)
@@ -209,6 +229,40 @@ mod tests {
 
         std::fs::remove_file(&pattern).unwrap();
         assert!(guard.check().is_err());
+    }
+
+    #[test]
+    fn restore_keeps_a_pattern_another_tool_installed() {
+        let dir = TempDir::new().unwrap();
+        let pattern = dir.path().join("core_pattern");
+        let pipe = dir.path().join("core_pipe_limit");
+        std::fs::write(&pattern, "core\n").unwrap();
+        std::fs::write(&pipe, "0\n").unwrap();
+        let guard =
+            CorePatternGuard::install_at(Path::new("/h/coredrop"), 16, pattern.clone(), pipe)
+                .unwrap();
+
+        std::fs::write(&pattern, "|/usr/lib/systemd/systemd-coredump %P\n").unwrap();
+        drop(guard);
+
+        assert_eq!(
+            std::fs::read_to_string(&pattern).unwrap(),
+            "|/usr/lib/systemd/systemd-coredump %P\n"
+        );
+    }
+
+    #[test]
+    fn install_rejects_a_handler_path_the_kernel_cannot_run() {
+        let dir = TempDir::new().unwrap();
+        let pattern = dir.path().join("core_pattern");
+        let pipe = dir.path().join("core_pipe_limit");
+        std::fs::write(&pattern, "core\n").unwrap();
+        for bad in ["bin/coredrop", "/opt/core drop/coredrop"] {
+            let result =
+                CorePatternGuard::install_at(Path::new(bad), 16, pattern.clone(), pipe.clone());
+            assert!(result.is_err(), "{bad}");
+        }
+        assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core\n");
     }
 
     #[test]

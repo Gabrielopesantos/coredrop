@@ -10,8 +10,41 @@ use object_store::buffered::BufWriter;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use tokio::io::AsyncWriteExt;
-use tokio::time::{Instant, timeout_at};
+use tokio::sync::watch;
+use tokio::time::Instant;
 use tracing::warn;
+
+/// Tells uploads in progress to stop. Once the value is `true`, a running
+/// [`upload_file`] aborts its multipart upload and returns an error.
+pub type Cancel = watch::Receiver<bool>;
+
+/// Run `fut` until it completes, `deadline_at` passes or `cancel` turns true.
+/// `what` names the step in the error.
+async fn bounded<T>(
+    fut: impl std::future::Future<Output = T>,
+    deadline_at: Option<Instant>,
+    cancel: &mut Cancel,
+    what: &str,
+) -> Result<T> {
+    let deadline = async {
+        match deadline_at {
+            Some(dl) => tokio::time::sleep_until(dl).await,
+            None => std::future::pending().await,
+        }
+    };
+    let cancelled = async {
+        // An error means the sender is gone: nothing can stop the upload
+        // then, so let it run.
+        if cancel.wait_for(|stop| *stop).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        out = fut => Ok(out),
+        () = deadline => Err(anyhow!("upload deadline passed while {what}")),
+        () = cancelled => Err(anyhow!("upload stopped while {what}")),
+    }
+}
 
 /// Buffered single-shot PUT of a small object (the proc snapshot tar or the
 /// manifest JSON). Unlike the multi-GB core, these are bounded and fit in
@@ -33,26 +66,28 @@ pub async fn put_object(store: &Arc<dyn ObjectStore>, key: &str, bytes: Vec<u8>)
 ///
 /// # Errors
 ///
-/// Fails when the file cannot be read, the upload fails, or `deadline_at`
-/// passes. A failed upload is aborted, except when the deadline passes while
-/// the upload completes: those parts stay until the bucket's lifecycle rule
-/// removes them.
+/// Fails when the file cannot be read, the upload fails, `deadline_at`
+/// passes or `cancel` turns true. A failed upload is aborted, except when it
+/// fails while the upload completes: those parts stay until the bucket's
+/// lifecycle rule removes them.
 pub async fn upload_file(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
     key: &str,
     deadline_at: Option<Instant>,
+    cancel: &mut Cancel,
 ) -> Result<()> {
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("opening {}", path.display()))?;
     let mut writer = BufWriter::new(store.clone(), ObjectPath::from(key));
-    let copied = match deadline_at {
-        Some(dl) => timeout_at(dl, tokio::io::copy(&mut file, &mut writer))
-            .await
-            .map_err(|_| anyhow!("upload deadline passed")),
-        None => Ok(tokio::io::copy(&mut file, &mut writer).await),
-    };
+    let copied = bounded(
+        tokio::io::copy(&mut file, &mut writer),
+        deadline_at,
+        cancel,
+        "sending",
+    )
+    .await;
     // `BufWriter` does not abort its multipart upload on drop, and S3/GCS
     // keep (and bill) the parts of an upload nobody completes or aborts.
     // `abort` panics once `shutdown` has been polled, so abort only here.
@@ -63,13 +98,8 @@ pub async fn upload_file(
         }
         return Err(e).with_context(|| format!("uploading {key}"));
     }
-    let shutdown = match deadline_at {
-        Some(dl) => timeout_at(dl, writer.shutdown())
-            .await
-            .map_err(|_| anyhow!("upload deadline passed while completing")),
-        None => Ok(writer.shutdown().await),
-    };
-    shutdown
+    bounded(writer.shutdown(), deadline_at, cancel, "completing")
+        .await
         .and_then(|r| r.map_err(anyhow::Error::from))
         .with_context(|| format!("completing upload of {key}"))
 }
@@ -217,10 +247,8 @@ pub fn object_store_from_url_opts(
             }
             builder.build().map(|s| Arc::new(s) as _)
         }
-        // Local backends: no HTTP, no retry policy to apply.
-        object_store::ObjectStoreScheme::Memory => {
-            Ok(Arc::new(object_store::memory::InMemory::new()) as _)
-        }
+        // No HTTP, no retry policy to apply. `memory://` is not offered: it
+        // would keep every core in the daemon's RAM and lose it on exit.
         object_store::ObjectStoreScheme::Local => {
             object_store::local::LocalFileSystem::new_with_prefix(url.path())
                 .map(|s| Arc::new(s) as _)
@@ -246,6 +274,127 @@ mod tests {
     use crate::keys::ObjectKeys;
     use crate::testutil::ENV_LOCK;
     use object_store::memory::InMemory;
+
+    /// A store whose multipart part uploads never finish. Counts aborts.
+    #[derive(Debug, Default)]
+    struct StalledParts {
+        aborts: Arc<std::sync::atomic::AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl std::fmt::Display for StalledParts {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "StalledParts")
+        }
+    }
+
+    #[derive(Debug)]
+    struct StalledUpload {
+        aborts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::MultipartUpload for StalledUpload {
+        fn put_part(&mut self, _data: PutPayload) -> object_store::UploadPart {
+            Box::pin(std::future::pending())
+        }
+
+        async fn complete(&mut self) -> object_store::Result<object_store::PutResult> {
+            std::future::pending().await
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.aborts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for StalledParts {
+        async fn put_opts(
+            &self,
+            _location: &ObjectPath,
+            _payload: PutPayload,
+            _opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            std::future::pending().await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &ObjectPath,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.started.notify_one();
+            Ok(Box::new(StalledUpload {
+                aborts: self.aborts.clone(),
+            }))
+        }
+
+        async fn get_opts(
+            &self,
+            _location: &ObjectPath,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            unimplemented!()
+        }
+
+        fn delete_stream(
+            &self,
+            _locations: futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+            unimplemented!()
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&ObjectPath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            unimplemented!()
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            _prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            unimplemented!()
+        }
+
+        async fn copy_opts(
+            &self,
+            _from: &ObjectPath,
+            _to: &ObjectPath,
+            _options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_upload_aborts_its_multipart_upload() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("core.zst");
+        // Larger than `BufWriter`'s buffer, so the upload goes multipart.
+        std::fs::write(&path, vec![0u8; 12 << 20]).unwrap();
+        let stalled = StalledParts::default();
+        let aborts = stalled.aborts.clone();
+        let started = stalled.started.clone();
+        let store: Arc<dyn ObjectStore> = Arc::new(stalled);
+        let (stop, mut cancel) = watch::channel(false);
+
+        let upload =
+            tokio::spawn(
+                async move { upload_file(&store, &path, "core.zst", None, &mut cancel).await },
+            );
+        started.notified().await;
+        stop.send(true).unwrap();
+
+        let err = upload.await.unwrap().unwrap_err();
+        assert!(format!("{err:#}").contains("upload stopped"), "{err:#}");
+        assert_eq!(aborts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     /// The Helm chart hard-codes a copy of [`ALLOWED_STORE_OPTS`] so it can
     /// `fail` on a typo'd key at render time. Nothing links the two lists, so
@@ -304,10 +453,10 @@ mod tests {
             ("NOT_A_REAL_KEY".to_string(), "ignored".to_string()),
         ];
         assert!(object_store_from_url_opts("s3://some-bucket", s3_opts).is_some());
-        assert!(object_store_from_url_opts("memory:///", vec![]).is_some());
 
-        // Not a URL, and a URL whose scheme has no backend.
+        // Not a URL, a URL whose scheme has no backend, and RAM.
         assert!(object_store_from_url_opts("not a url", vec![]).is_none());
+        assert!(object_store_from_url_opts("memory:///", vec![]).is_none());
         assert!(object_store_from_url_opts("bogus://x", vec![]).is_none());
     }
 

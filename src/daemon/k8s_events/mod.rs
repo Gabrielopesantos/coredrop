@@ -37,7 +37,7 @@ use crate::daemon::metrics::Metrics;
 use crate::events::CaptureEventPayload;
 
 use self::aggregate::{AGGREGATION_SWEEP_INTERVAL, AggKey, Aggregator};
-use self::client::{EventClient, is_not_found};
+use self::client::{EventClient, is_conflict, is_not_found};
 use self::event::{Reason, event_body, event_name, rfc3339_micro, series_patch};
 use self::log::{Stage, log_capture};
 
@@ -209,7 +209,7 @@ fn drain_reports(
 }
 
 /// A capture is done: log it, count it, and queue its k8s Event. When the
-/// queue is full, the Event is dropped and counted as an error.
+/// queue is full, the Event is dropped and counted.
 fn complete(
     events: Option<&mpsc::Sender<CaptureEventPayload>>,
     metrics: &Metrics,
@@ -223,13 +223,23 @@ fn complete(
     if Reason::from_outcome(payload.outcome).is_none() {
         return;
     }
-    if let Err(mpsc::error::TrySendError::Full(_)) = events.try_send(payload.clone()) {
-        warn!(
-            capacity = EVENT_QUEUE_CAPACITY,
-            pod = payload.pod_name.as_deref().unwrap_or_default(),
-            "k8s Event queue full; dropping the Event"
-        );
-        metrics.event_posted(false);
+    match events.try_send(payload.clone()) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!(
+                capacity = EVENT_QUEUE_CAPACITY,
+                pod = payload.pod_name.as_deref().unwrap_or_default(),
+                "k8s Event queue full; dropping the Event"
+            );
+            metrics.event_dropped();
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!(
+                pod = payload.pod_name.as_deref().unwrap_or_default(),
+                "k8s Event task has stopped; dropping the Event"
+            );
+            metrics.event_dropped();
+        }
     }
 }
 
@@ -344,6 +354,12 @@ async fn handle_payload(
     if recorded.is_new {
         let body = event_body(node, &recorded.event_name, reason, &target, payload);
         result = client.create_event(namespace, &body).await;
+        // The Event exists already: an earlier daemon posted it for this
+        // capture before it was killed, and the capture is reported again.
+        if result.as_ref().is_err_and(is_conflict) {
+            debug!(event = %recorded.event_name, namespace = %namespace, "kubernetes event exists already");
+            result = Ok(());
+        }
     }
     metrics.event_posted(result.is_ok());
     if let Err(e) = result {
@@ -634,6 +650,48 @@ mod tests {
         assert!(
             text.contains("coredrop_events_posted_total{result=\"error\"} 1"),
             "only the valid payload reaches the API server: {text}"
+        );
+    }
+
+    #[test]
+    fn a_full_event_queue_counts_a_drop_not_a_post_error() {
+        let metrics = Metrics::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        complete(Some(&tx), &metrics, &payload("default", uid));
+        complete(Some(&tx), &metrics, &payload("default", uid));
+
+        let text = metrics.encode();
+        assert!(text.contains("coredrop_events_dropped_total 1"), "{text}");
+        assert!(
+            text.contains("coredrop_events_posted_total{result=\"error\"} 0"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_payload_counts_an_existing_event_as_posted() {
+        // A restarted daemon reports a capture again; its Event exists.
+        let (origin, _seen) = fake_api_server(vec![409]).await;
+        let token_dir = TempDir::new().unwrap();
+        let client =
+            EventClient::new_for_test(reqwest::Client::new(), &origin, token_file(&token_dir));
+        let mut agg = Aggregator::default();
+        let metrics = Metrics::new();
+        let uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        handle_payload(
+            Some(&client),
+            &mut agg,
+            "test-node",
+            &metrics,
+            &payload("default", uid),
+        )
+        .await;
+
+        let text = metrics.encode();
+        assert!(
+            text.contains("coredrop_events_posted_total{result=\"ok\"} 1"),
+            "{text}"
         );
     }
 

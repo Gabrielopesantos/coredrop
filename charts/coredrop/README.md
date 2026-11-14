@@ -60,12 +60,12 @@ at startup.
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsUser":0,"seccompProfile":{"type":"RuntimeDefault"}}` | Daemon container securityContext. |
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
 | spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. Use a directory for coredrop only: the handler creates `incoming/` and `ready/` in it, and `helm uninstall` deletes them. |
-| spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default). |
+| spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default); 0 = never. |
 | spool.maxSize | string | `"10Gi"` | Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap. |
 | spool.minFreePercent | int | `15` | Free-space floor of the spool's filesystem, in percent; below it cores are dropped. |
 | tolerations | list | `[{"operator":"Exists"}]` | Pod tolerations (defaults to tolerating everything so it runs on all nodes). |
 | upload.concurrency | int | `2` | Captures uploaded at the same time. |
-| upload.shutdownFlushSeconds | int | `25` | On pod shutdown, seconds the daemon keeps uploading the spool. The pod's termination grace period is this plus 5. |
+| upload.shutdownFlushSeconds | int | `25` | On pod shutdown, seconds the daemon keeps uploading the spool. The pod's termination grace period is this plus 10. |
 | upload.timeoutSeconds | int | `600` | Time limit in seconds for one upload attempt of one capture; it is retried after. `0` = no limit. |
 
 Only allowlisted object-store keys are read by the daemon. An unrecognized

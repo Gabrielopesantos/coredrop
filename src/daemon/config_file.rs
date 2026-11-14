@@ -52,7 +52,8 @@ fn check_file_value(arg: &clap::Arg, value: &str) -> Result<(), String> {
     clap::Command::new("coredrop")
         .no_binary_name(true)
         .arg(arg.clone())
-        .try_get_matches_from([format!("--{long}"), value.to_string()])
+        // `--key=value`: a value that starts with `-` is not read as a flag.
+        .try_get_matches_from([format!("--{long}={value}")])
         .map(drop)
         .map_err(|e| {
             let msg = e.to_string();

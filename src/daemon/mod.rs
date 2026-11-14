@@ -65,6 +65,10 @@ async fn run(args: DaemonArgs) -> Result<()> {
         cluster = %args.cluster,
         "coredrop starting"
     );
+    // Take over SIGTERM/SIGINT before core_pattern is installed. A signal
+    // that arrives with the default action kills the daemon without the
+    // restore, and the node's original pattern is lost.
+    let mut shutdown = ShutdownSignal::new()?;
 
     let store = args.object_store().inspect_err(|e| {
         error!(error = %format!("{e:#}"), "unusable object store; exiting for restart");
@@ -165,7 +169,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     let uploader =
         store.map(|store| spawn_uploader(&args, store, wake, reports_tx, metrics, stop_rx));
 
-    shutdown_signal().await?;
+    shutdown.recv().await;
     info!("shutdown signal received");
 
     // Stop new captures first, then give the spool the rest of the grace
@@ -298,19 +302,31 @@ fn spawn_uploader(
     ))
 }
 
-/// Wait for a termination signal. Kubernetes sends SIGTERM on pod shutdown
-/// (then SIGKILL after the grace period); `ctrl_c` alone catches only SIGINT, so
+/// The termination signals. Kubernetes sends SIGTERM on pod shutdown (then
+/// SIGKILL after the grace period); `ctrl_c` alone catches only SIGINT, so
 /// under k8s the daemon would be hard-killed and `CorePatternGuard`'s restore
 /// would never run. Wake on either SIGTERM or SIGINT so the guard always drops.
-async fn shutdown_signal() -> Result<()> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
+/// From [`ShutdownSignal::new`] on, the signals no longer kill the process.
+struct ShutdownSignal {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignal {
+    fn new() -> Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            term: signal(SignalKind::terminate()).context("handling SIGTERM")?,
+            int: signal(SignalKind::interrupt()).context("handling SIGINT")?,
+        })
     }
-    Ok(())
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.int.recv() => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -411,7 +427,7 @@ mod tests {
     /// crash to the handler: running on would discard every core.
     #[tokio::test]
     async fn errors_when_the_store_url_is_unusable() {
-        for url in ["not a url", "memory://bucket"] {
+        for url in ["not a url", "memory://bucket", "memory:///"] {
             let dir = TempDir::new().unwrap();
             let (pattern, pipe) = sysctls(dir.path());
             let config_path = dir.path().join("run").join("handler.json");

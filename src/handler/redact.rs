@@ -132,13 +132,21 @@ impl Redactor {
         let Some((key, value)) = text.split_once('=') else {
             return entry.to_vec();
         };
+        // The shell's working directories match `PWD` but hold no secret,
+        // and they help to read a crash.
+        if matches!(key, "PWD" | "OLDPWD") {
+            return entry.to_vec();
+        }
         if self.key_is_secret(key) || looks_secret_value(value) {
             return format!("{key}={REDACTED}").into_bytes();
         }
-        if let Some(rewritten) = self.redact_url(value).or_else(|| self.redact_pairs(value)) {
-            return format!("{key}={rewritten}").into_bytes();
+        // A connection string can hold a URL and secret pairs: run both.
+        let url = self.redact_url(value);
+        let pairs = self.redact_pairs(url.as_deref().unwrap_or(value));
+        match pairs.or(url) {
+            Some(rewritten) => format!("{key}={rewritten}").into_bytes(),
+            None => entry.to_vec(),
         }
-        entry.to_vec()
     }
 
     /// Redact secret-keyword values in a `;`-separated connection string
@@ -173,11 +181,6 @@ impl Redactor {
 
     fn key_is_secret(&self, key: &str) -> bool {
         let upper = key.to_ascii_uppercase();
-        // The shell's working directories match `PWD` but hold no secret,
-        // and they help to read a crash.
-        if matches!(upper.as_str(), "PWD" | "OLDPWD") {
-            return false;
-        }
         self.keywords.iter().any(|kw| upper.contains(kw.as_str()))
     }
 
@@ -189,11 +192,28 @@ impl Redactor {
         let scheme_end = value.find("://")?;
         let scheme = &value[..scheme_end];
         let rest = &value[scheme_end + 3..];
-        // A password can hold `@` and `/`, so the userinfo ends at the last
-        // `@` before the query, and the host ends at the first `/` after it.
+        // The authority normally ends at the first `/`, and its userinfo at
+        // the last `@` in it (a password can hold `@`). A password can also
+        // hold `/`: when no `@` comes before the first `/`, a `user:` before
+        // the first `@` still marks userinfo. A path can hold `@` too, so
+        // that fallback takes the first `@`, not the last.
         let tail_start = rest.find(['?', '#']).unwrap_or(rest.len());
-        let host_start = rest[..tail_start].rfind('@').map_or(0, |at| at + 1);
-        let auth_end = rest[host_start..tail_start]
+        let head = &rest[..tail_start];
+        let first_slash = head.find('/').unwrap_or(head.len());
+        let host_start = match head[..first_slash].rfind('@') {
+            Some(at) => at + 1,
+            None => match head.find('@') {
+                Some(at)
+                    if head[..at]
+                        .split_once(':')
+                        .is_some_and(|(user, _)| !user.contains('/')) =>
+                {
+                    at + 1
+                }
+                _ => 0,
+            },
+        };
+        let auth_end = head[host_start..]
             .find('/')
             .map_or(tail_start, |slash| host_start + slash);
         let authority = &rest[..auth_end];
@@ -393,6 +413,9 @@ mod tests {
     fn redacts_passwords_in_a_semicolon_connection_string() {
         let raw = environ(&[
             "CONN=Server=db;User Id=app;Password=hunter2;Encrypt=true",
+            "SQL=Server=db;Pwd=hunter2",
+            "MIXED=Endpoint=https://u:p@h/db;Password=hunter2",
+            "QUERY=https://h/db?pwd=hunter2",
             "PWD=/srv/app",
             "OLDPWD=/root",
             "MYSQL_PWD=hunter2",
@@ -401,6 +424,9 @@ mod tests {
             parse(&Redactor::default().redact_environ(&raw)),
             vec![
                 "CONN=Server=db;User Id=app;Password=<redacted>;Encrypt=true",
+                "SQL=Server=db;Pwd=<redacted>",
+                "MIXED=Endpoint=https://u:<redacted>@h/db;Password=<redacted>",
+                "QUERY=https://h/db?pwd=<redacted>",
                 "PWD=/srv/app",
                 "OLDPWD=/root",
                 "MYSQL_PWD=<redacted>",
@@ -413,12 +439,16 @@ mod tests {
         let raw = environ(&[
             "A=postgres://u:p@ss@h/db",
             "B=postgres://u:pa/ss@h/db?sslmode=require",
+            "C=https://Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiYw@h/path@v1",
+            "D=https://h/users/@me",
         ]);
         assert_eq!(
             parse(&Redactor::default().redact_environ(&raw)),
             vec![
                 "A=postgres://u:<redacted>@h/db",
                 "B=postgres://u:<redacted>@h/db?sslmode=require",
+                "C=https://<redacted>@h/path@v1",
+                "D=https://h/users/@me",
             ]
         );
     }

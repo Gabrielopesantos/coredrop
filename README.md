@@ -83,10 +83,10 @@ Defaults are in [docs/configuration.md](docs/configuration.md).
 - **Size cap** - stored core bytes are capped per crash; the rest of the
   stream is drained but not stored. The manifest records `truncated`.
 - **Spool quota** - the spool has a size cap and a free-space floor. A core
-  that does not fit is dropped or truncated; its snapshot and manifest are
-  still written (see the [chart README](charts/coredrop/README.md#spool)).
+  that does not fit is dropped (with its snapshot) or truncated; its manifest
+  is still written (see the [chart README](charts/coredrop/README.md#spool)).
 - **Rate limit** - per-pod core budget, so a crash loop can't flood the spool
-  or the bucket. Suppressed crashes still get a snapshot and manifest. The
+  or the bucket. Suppressed crashes still get a manifest, but no snapshot. The
   limiter fails open.
 - **Restore on shutdown** - the daemon restores the node's original
   `core_pattern` and `core_pipe_limit` when it stops. `helm uninstall`

@@ -273,7 +273,7 @@ pub async fn run(
                     pod_uid = %t.identity.pod_uid,
                     recent,
                     max_per_hour = config.max_cores_per_hour,
-                    "per-pod core budget exhausted - discarding core, keeping snapshot + manifest"
+                    "per-pod core budget exhausted - discarding core and snapshot, keeping the manifest"
                 );
                 true
             }
@@ -299,7 +299,7 @@ pub async fn run(
             spool = %config.spool_dir.display(),
             max_bytes = config.spool_max_bytes,
             min_free_percent = config.spool_min_free_percent,
-            "spool is full - discarding core, keeping snapshot + manifest"
+            "spool is full - discarding core and snapshot, keeping the manifest"
         );
     }
     let refund = |pod_uid: &str| {
@@ -408,8 +408,14 @@ pub async fn run(
         "core stream drained"
     );
 
-    // Step 4: Proc snapshot into the bundle (small, buffered).
-    let proc_snapshot_key = target.as_ref().and_then(|t| {
+    // Step 4: Proc snapshot into the bundle (small, buffered). A crash
+    // without a core keeps no snapshot either: the spool budget does not
+    // count snapshots, and a crash loop would fill the disk with them.
+    let keep_snapshot = !rate_suppressed && !spool_full;
+    if target.is_some() && !keep_snapshot {
+        info!("core is not kept; proc snapshot omitted");
+    }
+    let proc_snapshot_key = target.as_ref().filter(|_| keep_snapshot).and_then(|t| {
         let tar = match snapshot.to_tar() {
             Ok(tar) => tar,
             Err(e) => {

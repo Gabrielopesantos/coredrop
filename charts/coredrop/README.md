@@ -24,13 +24,13 @@ at startup.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. |
+| capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. ASCII letters, digits, `.`, `_` and `-`. |
 | capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
 | capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables. |
 | capture.filter.exclude | list | `[]` | Never capture crashes that match one of these entries; wins over `include`. Example: `[{namespace: kube-system}, {container: istio-proxy}]`. |
 | capture.filter.include | list | `[]` | Capture only crashes that match one of these entries; empty captures all. Example: `[{namespace: "team-*"}]`. |
 | capture.maxCoreSize | string | `"2Gi"` | Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit. |
-| capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only. |
+| capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep the manifest only. |
 | capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
@@ -61,7 +61,7 @@ at startup.
 | serviceAccount.annotations | object | `{}` | Annotations on the daemon's ServiceAccount (e.g. cloud workload identity). |
 | spool.hostDir | string | `"/var/lib/coredrop/spool"` | Host path of the spool. Use a directory for coredrop only: the handler creates `incoming/` and `ready/` in it, and `helm uninstall` deletes them. |
 | spool.maxAgeSeconds | int | `604800` | Age in seconds past which a capture that still fails to upload is deleted (7 days default); 0 = never. |
-| spool.maxSize | string | `"10Gi"` | Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap. |
+| spool.maxSize | string | `"10Gi"` | Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped (with its snapshot) or truncated, and manifests are still written. `0` = no cap. |
 | spool.minFreePercent | int | `15` | Free-space floor of the spool's filesystem, in percent; below it cores are dropped. |
 | tolerations | list | `[{"operator":"Exists"}]` | Pod tolerations (defaults to tolerating everything so it runs on all nodes). |
 | upload.concurrency | int | `2` | Captures uploaded at the same time. |
@@ -190,9 +190,9 @@ daemon --> uploads ready/ (upload.concurrency at a time) --> deletes the capture
 - **Size.** `spool.maxSize` caps the spool, and `spool.minFreePercent` keeps
   free space on its filesystem. The spool shares `/var/lib` with the kubelet,
   which evicts pods under disk pressure, so keep both conservative. Only core
-  writes check them: snapshots and manifests are still written when the spool
-  is full. When the spool is full before a core starts, the core is dropped;
-  its snapshot and manifest are still spooled, with
+  writes check them: manifests are still written when the spool is full.
+  When the spool is full before a core starts, the core and its snapshot are
+  dropped; its manifest is still spooled, with
   `skipped_reason: spool_full`, and the pod gets a `CoreDumpSpoolFull` Event.
   When the spool fills while a core is written, the core is kept up to that
   point, marked `truncated_reason: spool_full`, and uploaded as usual. The

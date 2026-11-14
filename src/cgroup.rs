@@ -33,7 +33,9 @@ pub struct CgroupIdentity {
 #[must_use]
 pub fn parse_cgroup(content: &str) -> Option<CgroupIdentity> {
     content.lines().find_map(|line| {
-        let path = line.rsplit(':').next().unwrap_or(line);
+        // `hierarchy-ID:controllers:path`. The path is all text after the
+        // second `:`: a sub-cgroup name can contain `:` too.
+        let path = line.splitn(3, ':').nth(2)?;
         parse_cgroup_path(path)
     })
 }
@@ -60,9 +62,12 @@ pub fn is_pod_uid(s: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || c == b'-')
 }
 
-/// Upper bound on a pod UID. Kubernetes UIDs are 36-character UUIDs; this
-/// bound only rejects absurd values.
-pub const MAX_POD_UID_LEN: usize = 253;
+/// Upper bound on a pod UID: Kubernetes UIDs are 36-character UUIDs. With
+/// [`MAX_CONTAINER_ID_LEN`] it keeps a spool bundle name below `NAME_MAX`.
+pub const MAX_POD_UID_LEN: usize = 36;
+
+/// Upper bound on a container ID: CRI runtimes use 64 hex digits.
+pub const MAX_CONTAINER_ID_LEN: usize = 64;
 
 fn extract_pod_uid(seg: &str) -> Option<String> {
     let s = seg.strip_suffix(".slice").unwrap_or(seg);
@@ -83,7 +88,7 @@ fn extract_container_id(seg: &str) -> Option<String> {
         .or_else(|| s.strip_prefix("docker-"))
         .or_else(|| s.strip_prefix("crio-"))
         .unwrap_or(s);
-    if s.len() >= 12 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if (12..=MAX_CONTAINER_ID_LEN).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit()) {
         Some(s.to_string())
     } else {
         None
@@ -143,6 +148,30 @@ mod tests {
             assert_eq!(id.pod_uid, "aaaa1111-bbbb", "{prefix}");
             assert_eq!(id.container_id, "abcdef0123456789abcdef", "{prefix}");
         }
+    }
+
+    #[test]
+    fn a_colon_in_a_sub_cgroup_name_does_not_change_the_identity() {
+        // A container with a writable cgroupfs makes a sub-cgroup whose name
+        // holds `:` and another pod's path. The identity stays its own.
+        let victim = "/kubepods/burstable/pod0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0/\
+                      ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let content = format!(
+            "0::/kubepods/burstable/poded1e9c81-9a92-4f7e-be2c-8b26b56d3b98/\
+             3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c/x:{victim}\n"
+        );
+        let id = parse_cgroup(&content).unwrap();
+        assert_eq!(id.pod_uid, "ed1e9c81-9a92-4f7e-be2c-8b26b56d3b98");
+        assert_eq!(
+            id.container_id,
+            "3b9c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
+        );
+    }
+
+    #[test]
+    fn an_overlong_container_id_is_rejected() {
+        let long = "a".repeat(MAX_CONTAINER_ID_LEN + 1);
+        assert!(parse_cgroup_path(&format!("/kubepods/burstable/{POD}/{long}")).is_none());
     }
 
     #[test]

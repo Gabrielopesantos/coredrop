@@ -56,7 +56,7 @@ corePattern:
 spool:
   # -- Host path of the spool. Use a directory for coredrop only: the handler creates `incoming/` and `ready/` in it, and `helm uninstall` deletes them.
   hostDir: "/var/lib/coredrop/spool"
-  # -- Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped or truncated, and snapshots and manifests are still written. `0` = no cap.
+  # -- Cap on the spool's total size, as a Kubernetes quantity (`10Gi`, `500M`) or a byte count. Only core writes check it: a core that does not fit is dropped (with its snapshot) or truncated, and manifests are still written. `0` = no cap.
   maxSize: 10Gi
   # -- Free-space floor of the spool's filesystem, in percent; below it cores are dropped.
   minFreePercent: 15
@@ -75,11 +75,11 @@ upload:
 # What happens to a crash once the handler captures it: where it's counted
 # against, how much of it is kept, and where it's uploaded.
 capture:
-  # -- Cluster name - the first segment of every object key.
+  # -- Cluster name - the first segment of every object key. ASCII letters, digits, `.`, `_` and `-`.
   cluster: "local"
   # -- Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit.
   maxCoreSize: 2Gi
-  # -- Per-pod core upload budget per hour; excess crashes keep manifest + snapshot only.
+  # -- Per-pod core upload budget per hour; excess crashes keep the manifest only.
   maxCoresPerHour: 3
   # -- Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables.
   drainDeadlineSeconds: 60

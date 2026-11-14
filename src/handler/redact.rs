@@ -132,13 +132,42 @@ impl Redactor {
         let Some((key, value)) = text.split_once('=') else {
             return entry.to_vec();
         };
+        // The shell's working directories match `PWD` but hold no secret,
+        // and they help to read a crash.
+        if matches!(key, "PWD" | "OLDPWD") {
+            return entry.to_vec();
+        }
         if self.key_is_secret(key) || looks_secret_value(value) {
             return format!("{key}={REDACTED}").into_bytes();
         }
-        if let Some(rewritten) = self.redact_url(value) {
-            return format!("{key}={rewritten}").into_bytes();
+        // A connection string can hold a URL and secret pairs: run both.
+        let url = self.redact_url(value);
+        let pairs = self.redact_pairs(url.as_deref().unwrap_or(value));
+        match pairs.or(url) {
+            Some(rewritten) => format!("{key}={rewritten}").into_bytes(),
+            None => entry.to_vec(),
         }
-        entry.to_vec()
+    }
+
+    /// Redact secret-keyword values in a `;`-separated connection string
+    /// (`Server=db;Password=x`). `None` when there is nothing to redact.
+    fn redact_pairs(&self, value: &str) -> Option<String> {
+        if !value.contains(';') {
+            return None;
+        }
+        let mut changed = false;
+        let pairs = value
+            .split(';')
+            .map(|pair| match pair.split_once('=') {
+                Some((key, v)) if !v.is_empty() && self.key_is_secret(key.trim()) => {
+                    changed = true;
+                    format!("{key}={REDACTED}")
+                }
+                _ => pair.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        changed.then_some(pairs)
     }
 
     /// A valueless flag whose name matches a secret keyword (`--password`), so
@@ -163,12 +192,35 @@ impl Redactor {
         let scheme_end = value.find("://")?;
         let scheme = &value[..scheme_end];
         let rest = &value[scheme_end + 3..];
-        let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        // The authority normally ends at the first `/`, and its userinfo at
+        // the last `@` in it (a password can hold `@`). A password can also
+        // hold `/`: when no `@` comes before the first `/`, a `user:` before
+        // the first `@` still marks userinfo. A path can hold `@` too, so
+        // that fallback takes the first `@`, not the last.
+        let tail_start = rest.find(['?', '#']).unwrap_or(rest.len());
+        let head = &rest[..tail_start];
+        let first_slash = head.find('/').unwrap_or(head.len());
+        let host_start = match head[..first_slash].rfind('@') {
+            Some(at) => at + 1,
+            None => match head.find('@') {
+                Some(at)
+                    if head[..at]
+                        .split_once(':')
+                        .is_some_and(|(user, _)| !user.contains('/')) =>
+                {
+                    at + 1
+                }
+                _ => 0,
+            },
+        };
+        let auth_end = head[host_start..]
+            .find('/')
+            .map_or(tail_start, |slash| host_start + slash);
         let authority = &rest[..auth_end];
         let tail = &rest[auth_end..];
 
         let mut changed = false;
-        let authority = match authority.split_once('@') {
+        let authority = match authority.rsplit_once('@') {
             // `user:pass@host` - keep the user, drop the password.
             Some((userinfo, host)) => match userinfo.split_once(':') {
                 Some((user, password)) if !password.is_empty() => {
@@ -354,6 +406,50 @@ mod tests {
                 "REDIS_URL=redis://cache.host:6379/0",
                 "PROXY=http://justuser@proxy.host:8080",
             ],
+        );
+    }
+
+    #[test]
+    fn redacts_passwords_in_a_semicolon_connection_string() {
+        let raw = environ(&[
+            "CONN=Server=db;User Id=app;Password=hunter2;Encrypt=true",
+            "SQL=Server=db;Pwd=hunter2",
+            "MIXED=Endpoint=https://u:p@h/db;Password=hunter2",
+            "QUERY=https://h/db?pwd=hunter2",
+            "PWD=/srv/app",
+            "OLDPWD=/root",
+            "MYSQL_PWD=hunter2",
+        ]);
+        assert_eq!(
+            parse(&Redactor::default().redact_environ(&raw)),
+            vec![
+                "CONN=Server=db;User Id=app;Password=<redacted>;Encrypt=true",
+                "SQL=Server=db;Pwd=<redacted>",
+                "MIXED=Endpoint=https://u:<redacted>@h/db;Password=<redacted>",
+                "QUERY=https://h/db?pwd=<redacted>",
+                "PWD=/srv/app",
+                "OLDPWD=/root",
+                "MYSQL_PWD=<redacted>",
+            ]
+        );
+    }
+
+    #[test]
+    fn redacts_a_url_password_that_holds_at_or_slash() {
+        let raw = environ(&[
+            "A=postgres://u:p@ss@h/db",
+            "B=postgres://u:pa/ss@h/db?sslmode=require",
+            "C=https://Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiYw@h/path@v1",
+            "D=https://h/users/@me",
+        ]);
+        assert_eq!(
+            parse(&Redactor::default().redact_environ(&raw)),
+            vec![
+                "A=postgres://u:<redacted>@h/db",
+                "B=postgres://u:<redacted>@h/db?sslmode=require",
+                "C=https://<redacted>@h/path@v1",
+                "D=https://h/users/@me",
+            ]
         );
     }
 

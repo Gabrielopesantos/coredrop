@@ -10,7 +10,7 @@
 //!
 //! Everything here is bounded and buffered in memory - the snapshot is
 //! small, and only the multi-GB core ever streams. The whole bundle renders to
-//! an in-memory tar for upload to the object store.
+//! an in-memory tar, which goes into the spool bundle.
 //!
 //! The proc root is injectable so the capture logic is testable against a
 //! fixture tree instead of a live `/proc`.
@@ -111,7 +111,7 @@ impl ProcSnapshot {
         Self { build_id, files }
     }
 
-    /// Render the snapshot to an in-memory tar for object-store upload. Any
+    /// Render the snapshot to an in-memory tar for the spool bundle. Any
     /// file the cap truncated is named in a `TRUNCATED` manifest entry.
     ///
     /// # Errors

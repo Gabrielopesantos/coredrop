@@ -50,7 +50,6 @@ pub struct ManifestIdentity {
     pub restart_count: Option<u32>,
 }
 
-/// Reference to the captured core object.
 /// Why a stored core is incomplete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,11 +62,12 @@ pub enum TruncatedReason {
     StreamError,
 }
 
+/// Reference to the captured core object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs)] // DTO: fields are self-explanatory.
 pub struct CoreRef {
-    /// Whether a core was stored (`false` when no store is
-    /// configured, or the core was skipped).
+    /// Whether a core was stored (`false` when the core was skipped or
+    /// dropped). Without a store, no manifest is written.
     pub present: bool,
     pub object_key: Option<String>,
     pub sha256: Option<String>,

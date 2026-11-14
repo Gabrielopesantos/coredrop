@@ -90,6 +90,8 @@ pub async fn upload_file(
     .await;
     // `BufWriter` does not abort its multipart upload on drop, and S3/GCS
     // keep (and bill) the parts of an upload nobody completes or aborts.
+    // A cancel while `BufWriter` still creates the upload makes `abort` a
+    // no-op; parts of such an upload stay for the bucket's lifecycle rule.
     // `abort` panics once `shutdown` has been polled, so abort only here.
     let copied = copied.and_then(|r| r.map_err(anyhow::Error::from));
     if let Err(e) = copied {

@@ -15,8 +15,9 @@ pub fn node_hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
-/// Create `dir` (and parents) mode `0700` if missing - `create_dir_all`
-/// is a no-op on an existing dir and does not touch its mode.
+/// Create `dir` (and missing parents, with the umask mode) and set `dir`
+/// itself to mode `0700`, also when it exists: `create_dir_all` does not
+/// touch the mode of an existing dir.
 ///
 /// # Errors
 ///

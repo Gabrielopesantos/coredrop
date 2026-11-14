@@ -37,7 +37,8 @@ spec:
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
       # The daemon keeps uploading the spool for shutdownFlushSeconds after
-      # SIGTERM; the margin covers restoring core_pattern and exiting.
+      # SIGTERM, after it restores core_pattern; the 10 s margin covers the
+      # multipart aborts (2 s), the last Events (3 s) and exiting.
       terminationGracePeriodSeconds: {{ add .Values.upload.shutdownFlushSeconds 10 }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
       {{- with .Values.priorityClassName }}

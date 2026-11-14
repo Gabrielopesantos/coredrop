@@ -445,7 +445,9 @@ mod tests {
             chunk: chunk.clone(),
             sent: false,
         };
-        let stats = drain(&bundle, &mut reader, 1_000, u64::MAX, None).await.unwrap();
+        let stats = drain(&bundle, &mut reader, 1_000, u64::MAX, None)
+            .await
+            .unwrap();
 
         assert_eq!(stats.truncated, Some(TruncatedReason::SizeCap));
         let stored = std::fs::read(bundle.path(CORE_FILE)).unwrap();

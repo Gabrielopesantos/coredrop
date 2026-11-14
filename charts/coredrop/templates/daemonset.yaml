@@ -1,8 +1,3 @@
-{{- include "coredrop.validateStoreOpts" . }}
-{{- include "coredrop.validateSpool" . }}
-{{- include "coredrop.validateUpload" . }}
-{{- include "coredrop.validateCapture" . }}
-{{- include "coredrop.validateFilter" . }}
 {{- $binDir := clean .Values.corePattern.hostBinDir }}
 {{- $runDir := clean .Values.corePattern.hostRunDir }}
 {{- $spoolDir := clean .Values.spool.hostDir }}
@@ -44,6 +39,9 @@ spec:
       # SIGTERM; the margin covers restoring core_pattern and exiting.
       terminationGracePeriodSeconds: {{ add .Values.upload.shutdownFlushSeconds 5 }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

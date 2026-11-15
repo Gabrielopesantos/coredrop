@@ -411,9 +411,10 @@ pub async fn run(
         "core stream drained"
     );
 
-    // Step 4: Proc snapshot into the bundle (small, buffered). A crash
-    // without a core keeps no snapshot either: the spool budget does not
-    // count snapshots, and a crash loop would fill the disk with them.
+    // Step 4: Proc snapshot into the bundle (small, buffered). A
+    // rate-limited or spool-full crash keeps no snapshot either: the spool
+    // budget does not count snapshots, and a crash loop would fill the disk
+    // with them. A core-write-timeout crash keeps its snapshot.
     let keep_snapshot = !rate_suppressed && !spool_full;
     if target.is_some() && !keep_snapshot {
         info!("core is not kept; proc snapshot omitted");

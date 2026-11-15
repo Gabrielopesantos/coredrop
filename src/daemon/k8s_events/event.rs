@@ -15,7 +15,7 @@ pub(super) enum Reason {
     CoreDumped,
     CoreDumpSuppressed,
     CoreDumpSpoolFull,
-    CoreDumpDrainDeadline,
+    CoreDumpWriteTimeout,
     CoreDiscardedNoStore,
 }
 
@@ -28,7 +28,7 @@ impl Reason {
             Outcome::Uploaded => Some(Self::CoreDumped),
             Outcome::SuppressedRateLimit => Some(Self::CoreDumpSuppressed),
             Outcome::SpoolFull => Some(Self::CoreDumpSpoolFull),
-            Outcome::DrainDeadline => Some(Self::CoreDumpDrainDeadline),
+            Outcome::CoreWriteTimeout => Some(Self::CoreDumpWriteTimeout),
             Outcome::NoStoreDiscard => Some(Self::CoreDiscardedNoStore),
             Outcome::Spooled | Outcome::SkippedNonK8s | Outcome::Filtered | Outcome::Failed => None,
         }
@@ -40,7 +40,7 @@ impl Reason {
             Self::CoreDumped => "CoreDumped",
             Self::CoreDumpSuppressed => "CoreDumpSuppressed",
             Self::CoreDumpSpoolFull => "CoreDumpSpoolFull",
-            Self::CoreDumpDrainDeadline => "CoreDumpDrainDeadline",
+            Self::CoreDumpWriteTimeout => "CoreDumpWriteTimeout",
             Self::CoreDiscardedNoStore => "CoreDiscardedNoStore",
         }
     }
@@ -51,7 +51,7 @@ impl Reason {
             Self::CoreDumped => "coredumped",
             Self::CoreDumpSuppressed => "coredumpsuppressed",
             Self::CoreDumpSpoolFull => "coredumpspoolfull",
-            Self::CoreDumpDrainDeadline => "coredumpdraindeadline",
+            Self::CoreDumpWriteTimeout => "coredumpwritetimeout",
             Self::CoreDiscardedNoStore => "corediscardednostore",
         }
     }
@@ -140,7 +140,7 @@ mod tests {
             (Outcome::Uploaded, "CoreDumped"),
             (Outcome::SuppressedRateLimit, "CoreDumpSuppressed"),
             (Outcome::SpoolFull, "CoreDumpSpoolFull"),
-            (Outcome::DrainDeadline, "CoreDumpDrainDeadline"),
+            (Outcome::CoreWriteTimeout, "CoreDumpWriteTimeout"),
             (Outcome::NoStoreDiscard, "CoreDiscardedNoStore"),
         ];
         for (outcome, reason) in cases {

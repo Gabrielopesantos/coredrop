@@ -41,9 +41,9 @@ daemon, and the daemon counts it.
 | `coredrop_build_info` | gauge | `version` | Always 1 |
 
 `outcome` is one of `uploaded`, `suppressed-rate-limit`, `spool-full`,
-`drain-deadline`, `skipped-non-k8s`, `filtered`, `no-store-discard`, `failed`. A spooled
+`core-write-timeout`, `skipped-non-k8s`, `filtered`, `no-store-discard`, `failed`. A spooled
 capture is counted once, when it is done: `uploaded`, its handler outcome
-(`suppressed-rate-limit`, `spool-full`, `drain-deadline`) after its upload,
+(`suppressed-rate-limit`, `spool-full`, `core-write-timeout`) after its upload,
 or `failed` when it expires. The core byte counters and
 `coredrop_cores_truncated_total` count at the same time. Every series starts
 at 0, so `increase()` sees the first capture. Prometheus sees only the

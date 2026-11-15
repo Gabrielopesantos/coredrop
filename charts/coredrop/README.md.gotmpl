@@ -10,11 +10,11 @@ uploads the spool to an object store.
 ```sh
 helm install coredrop oci://ghcr.io/gabrielopesantos/charts/coredrop \
   -n coredrop-system --create-namespace \
-  --set capture.objectStore.url=s3://crash-artifacts \
-  --set capture.objectStore.config.AWS_REGION=us-east-1
+  --set objectStore.url=s3://crash-artifacts \
+  --set objectStore.config.AWS_REGION=us-east-1
 ```
 
-Leaving `capture.objectStore.url` empty runs coredrop **observe-only**. The
+Leaving `objectStore.url` empty runs coredrop **observe-only**. The
 handler writes nothing to the spool and does not read the core. Each crash is
 still logged (`outcome="no-store-discard"`) and reported as a
 `CoreDiscardedNoStore` Event. A URL that is set but unusable stops the daemon
@@ -27,7 +27,7 @@ Only allowlisted object-store keys are read by the daemon. The chart's
 key in `config`, so `helm install`/`template` fails before a typo reaches the
 cluster. `credentials` also takes the non-secret keys:
 
-- `capture.objectStore.config` (non-secret):
+- `objectStore.config` (non-secret):
   - `AWS_REGION`
   - `AWS_DEFAULT_REGION`
   - `AWS_ENDPOINT`
@@ -43,7 +43,7 @@ cluster. `credentials` also takes the non-secret keys:
   - `AZURE_TENANT_ID`
   - `AZURE_FEDERATED_TOKEN_FILE`
   - `AZURE_AUTHORITY_HOST`
-- `capture.objectStore.credentials` (Secret):
+- `objectStore.credentials` (Secret):
   - `AWS_ACCESS_KEY_ID`
   - `AWS_SECRET_ACCESS_KEY`
   - `AWS_SESSION_TOKEN`
@@ -92,7 +92,7 @@ daemon still listens on its socket and logs every capture.
 coredrop only writes artifacts - it never deletes them or sweeps the bucket.
 Expire old crashes with your object store's native lifecycle policy, scoped
 to the coredrop key prefix so it doesn't reach into unrelated bucket
-contents. The prefix is the path of `capture.objectStore.url`, then
+contents. The prefix is the path of `objectStore.url`, then
 `capture.clusterName`, each only when set. With neither, the keys start at
 the bucket root, and a rule can only cover the whole bucket: give coredrop
 its own bucket or a URL path. The examples use `s3://bucket/coredumps`:
@@ -187,7 +187,7 @@ daemon --> uploads ready/ (upload.concurrency at a time) --> deletes the capture
 
 ## Rate limit
 
-`capture.maxCoresPerHour` (default 3) is a per-pod sliding-window budget. The
+`capture.maxCoresPerPodPerHour` (default 3) is a per-pod sliding-window budget. The
 daemon stores the window state in `recent.json` on the same hostPath as the
 handler config (`/run/coredrop`). The daemon keeps that
 state across its own restarts, upgrades and node drains: otherwise a
@@ -199,7 +199,7 @@ its existing window rather than getting a new one.
 ## Workload identity
 
 For IRSA/GKE Workload Identity/AKS Workload Identity, leave
-`capture.objectStore.credentials` empty and annotate the service account:
+`objectStore.credentials` empty and annotate the service account:
 
 ```yaml
 serviceAccount:

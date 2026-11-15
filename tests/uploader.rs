@@ -108,7 +108,7 @@ async fn uploads_bundles_deletes_them_and_reports_final_outcomes() {
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.max_cores_per_hour = 1;
+    config.max_cores_per_pod_per_hour = 1;
 
     let core_payload = b"core payload for the uploader";
     capture(&config, pid, ts, core_payload).await;

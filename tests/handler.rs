@@ -219,7 +219,7 @@ async fn run_reports_each_outcome_on_the_events_socket() {
 
     let mut config = base_config(tmp.path());
     config.event_socket_path = sock_path;
-    config.max_cores_per_hour = 1;
+    config.max_cores_per_pod_per_hour = 1;
 
     // The budget is 1. The first crash is spooled. The handler suppresses the
     // second crash.
@@ -345,7 +345,7 @@ async fn run_rate_limit_suppresses_core_keeps_manifest() {
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.max_cores_per_hour = 1;
+    config.max_cores_per_pod_per_hour = 1;
 
     for ts in [TS, TS + 10] {
         let core_in: &[u8] = b"core payload for rate limit test";
@@ -388,7 +388,7 @@ async fn run_rate_limit_keys_by_pod_uid_not_container_id() {
     write_fixture_proc(tmp.path(), pid_1, POD_UID, CONTAINER_ID);
     write_fixture_proc(tmp.path(), pid_2, POD_UID, container_id_2);
     let mut config = base_config(tmp.path());
-    config.max_cores_per_hour = 1;
+    config.max_cores_per_pod_per_hour = 1;
 
     for (pid, ts) in [(pid_1, TS), (pid_2, TS + 10)] {
         let core_in: &[u8] = b"core payload for pod-uid rate limit test";
@@ -421,7 +421,7 @@ async fn run_full_spool_drops_core_keeps_manifest_and_refunds_budget() {
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.max_cores_per_hour = 1;
+    config.max_cores_per_pod_per_hour = 1;
     // A 100% free-space floor can never be met.
     config.spool_min_free_percent = 100;
 
@@ -454,12 +454,12 @@ async fn run_full_spool_drops_core_keeps_manifest_and_refunds_budget() {
     );
 }
 
-/// Drain deadline: a stalled drain cannot hold the handler (and its
+/// Core write timeout: a stalled drain cannot hold the handler (and its
 /// `core_pipe_limit` slot) forever. Once the deadline passes, the partial core
-/// is deleted, the snapshot and a `drain_deadline` manifest are spooled, and
+/// is deleted, the snapshot and a `core_write_timeout` manifest are spooled, and
 /// the crash refunds its rate-limit budget.
 #[tokio::test(start_paused = true)]
-async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
+async fn run_core_write_timeout_keeps_metadata_and_refunds_budget() {
     use tokio::io::AsyncReadExt;
     let _guard = common::SPAWN_LOCK.lock().await;
 
@@ -470,8 +470,8 @@ async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.drain_deadline_secs = 5;
-    config.max_cores_per_hour = 1;
+    config.core_write_timeout_secs = 5;
+    config.max_cores_per_pod_per_hour = 1;
     config.event_socket_path = sock_path;
 
     // Some bytes arrive, then the pipe stalls.
@@ -491,12 +491,12 @@ async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
     assert!(manifest.core.object_key.is_none());
     assert_eq!(
         manifest.core.skipped_reason.as_deref(),
-        Some("drain_deadline")
+        Some("core_write_timeout")
     );
     let capture = read_capture(&bundle);
-    assert_eq!(capture.outcome, Outcome::DrainDeadline);
+    assert_eq!(capture.outcome, Outcome::CoreWriteTimeout);
     assert_eq!(capture.core_bytes, b"partial core bytes".len() as u64);
-    assert_eq!(recv_event(&listener).outcome, Outcome::DrainDeadline);
+    assert_eq!(recv_event(&listener).outcome, Outcome::CoreWriteTimeout);
 
     // The dropped core refunded the budget of 1: the next crash is spooled.
     let core_in: &[u8] = b"core payload after the deadline";
@@ -517,8 +517,8 @@ async fn run_rate_limited_capture_does_not_read_the_core() {
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.drain_deadline_secs = 0;
-    config.max_cores_per_hour = 1;
+    config.core_write_timeout_secs = 0;
+    config.max_cores_per_pod_per_hour = 1;
 
     let core_in: &[u8] = b"core payload that uses the budget";
     run(capture_args(pid, 11, TS), &config, core_in)
@@ -552,7 +552,7 @@ async fn run_spool_full_capture_does_not_read_the_core() {
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.drain_deadline_secs = 0;
+    config.core_write_timeout_secs = 0;
     // A 100% free-space floor can never be met.
     config.spool_min_free_percent = 100;
 
@@ -587,7 +587,7 @@ async fn run_unusable_spool_reports_failed_without_reading_the_core() {
     // A file where the spool directory should be.
     std::fs::write(&config.spool_dir, b"not a directory").unwrap();
 
-    config.drain_deadline_secs = 0;
+    config.core_write_timeout_secs = 0;
     assert!(
         run_without_reading(capture_args(pid, 11, TS), &config)
             .await
@@ -618,9 +618,9 @@ async fn run_without_store_discards_silently() {
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
     config.store_configured = false;
-    config.max_cores_per_hour = 1;
+    config.max_cores_per_pod_per_hour = 1;
 
-    config.drain_deadline_secs = 0;
+    config.core_write_timeout_secs = 0;
     run_without_reading(capture_args(pid, 6, 1_000_000), &config)
         .await
         .unwrap();
@@ -653,7 +653,7 @@ async fn run_non_kubernetes_cgroup_spools_nothing_and_reports_skipped() {
     let mut config = base_config(tmp.path());
     config.event_socket_path = sock_path;
 
-    config.drain_deadline_secs = 0;
+    config.core_write_timeout_secs = 0;
     run_without_reading(capture_args(pid, 9, 2_000_000), &config)
         .await
         .unwrap();

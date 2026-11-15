@@ -114,7 +114,7 @@ retention.
 
 ```sh
 helm install coredrop charts/coredrop -n coredrop-system --create-namespace \
-  --set capture.objectStore.url=s3://crash-artifacts
+  --set objectStore.url=s3://crash-artifacts
 ```
 
 Without a store URL, coredrop runs observe-only: crashes are logged and

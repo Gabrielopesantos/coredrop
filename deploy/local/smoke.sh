@@ -88,12 +88,12 @@ mc alias set "$MC_ALIAS" "http://127.0.0.1:$LOCAL_PORT" minioadmin minioadmin >/
 # satisfy (or break) the assertions below.
 mc rm --recursive --force "$MC_ALIAS/$BUCKET" >/dev/null 2>&1 || true
 # Restart the demo after the purge: a new pod uploads its first
-# max-cores-per-hour cores within seconds, and a purge after them would leave
+# max-cores-per-pod-per-hour cores within seconds, and a purge after them would leave
 # only rate-limited manifests, which have no core.
 restart_demo
 
 # Scope the k8s Events (8c/8d below) to this run's crash pod. A CoreDumped
-# Event fires only for the first max-cores-per-hour captures of a pod, so it
+# Event fires only for the first max-cores-per-pod-per-hour captures of a pod, so it
 # can be older than this point. `regarding.name` is a selectable field on
 # events.k8s.io/v1 Events.
 # Use the running pod of the active ReplicaSet (replicas > 0). During a

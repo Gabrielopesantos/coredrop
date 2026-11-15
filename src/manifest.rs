@@ -82,7 +82,7 @@ pub struct CoreRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated_reason: Option<TruncatedReason>,
     /// Why no core was stored despite a configured store: `rate_limit` |
-    /// `spool_full` | `drain_deadline`. Absent when a core is present.
+    /// `spool_full` | `core_write_timeout`. Absent when a core is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_reason: Option<String>,
     /// Compression codec applied to the stored object.

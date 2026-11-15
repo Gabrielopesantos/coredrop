@@ -46,7 +46,7 @@ use crate::cgroup::{self, CgroupIdentity};
 use crate::config::HandlerConfig;
 use crate::events::{self, CaptureEventPayload, Outcome};
 use crate::filter::Subject;
-use crate::handler::drain::{CoreDrain, CoreStats, DrainDeadline};
+use crate::handler::drain::{CoreDrain, CoreStats, CoreWriteTimeout};
 use crate::handler::ratelimit::{RateDecision, RateLimiter};
 use crate::handler::redact::Redactor;
 use crate::handler::snapshot::ProcSnapshot;
@@ -259,7 +259,7 @@ pub async fn run(
     };
 
     // Rate limit: consult only when a core would be kept.
-    let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_hour);
+    let limiter = RateLimiter::new(&config.rate_state_path, config.max_cores_per_pod_per_hour);
     // Set while this crash holds a rate-limit slot. A refund clears it, so a
     // slot is never given back twice: a second refund would remove another
     // crash's entry with the same timestamp.
@@ -270,7 +270,7 @@ pub async fn run(
                 warn!(
                     pod_uid = %t.identity.pod_uid,
                     recent,
-                    max_per_hour = config.max_cores_per_hour,
+                    max_per_hour = config.max_cores_per_pod_per_hour,
                     "per-pod core budget exhausted - discarding core and snapshot, keeping the manifest"
                 );
                 true
@@ -312,8 +312,8 @@ pub async fn run(
     // Step 3: Drain a kept core, then release the kernel's pipe. A core that
     // is not kept is never read: the closed pipe stops the dump, so the
     // kernel reaps the crashed process sooner.
-    let deadline = (config.drain_deadline_secs != 0)
-        .then(|| std::time::Duration::from_secs(config.drain_deadline_secs));
+    let deadline = (config.core_write_timeout_secs != 0)
+        .then(|| std::time::Duration::from_secs(config.core_write_timeout_secs));
     let drained = match &target {
         Some(t) if !rate_suppressed && !spool_full => {
             info!(bundle = %t.bundle.path("").display(), "spooling core");
@@ -336,14 +336,14 @@ pub async fn run(
         }
     };
     drop(core_in);
-    // A kept core that passes the drain deadline is dropped. The capture
+    // A kept core that passes the core write timeout is dropped. The capture
     // keeps its snapshot and manifest, like a rate-limited or spool-full one.
-    let drain_deadline = match (&drained, &target) {
-        (Err(e), Some(_)) => e.downcast_ref::<DrainDeadline>().copied(),
+    let core_write_timeout = match (&drained, &target) {
+        (Err(e), Some(_)) => e.downcast_ref::<CoreWriteTimeout>().copied(),
         _ => None,
     };
-    let drained = match (drain_deadline, &target) {
-        (Some(DrainDeadline { bytes }), Some(t)) => {
+    let drained = match (core_write_timeout, &target) {
+        (Some(CoreWriteTimeout { bytes }), Some(t)) => {
             warn!(
                 bytes,
                 "core drain exceeded the deadline - dropping core, keeping snapshot + manifest"
@@ -474,8 +474,8 @@ pub async fn run(
         Some("rate_limit")
     } else if spool_full {
         Some("spool_full")
-    } else if drain_deadline.is_some() {
-        Some("drain_deadline")
+    } else if core_write_timeout.is_some() {
+        Some("core_write_timeout")
     } else {
         None
     };
@@ -513,8 +513,8 @@ pub async fn run(
         Outcome::SuppressedRateLimit
     } else if spool_full {
         Outcome::SpoolFull
-    } else if drain_deadline.is_some() {
-        Outcome::DrainDeadline
+    } else if core_write_timeout.is_some() {
+        Outcome::CoreWriteTimeout
     } else {
         Outcome::Spooled
     };

@@ -82,15 +82,15 @@ pub(crate) struct DaemonArgs {
 
     /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
     /// crashes still get a manifest, but no core and no proc snapshot.
-    #[arg(long, default_value_t = crate::config::DEFAULT_MAX_CORES_PER_HOUR)]
-    pub(crate) max_cores_per_hour: u32,
+    #[arg(long, default_value_t = crate::config::DEFAULT_MAX_CORES_PER_POD_PER_HOUR)]
+    pub(crate) max_cores_per_pod_per_hour: u32,
 
     /// Wall-clock deadline (seconds) for draining one core into the spool;
     /// 0 = no deadline. On expiry the handler drops the core and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
     /// A core already truncated by a size limit keeps its stored part.
-    #[arg(long, default_value_t = crate::config::DEFAULT_DRAIN_DEADLINE_SECS)]
-    pub(crate) drain_deadline_secs: u64,
+    #[arg(long, default_value_t = crate::config::DEFAULT_CORE_WRITE_TIMEOUT_SECS)]
+    pub(crate) core_write_timeout_secs: u64,
 
     /// Spool root on the node: the handler writes capture bundles here and
     /// the daemon uploads them.
@@ -264,8 +264,8 @@ impl DaemonArgs {
             crictl_path: self.crictl_path.clone(),
             cri_runtime_endpoint: self.cri_runtime_endpoint.clone(),
             max_core_bytes: self.max_core_bytes,
-            max_cores_per_hour: self.max_cores_per_hour,
-            drain_deadline_secs: self.drain_deadline_secs,
+            max_cores_per_pod_per_hour: self.max_cores_per_pod_per_hour,
+            core_write_timeout_secs: self.core_write_timeout_secs,
             crictl_timeout_secs: self.crictl_timeout_secs,
             spool_dir: self.spool_dir.clone(),
             spool_max_bytes: self.spool_max_bytes,
@@ -354,14 +354,14 @@ mod tests {
         for bad in [
             "spool.maxSize=10GB",
             "upload.concurrency=0",
-            "capture.maxCoresPerHour=1.5",
+            "capture.maxCoresPerPodPerHour=1.5",
             "spool.minFreePercent=101",
             "capture.clusterName=a/b",
-            "capture.objectStore.config.TYPO=x",
+            "objectStore.config.TYPO=x",
             "capture.filter.exlude=x",
             "spool.hostDir=/",
             "corePattern.hostBinDir=/bin",
-            "capture.objectStore.config.AWS_SECRET_ACCESS_KEY=x",
+            "objectStore.config.AWS_SECRET_ACCESS_KEY=x",
             "podLabels.app\\.kubernetes\\.io/name=x",
         ] {
             assert!(
@@ -384,7 +384,7 @@ mod tests {
         let edges = [
             "spool.maxSize=8Ei",
             "capture.maxCoreSize=0",
-            "capture.maxCoresPerHour=4294967295",
+            "capture.maxCoresPerPodPerHour=4294967295",
             "corePattern.pipeLimit=4294967295",
             "corePattern.hostBinDir=/opt/coredrop/bin/",
             "upload.concurrency=64",
@@ -394,13 +394,13 @@ mod tests {
             "capture.clusterName=eu-west_1.prod",
             "capture.filter.exclude[0].namespace=kube-*",
             "capture.filter.include[0].exe=*/server",
-            "capture.objectStore.url=s3://bucket",
+            "objectStore.url=s3://bucket",
             "cri.runtimeEndpoint=unix:///run/containerd/containerd.sock",
             "metrics.enabled=false",
             "events.enabled=false",
         ];
         let args = load_with_file(&render_chart_config(&edges), &[]).unwrap();
-        assert_eq!(args.max_cores_per_hour, u32::MAX);
+        assert_eq!(args.max_cores_per_pod_per_hour, u32::MAX);
         assert_eq!(args.upload_concurrency, 64);
         assert_eq!(
             args.handler_path,
@@ -436,7 +436,7 @@ mod tests {
         let args = load_with_file(
             "cluster-name: prod\n\
              max-core-size: 1Gi\n\
-             max-cores-per-hour: 7\n\
+             max-cores-per-pod-per-hour: 7\n\
              no-redact: true\n\
              store-url: s3://bucket\n\
              metrics-addr: \"\"\n\
@@ -446,7 +446,7 @@ mod tests {
         .unwrap();
         assert_eq!(args.cluster_name.as_deref(), Some("prod"));
         assert_eq!(args.max_core_bytes, 1 << 30);
-        assert_eq!(args.max_cores_per_hour, 7);
+        assert_eq!(args.max_cores_per_pod_per_hour, 7);
         assert!(args.no_redact);
         assert_eq!(args.store_url.as_deref(), Some("s3://bucket"));
         assert_eq!(args.metrics_addr, MetricsAddr(None));
@@ -499,12 +499,12 @@ mod tests {
     #[test]
     fn a_flag_wins_over_the_config_file() {
         let args = load_with_file(
-            "cluster-name: prod\nmax-cores-per-hour: 7\n",
+            "cluster-name: prod\nmax-cores-per-pod-per-hour: 7\n",
             &["--cluster-name", "dev"],
         )
         .unwrap();
         assert_eq!(args.cluster_name.as_deref(), Some("dev"));
-        assert_eq!(args.max_cores_per_hour, 7);
+        assert_eq!(args.max_cores_per_pod_per_hour, 7);
     }
 
     #[test]
@@ -522,7 +522,10 @@ mod tests {
             ("clusters: null\n", "unknown key `clusters`"),
             ("config: /other.yaml\n", "unknown key `config`"),
             ("help: true\n", "unknown key `help`"),
-            ("max-cores-per-hour: many\n", "`max-cores-per-hour`"),
+            (
+                "max-cores-per-pod-per-hour: many\n",
+                "`max-cores-per-pod-per-hour`",
+            ),
             ("max-core-size: 2Zi\n", "`max-core-size`"),
             ("spool-min-free-percent: 101\n", "`spool-min-free-percent`"),
             ("no-redact: yes please\n", "`no-redact`"),

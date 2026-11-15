@@ -95,12 +95,12 @@ pub const DEFAULT_PROC_ROOT: &str = "/proc";
 pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Default per-pod core-upload budget per hour.
-pub const DEFAULT_MAX_CORES_PER_HOUR: u32 = 3;
+pub const DEFAULT_MAX_CORES_PER_POD_PER_HOUR: u32 = 3;
 
 /// Default deadline for draining one core into the spool: 1 minute.
 /// The handler holds one of the node's `core_pipe_limit` slots while it
 /// drains, so a hung disk must not be able to hold it indefinitely.
-pub const DEFAULT_DRAIN_DEADLINE_SECS: u64 = 60;
+pub const DEFAULT_CORE_WRITE_TIMEOUT_SECS: u64 = 60;
 
 /// Default timeout for `crictl inspect` in the handler.
 pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
@@ -164,12 +164,12 @@ pub struct HandlerConfig {
     pub max_core_bytes: u64,
     /// Max core uploads per pod per hour; `0` = unlimited. Suppressed
     /// crashes still get a manifest, but no core and no proc snapshot.
-    pub max_cores_per_hour: u32,
+    pub max_cores_per_pod_per_hour: u32,
     /// Deadline in seconds for draining the core into the spool; `0` = no
     /// deadline. On expiry the handler stops reading, keeps a core that was
     /// already truncated (else drops it), spools the manifest and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
-    pub drain_deadline_secs: u64,
+    pub core_write_timeout_secs: u64,
     /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
     /// crictl runs after the handler releases the core pipe, so this only
     /// bounds how long the capture takes to reach the spool. A capture filter
@@ -204,8 +204,8 @@ impl Default for HandlerConfig {
             crictl_path: None,
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
-            max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
-            drain_deadline_secs: DEFAULT_DRAIN_DEADLINE_SECS,
+            max_cores_per_pod_per_hour: DEFAULT_MAX_CORES_PER_POD_PER_HOUR,
+            core_write_timeout_secs: DEFAULT_CORE_WRITE_TIMEOUT_SECS,
             crictl_timeout_secs: DEFAULT_CRICTL_TIMEOUT_SECS,
             spool_dir: PathBuf::from(spool::DEFAULT_SPOOL_DIR),
             spool_max_bytes: spool::DEFAULT_SPOOL_MAX_BYTES,
@@ -399,8 +399,8 @@ mod tests {
             crictl_path: Some("/usr/local/bin/crictl".into()),
             cri_runtime_endpoint: Some("unix:///run/containerd/containerd.sock".into()),
             max_core_bytes: 1024,
-            max_cores_per_hour: 5,
-            drain_deadline_secs: 60,
+            max_cores_per_pod_per_hour: 5,
+            core_write_timeout_secs: 60,
             crictl_timeout_secs: 15,
             spool_dir: "/var/lib/coredrop/spool".into(),
             spool_max_bytes: 1 << 30,

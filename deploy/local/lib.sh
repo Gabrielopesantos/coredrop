@@ -134,7 +134,7 @@ install_coredrop() {
   helm upgrade --install "$RELEASE" "$REPO_ROOT/charts/coredrop" \
     -n "$NAMESPACE" \
     -f "$SCRIPT_DIR/helm-values/coredrop.local.yaml" \
-    --set "capture.objectStore.config.AWS_ENDPOINT=http://$minio_cluster_ip:9000" \
+    --set "objectStore.config.AWS_ENDPOINT=http://$minio_cluster_ip:9000" \
     "${monitoring_args[@]}" \
     "$@" \
     --wait --timeout 120s

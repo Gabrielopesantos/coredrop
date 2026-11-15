@@ -10,11 +10,11 @@ credentials come from the Secret, the node name from the downward API.
   "pipe-limit" (int64 .Values.corePattern.pipeLimit)
   "core-pattern-path" "/host/sysctl/core_pattern"
   "core-pipe-limit-path" "/host/sysctl/core_pipe_limit"
-  "no-redact" .Values.capture.noRedact
+  "no-redact" (not .Values.capture.redact)
   "max-core-size" (include "coredrop.size" (dict "value" .Values.capture.maxCoreSize))
-  "max-cores-per-hour" (int64 .Values.capture.maxCoresPerHour)
-  "drain-deadline-secs" (int64 .Values.capture.drainDeadlineSeconds)
-  "crictl-timeout-secs" (int64 .Values.capture.crictlTimeoutSeconds)
+  "max-cores-per-pod-per-hour" (int64 .Values.capture.maxCoresPerPodPerHour)
+  "core-write-timeout-secs" (int64 .Values.capture.coreWriteTimeoutSeconds)
+  "crictl-timeout-secs" (int64 .Values.cri.timeoutSeconds)
   "capture-filter" (.Values.capture.filter | default dict)
   "spool-dir" (clean .Values.spool.hostDir)
   "spool-max-size" (include "coredrop.size" (dict "value" .Values.spool.maxSize))
@@ -26,7 +26,7 @@ credentials come from the Secret, the node name from the downward API.
   "no-events" (not .Values.events.enabled)
   "metrics-addr" (ternary (printf "0.0.0.0:%v" .Values.metrics.port) "" .Values.metrics.enabled)
 }}
-{{- with .Values.capture.objectStore.url }}
+{{- with .Values.objectStore.url }}
 {{- $_ := set $config "store-url" . }}
 {{- end }}
 {{- with .Values.capture.clusterName }}

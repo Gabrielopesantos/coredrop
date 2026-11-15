@@ -14,8 +14,8 @@ For the Helm values that set these flags, see the
 | `--cluster-name` | unset | Name of the cluster: the first segment of the object keys and the manifest's `cluster_name`; ASCII letters, digits, `.`, `_` and `-`. Unset leaves both out |
 | `--store-url` | unset | `s3://bucket`/`gs://...`/`az://...`; a path after the bucket (`s3://bucket/coredumps`) is a key prefix, and keys in manifests and Events are relative to it; unset = observe-only: crashes are logged and reported, no cores are kept |
 | `--max-core-size` | `2Gi` | Stored core cap per crash; 0 = unlimited |
-| `--max-cores-per-hour` | 3 | Per-pod core budget; 0 = unlimited |
-| `--drain-deadline-secs` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled. A core already truncated by the size cap or the spool budget keeps its stored part; 0 = no deadline |
+| `--max-cores-per-pod-per-hour` | 3 | Per-pod core budget; 0 = unlimited |
+| `--core-write-timeout-secs` | 60 | Time limit for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled. A core already truncated by the size cap or the spool budget keeps its stored part; 0 = no deadline |
 | `--spool-dir` | `/var/lib/coredrop/spool` | Spool root on the node |
 | `--spool-max-size` | `10Gi` | Spool size cap; 0 = no cap |
 | `--spool-min-free-percent` | 15 | Free-space floor of the spool's filesystem |
@@ -48,7 +48,7 @@ startup on an unknown key or a bad value.
 cluster-name: prod
 store-url: s3://crash-artifacts
 max-core-size: 2Gi
-max-cores-per-hour: 3
+max-cores-per-pod-per-hour: 3
 no-events: false
 capture-filter:
   exclude:

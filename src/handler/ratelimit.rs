@@ -76,7 +76,7 @@ impl RateLimiter {
     }
 
     /// Give back a slot recorded by `check_and_record` whose capture kept no
-    /// core (a full spool, the drain deadline, a drain or commit error).
+    /// core (a full spool, the core write timeout, a drain or commit error).
     /// Without the refund, a transient disk problem would eat the whole
     /// budget with zero cores kept. Best-effort: errors are logged and swallowed.
     pub fn refund(&self, scope: &str, recorded_at: i64) {

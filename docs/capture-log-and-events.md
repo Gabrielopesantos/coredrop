@@ -45,7 +45,7 @@ LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
 | Core uploaded | `CoreDumped` |
 | Rate-limit budget exhausted | `CoreDumpSuppressed` |
 | Spool full, core dropped | `CoreDumpSpoolFull` |
-| Drain deadline passed, core dropped | `CoreDumpDrainDeadline` |
+| Core write timeout passed, core dropped | `CoreDumpWriteTimeout` |
 | No object store configured | `CoreDiscardedNoStore` |
 
 A spooled capture gets its Event once it is uploaded, so the manifest key in

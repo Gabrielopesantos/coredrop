@@ -60,8 +60,8 @@ jobs:
             --set metrics.podMonitor.enabled=true >/dev/null
           nix develop -c helm template coredrop charts/coredrop \
             --set events.enabled=false --set cleanup.enabled=false \
-            --set capture.objectStore.url=s3://bucket \
-            --set capture.objectStore.credentials.AWS_SECRET_ACCESS_KEY=x >/dev/null
+            --set objectStore.url=s3://bucket \
+            --set objectStore.credentials.AWS_SECRET_ACCESS_KEY=x >/dev/null
           nix develop -c jq empty dashboards/coredrop.json
           nix develop -c sh -c 'python3 dashboards/generate.py | diff -u dashboards/coredrop.json -'
       - name: promtool check rules

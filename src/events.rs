@@ -33,7 +33,7 @@ pub enum Outcome {
     SpoolFull,
     /// The core did not drain before the deadline; snapshot and manifest are
     /// spooled.
-    DrainDeadline,
+    CoreWriteTimeout,
     SkippedNonK8s,
     /// The capture filter dropped the crash; the core is not read.
     Filtered,
@@ -48,7 +48,7 @@ impl Outcome {
         Outcome::Uploaded,
         Outcome::SuppressedRateLimit,
         Outcome::SpoolFull,
-        Outcome::DrainDeadline,
+        Outcome::CoreWriteTimeout,
         Outcome::SkippedNonK8s,
         Outcome::Filtered,
         Outcome::NoStoreDiscard,
@@ -65,7 +65,7 @@ impl Outcome {
             Outcome::Spooled
                 | Outcome::SuppressedRateLimit
                 | Outcome::SpoolFull
-                | Outcome::DrainDeadline
+                | Outcome::CoreWriteTimeout
         )
     }
 
@@ -77,7 +77,7 @@ impl Outcome {
             Outcome::Uploaded => "uploaded",
             Outcome::SuppressedRateLimit => "suppressed-rate-limit",
             Outcome::SpoolFull => "spool-full",
-            Outcome::DrainDeadline => "drain-deadline",
+            Outcome::CoreWriteTimeout => "core-write-timeout",
             Outcome::SkippedNonK8s => "skipped-non-k8s",
             Outcome::Filtered => "filtered",
             Outcome::NoStoreDiscard => "no-store-discard",

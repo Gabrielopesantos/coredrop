@@ -472,10 +472,16 @@ fn read_capture(dir: &Path) -> Result<CaptureEventPayload> {
 }
 
 /// The bundle names in `dir`.
+/// An entry error fails the listing: a short list would make
+/// `Uploader::scan` forget the state of the bundles it misses.
 fn list_names(dir: &Path) -> std::io::Result<Vec<String>> {
-    Ok(std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .collect())
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        if let Ok(name) = entry?.file_name().into_string() {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 /// Delete bundles in `incoming/` older than [`INCOMING_MAX_AGE`].

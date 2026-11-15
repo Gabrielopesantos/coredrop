@@ -59,10 +59,11 @@ jobs:
       - name: Push per-arch image
         env:
           VERSION: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${VERSION#app-v}"
-          nix develop -c skopeo login ghcr.io \
-            -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          printf '%s' "$GH_TOKEN" | nix develop -c skopeo login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
           nix develop -c skopeo copy \
             "docker-archive:$(readlink -f result)" \
             "docker://${IMAGE}:${VERSION}-${{ matrix.arch }}"
@@ -110,17 +111,21 @@ jobs:
       # The chart's default image tag must exist, or a default install
       # pulls nothing.
       - name: Guard appVersion image exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           APP_VER="$(nix develop -c yq '.appVersion' charts/coredrop/Chart.yaml)"
-          nix develop -c skopeo login ghcr.io \
-            -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          printf '%s' "$GH_TOKEN" | nix develop -c skopeo login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
           if ! nix develop -c skopeo inspect --raw "docker://${IMAGE}:${APP_VER}" >/dev/null; then
             echo "image ${IMAGE}:${APP_VER} (Chart.yaml appVersion) does not exist; push app-v${APP_VER} first" >&2
             exit 1
           fi
       - name: Package and push chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          nix develop -c helm registry login ghcr.io \
-            -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          printf '%s' "$GH_TOKEN" | nix develop -c helm registry login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
           nix develop -c helm package charts/coredrop
           nix develop -c helm push coredrop-*.tgz "${CHART_REPO}"

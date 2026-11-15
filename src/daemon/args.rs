@@ -326,25 +326,46 @@ mod tests {
         doc["data"]["config.yaml"].as_str().unwrap().to_string()
     }
 
-    /// The chart refuses values that only it can check: paths whose cleanup
-    /// would delete host files, a secret rendered as plain env, and labels
-    /// that break the `DaemonSet` selector. Needs `helm`, so CI runs it on its
-    /// own: `cargo test --lib -- --ignored chart_`.
+    /// The chart refuses bad values: malformed or out-of-range values, unknown
+    /// keys, paths whose cleanup would delete host files, a secret rendered
+    /// as plain env, and labels that break the `DaemonSet` selector. Needs
+    /// `helm`, so CI runs it on its own: `cargo test --lib -- --ignored chart_`.
     #[test]
     #[ignore = "needs helm"]
-    fn chart_rejects_unsafe_values() {
+    fn chart_rejects_bad_values() {
         let chart = concat!(env!("CARGO_MANIFEST_DIR"), "/charts/coredrop");
+        let template = |set: &[&str]| {
+            let mut cmd = std::process::Command::new("helm");
+            cmd.args(["template", "t", chart]);
+            for s in set {
+                cmd.args(["--set", s]);
+            }
+            cmd.output().expect("helm runs (use `nix develop`)")
+        };
+        // Each bad value must be the only reason for a failure.
+        let ok = template(&[]);
+        assert!(
+            ok.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
         for bad in [
+            "spool.maxSize=10GB",
+            "upload.concurrency=0",
+            "capture.maxCoresPerHour=1.5",
+            "spool.minFreePercent=101",
+            "capture.cluster=a/b",
+            "capture.objectStore.config.TYPO=x",
+            "capture.filter.exlude=x",
             "spool.hostDir=/",
             "corePattern.hostBinDir=/bin",
             "capture.objectStore.config.AWS_SECRET_ACCESS_KEY=x",
             "podLabels.app\\.kubernetes\\.io/name=x",
         ] {
-            let out = std::process::Command::new("helm")
-                .args(["template", "t", chart, "--set", bad])
-                .output()
-                .expect("helm runs (use `nix develop`)");
-            assert!(!out.status.success(), "the chart accepted {bad}");
+            assert!(
+                !template(&[bad]).status.success(),
+                "the chart accepted {bad}"
+            );
         }
     }
 

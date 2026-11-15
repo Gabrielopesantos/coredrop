@@ -32,7 +32,7 @@ jobs:
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" nix develop -c cargo doc --no-deps
       # The chart and the daemon agree: each config the chart renders loads
-      # in the daemon's parser, and the chart refuses unsafe values (needs
+      # in the daemon's parser, and the chart refuses bad values (needs
       # helm, so these are ignored tests).
       - name: Chart tests
         run: nix develop -c cargo test --lib -- --ignored chart_

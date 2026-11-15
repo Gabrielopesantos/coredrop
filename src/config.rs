@@ -169,8 +169,9 @@ pub struct HandlerConfig {
     /// crashes still get a manifest, but no core and no proc snapshot.
     pub max_cores_per_hour: u32,
     /// Deadline in seconds for draining the core into the spool; `0` = no
-    /// deadline. On expiry the handler drops the core and exits, freeing its
-    /// `core_pipe_limit` slot instead of letting a hung disk hold it.
+    /// deadline. On expiry the handler stops reading, keeps a core that was
+    /// already truncated (else drops it), spools the manifest and exits,
+    /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
     pub drain_deadline_secs: u64,
     /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
     /// crictl runs after the handler releases the core pipe, so this only
@@ -181,9 +182,9 @@ pub struct HandlerConfig {
     /// Spool root on the node: where the handler writes capture bundles for
     /// the daemon to upload.
     pub spool_dir: PathBuf,
-    /// Cap on the spool's total size in bytes; `0` = no cap. A core that does
-    /// not fit is dropped, with its proc snapshot; its manifest is still
-    /// spooled.
+    /// Cap on the spool's total size in bytes; `0` = no cap. A core that
+    /// does not fit is truncated at the cap; when nothing fits, the crash
+    /// spools only its manifest.
     pub spool_max_bytes: u64,
     /// Free-space floor of the spool's filesystem, in percent.
     pub spool_min_free_percent: u8,

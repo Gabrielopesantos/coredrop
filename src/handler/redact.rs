@@ -99,9 +99,13 @@ impl Redactor {
         }
         let mut out = Vec::with_capacity(raw.len());
         let mut redact_next = false;
-        for arg in raw.split(|&b| b == 0) {
-            if arg.is_empty() {
-                continue;
+        // Each arg ends with a NUL. Empty args stay: `--password ""` takes
+        // the empty value, and dropping it would redact the next arg and
+        // change the argv layout.
+        let args = raw.strip_suffix(&[0]).unwrap_or(raw);
+        for (i, arg) in args.split(|&b| b == 0).enumerate() {
+            if i > 0 {
+                out.push(0);
             }
             if redact_next {
                 out.extend_from_slice(REDACTED.as_bytes());
@@ -110,6 +114,8 @@ impl Redactor {
                 redact_next = Self::is_secret_flag(arg);
                 out.extend_from_slice(&Self::redact_entry(arg));
             }
+        }
+        if raw.ends_with(&[0]) {
             out.push(0);
         }
         out
@@ -499,6 +505,15 @@ mod tests {
                 "--url=postgres://u:<redacted>@h/db",
                 "/etc/config.yaml",
             ],
+        );
+    }
+
+    #[test]
+    fn cmdline_keeps_empty_arguments() {
+        let raw = environ(&["app", "--password", "", "--verbose", ""]);
+        assert_eq!(
+            Redactor::default().redact_cmdline(&raw),
+            environ(&["app", "--password", "<redacted>", "--verbose", ""]),
         );
     }
 

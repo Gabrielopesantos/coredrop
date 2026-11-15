@@ -35,7 +35,7 @@ daemon, and the daemon counts it.
 | `coredrop_spool_oldest_bundle_age_seconds` | gauge | - | Age of the oldest capture waiting for upload; 0 when none waits. A capture that is uploaded but not yet deleted does not wait |
 | `coredrop_spool_max_bytes` | gauge | - | `--spool-max-size`; 0 = no limit |
 | `coredrop_core_pattern_installed` | gauge | - | 1 when the node's `core_pattern` routes cores to the handler, else 0 |
-| `coredrop_events_posted_total` | counter | `result` = `ok`/`error` | k8s Event create and patch requests |
+| `coredrop_events_posted_total` | counter | `result` = `ok`/`error` | Captures posted as a k8s Event, by result. A patch that falls back to a create counts once |
 | `coredrop_events_dropped_total` | counter | - | k8s Events dropped before a request because the post queue was full |
 | `coredrop_event_payloads_dropped_total` | counter | - | Capture datagrams the daemon could not parse |
 | `coredrop_build_info` | gauge | `version` | Always 1 |

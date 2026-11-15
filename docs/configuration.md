@@ -1,8 +1,8 @@
 # Configuration
 
 Every knob is a CLI flag, and can also be set in a YAML config file (see
-[Config file](#config-file)). Only `--node-name` also reads an env var
-(`NODE_NAME`). Secrets are env-only.
+[Config file](#config-file)). No knob reads an env var. Secrets are
+env-only.
 Sizes take a Kubernetes quantity: a byte count, or a whole number with a
 binary (`Ki`, `Mi`, `Gi`, ...) or decimal (`k`, `M`, `G`, ...) suffix.
 For the Helm values that set these flags, see the
@@ -12,7 +12,7 @@ For the Helm values that set these flags, see the
 | --- | --- | --- |
 | `--config` | unset | YAML config file that sets the other flags |
 | `--cluster` | `local` | First segment of the object key: ASCII letters, digits, `.`, `_` and `-` |
-| `--store-url` | unset | `s3://...`/`gs://...`/`az://...`; unset = observe-only: crashes are logged and reported, no cores are kept |
+| `--store-url` | unset | `s3://bucket`/`gs://...`/`az://...`; a path after the bucket (`s3://bucket/coredumps`) is a key prefix, and keys in manifests and Events are relative to it; unset = observe-only: crashes are logged and reported, no cores are kept |
 | `--max-core-size` | `2Gi` | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | 3 | Per-pod core budget; 0 = unlimited |
 | `--drain-deadline-secs` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled. A core already truncated by the size cap or the spool budget keeps its stored part; 0 = no deadline |
@@ -31,12 +31,11 @@ For the Helm values that set these flags, see the
 | `--no-events` | off | Disable k8s Event emission on capture; captures are still logged |
 | `--metrics-addr` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |
 | `--handler-path` | `/opt/coredrop/bin/coredrop` | Host path of the handler binary that `core_pattern` runs; absolute, no whitespace |
-| `--handler-config-path` | `/run/coredrop/handler.json` | Host path the daemon writes the handler config to; `events.sock` and the rate-limit state go next to it |
 | `--crictl-path` | `/usr/local/bin/crictl` | Path of crictl on the node, for the handler |
 | `--proc-root` | `/proc` | `/proc` root the handler reads |
 | `--core-pattern-path` | `/proc/sys/kernel/core_pattern` | File the `core_pattern` sysctl is written through |
 | `--core-pipe-limit-path` | `/proc/sys/kernel/core_pipe_limit` | File the `core_pipe_limit` sysctl is written through |
-| `--node-name` | env `NODE_NAME`, else the host name | Node name on k8s Events |
+| `--node-name` | the host name | Node name on k8s Events. The chart passes `spec.nodeName` |
 
 ## Config file
 
@@ -68,8 +67,9 @@ The daemon reads the file once, at startup. `coredrop check` (the probes)
 takes the same flags, so it finds the same paths. The Helm chart renders
 every setting into a ConfigMap mounted at `/etc/coredrop/config.yaml`, and a
 `checksum/config` pod annotation restarts the daemons when it changes. Env
-on the pod holds only `RUST_LOG`, `NODE_NAME` (downward API) and the
-object-store client options and credentials. Do not put credentials in the
+on the pod holds only `RUST_LOG`, `NODE_NAME` (downward API, passed as
+`--node-name=$(NODE_NAME)`) and the object-store client options and
+credentials. Do not put credentials in the
 file: anyone who can read the namespace can read a ConfigMap.
 
 ## Observe-only mode

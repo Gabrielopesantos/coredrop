@@ -384,10 +384,15 @@ pub async fn run(
                 refund(&t.identity.pod_uid);
                 t.bundle.discard();
             }
-            // crictl has not run yet, so only the cgroup identity is known.
+            // crictl ran only when the capture filter needed it; else only
+            // the cgroup identity is known.
+            let info = early_info.as_ref().and_then(Option::as_ref);
             report(
                 config,
                 &CaptureEventPayload {
+                    namespace: info.and_then(|i| i.namespace.clone()),
+                    pod_name: info.and_then(|i| i.pod_name.clone()),
+                    container_name: info.and_then(|i| i.container_name.clone()),
                     pod_uid: identity.as_ref().map(|id| id.pod_uid.clone()),
                     container_id: identity.as_ref().map(|id| id.container_id.clone()),
                     error: Some(format!("{e:#}")),

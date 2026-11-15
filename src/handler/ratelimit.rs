@@ -75,10 +75,10 @@ impl RateLimiter {
         }
     }
 
-    /// Give back a slot recorded by `check_and_record` whose upload stored
-    /// nothing (e.g. the object store was unreachable). Without the refund, a
-    /// transient store outage would eat the whole budget with zero cores
-    /// stored. Best-effort: errors are logged and swallowed.
+    /// Give back a slot recorded by `check_and_record` whose capture kept no
+    /// core (a full spool, the drain deadline, a drain or commit error).
+    /// Without the refund, a transient disk problem would eat the whole
+    /// budget with zero cores kept. Best-effort: errors are logged and swallowed.
     pub fn refund(&self, scope: &str, recorded_at: i64) {
         if self.max_per_hour == 0 {
             return;

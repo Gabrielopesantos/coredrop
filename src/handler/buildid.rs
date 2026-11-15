@@ -78,13 +78,13 @@ pub fn build_id_from_bytes(elf: &[u8]) -> Option<String> {
         }
         let (p_offset, p_filesz) = if is64 {
             (
-                usize::try_from(read_u64(elf, off + 8, le)?).ok()?,
-                usize::try_from(read_u64(elf, off + 32, le)?).ok()?,
+                usize::try_from(read_u64(elf, off.checked_add(8)?, le)?).ok()?,
+                usize::try_from(read_u64(elf, off.checked_add(32)?, le)?).ok()?,
             )
         } else {
             (
-                read_u32(elf, off + 4, le)? as usize,
-                read_u32(elf, off + 16, le)? as usize,
+                read_u32(elf, off.checked_add(4)?, le)? as usize,
+                read_u32(elf, off.checked_add(16)?, le)? as usize,
             )
         };
         let notes = elf.get(p_offset..p_offset.checked_add(p_filesz)?)?;
@@ -104,7 +104,7 @@ fn scan_notes(notes: &[u8], le: bool) -> Option<String> {
 
         let name_start = pos + 12;
         let name_end = name_start.checked_add(namesz)?;
-        let desc_start = name_start + ((namesz + 3) & !3);
+        let desc_start = name_start.checked_add(namesz.checked_add(3)? & !3)?;
         let desc_end = desc_start.checked_add(descsz)?;
         if desc_end > notes.len() {
             break;
@@ -113,13 +113,13 @@ fn scan_notes(notes: &[u8], le: bool) -> Option<String> {
         if ntype == NT_GNU_BUILD_ID && notes.get(name_start..name_end)?.starts_with(b"GNU") {
             return Some(hex(&notes[desc_start..desc_end]));
         }
-        pos = desc_start + ((descsz + 3) & !3);
+        pos = desc_start.checked_add(descsz.checked_add(3)? & !3)?;
     }
     None
 }
 
 fn read_u16(b: &[u8], o: usize, le: bool) -> Option<u16> {
-    let s: [u8; 2] = b.get(o..o + 2)?.try_into().ok()?;
+    let s: [u8; 2] = b.get(o..o.checked_add(2)?)?.try_into().ok()?;
     Some(if le {
         u16::from_le_bytes(s)
     } else {
@@ -128,7 +128,7 @@ fn read_u16(b: &[u8], o: usize, le: bool) -> Option<u16> {
 }
 
 fn read_u32(b: &[u8], o: usize, le: bool) -> Option<u32> {
-    let s: [u8; 4] = b.get(o..o + 4)?.try_into().ok()?;
+    let s: [u8; 4] = b.get(o..o.checked_add(4)?)?.try_into().ok()?;
     Some(if le {
         u32::from_le_bytes(s)
     } else {
@@ -137,7 +137,7 @@ fn read_u32(b: &[u8], o: usize, le: bool) -> Option<u32> {
 }
 
 fn read_u64(b: &[u8], o: usize, le: bool) -> Option<u64> {
-    let s: [u8; 8] = b.get(o..o + 8)?.try_into().ok()?;
+    let s: [u8; 8] = b.get(o..o.checked_add(8)?)?.try_into().ok()?;
     Some(if le {
         u64::from_le_bytes(s)
     } else {
@@ -278,5 +278,19 @@ pub(crate) mod tests {
         let mut elf = synthetic_elf_with_build_id(&[1, 2, 3, 4]);
         elf[5] = 9; // neither ELFDATA2LSB nor ELFDATA2MSB
         assert_eq!(build_id_from_bytes(&elf), None);
+    }
+
+    #[test]
+    fn returns_none_for_a_note_with_huge_sizes() {
+        // On a 32-bit target, unchecked offsets would wrap to 0 and repeat
+        // the same note forever.
+        for (namesz, descsz) in [(u32::MAX, 0), (0xffff_fff1, 0), (4, u32::MAX)] {
+            let mut note = Vec::new();
+            note.extend_from_slice(&namesz.to_le_bytes());
+            note.extend_from_slice(&descsz.to_le_bytes());
+            note.extend_from_slice(&1u32.to_le_bytes());
+            note.extend_from_slice(b"GNU\0");
+            assert_eq!(scan_notes(&note, true), None);
+        }
     }
 }

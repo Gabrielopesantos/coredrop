@@ -52,8 +52,9 @@ pub fn check(argv: Vec<std::ffi::OsString>) -> Result<()> {
 }
 
 /// On shutdown, how long the daemon waits for the event listener to report
-/// the uploads that finished during the flush and post their Events. It fits in the 5 s the pod's
-/// termination grace period leaves after the flush.
+/// the uploads that finished during the flush and post their Events. The
+/// chart's grace period is the flush time + 10 s: the uploader's
+/// `ABORT_WAIT` (2 s) and this wait fit in it.
 const LISTENER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Run the daemon: wire the kernel to the handler, then hold the restore guard
@@ -200,7 +201,8 @@ const CORE_PATTERN_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Check `core_pattern` every [`CORE_PATTERN_CHECK_INTERVAL`] and set
 /// `coredrop_core_pattern_installed`. Logs when the state changes. It does not
-/// write the pattern back: two tools that each write it would fight.
+/// write the pattern back. In the chart, the liveness probe (`coredrop check`)
+/// fails, and the restarted daemon installs the pattern again.
 async fn check_core_pattern(check: CorePatternCheck, metrics: Arc<Metrics>) {
     let mut interval = tokio::time::interval(CORE_PATTERN_CHECK_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -213,7 +215,7 @@ async fn check_core_pattern(check: CorePatternCheck, metrics: Arc<Metrics>) {
                 if was_installed {
                     warn!(
                         core_pattern = current,
-                        "core_pattern no longer routes to the handler; captures stop until the daemon restarts"
+                        "core_pattern no longer routes to the handler; captures stop until the daemon restarts and installs it again"
                     );
                 }
                 false

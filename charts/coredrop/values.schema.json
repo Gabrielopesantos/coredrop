@@ -190,7 +190,7 @@
       "additionalProperties": false,
       "properties": {
         "runtimeEndpoint": { "type": "string" },
-        "crictlPath": { "type": "string", "pattern": "^/" }
+        "crictlPath": { "type": "string", "pattern": "^(/.*)?$" }
       }
     },
     "cleanup": {

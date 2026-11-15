@@ -74,7 +74,7 @@ pub fn base_config(root: &Path) -> HandlerConfig {
         no_redact: false,
         proc_root: proc_root(root),
         store_configured: true,
-        crictl_path: "/bin/false".into(),
+        crictl_path: Some("/bin/false".into()),
         cri_runtime_endpoint: None,
         max_core_bytes: 0,
         max_cores_per_hour: 0,

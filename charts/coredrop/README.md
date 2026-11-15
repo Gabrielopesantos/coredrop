@@ -39,7 +39,7 @@ at startup.
 | cleanup.image | string | `"rancher/kubectl:v1.35.6"` | Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl. |
 | corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
 | corePattern.pipeLimit | int | `128` | `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`. |
-| cri.crictlPath | string | `"/usr/local/bin/crictl"` | Path to the crictl binary on the node (host mount ns), for the handler's enrichment. |
+| cri.crictlPath | string | `""` | Path to the crictl binary on the node (host mount ns), for the handler's enrichment. Empty uses the first of the usual node paths that exists. |
 | cri.runtimeEndpoint | string | `""` | CRI endpoint for crictl enrichment; when set, its `unix://` path is also the socket mounted from the host. Empty lets crictl self-resolve on the node. |
 | events.enabled | bool | `true` | Post a k8s Event on the crashing pod per capture; `false` also skips the events RBAC. |
 | fullnameOverride | string | `""` | Override the full generated name of chart resources. |

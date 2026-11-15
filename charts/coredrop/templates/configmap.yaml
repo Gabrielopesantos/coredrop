@@ -26,10 +26,12 @@ credentials come from the Secret, the node name from the downward API.
   "shutdown-flush-secs" (int64 .Values.upload.shutdownFlushSeconds)
   "no-events" (not .Values.events.enabled)
   "metrics-addr" (ternary (printf "0.0.0.0:%v" .Values.metrics.port) "" .Values.metrics.enabled)
-  "crictl-path" .Values.cri.crictlPath
 }}
 {{- with .Values.capture.objectStore.url }}
 {{- $_ := set $config "store-url" . }}
+{{- end }}
+{{- with .Values.cri.crictlPath }}
+{{- $_ := set $config "crictl-path" . }}
 {{- end }}
 {{- with .Values.cri.runtimeEndpoint }}
 {{- $_ := set $config "cri-runtime-endpoint" . }}

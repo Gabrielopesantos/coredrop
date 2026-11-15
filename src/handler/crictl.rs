@@ -16,6 +16,7 @@
 //! [`HandlerConfig::pre_drain_crictl_timeout_secs`]).
 
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::warn;
@@ -59,6 +60,28 @@ pub struct ContainerInfo {
     pub restart_count: Option<u32>,
 }
 
+/// Where nodes keep `crictl`, tried in this order when
+/// [`HandlerConfig::crictl_path`] is not set: k3s and binary installs,
+/// distribution packages (kubeadm's `cri-tools`), and GKE Container-Optimized
+/// OS. The handler runs in the host mount namespace, so these are node paths.
+pub const CRICTL_CANDIDATES: &[&str] = &[
+    "/usr/local/bin/crictl",
+    "/usr/bin/crictl",
+    "/home/kubernetes/bin/crictl",
+];
+
+/// The configured crictl, else the first of `candidates` that is a file.
+fn find_crictl<P: AsRef<Path>>(configured: Option<&Path>, candidates: &[P]) -> Option<PathBuf> {
+    if let Some(path) = configured {
+        return Some(path.to_path_buf());
+    }
+    candidates
+        .iter()
+        .map(AsRef::<Path>::as_ref)
+        .find(|c| c.is_file())
+        .map(Path::to_path_buf)
+}
+
 /// Shell out to `crictl inspect <container_id>` and parse the result. Returns
 /// `None` on any subprocess or parse failure - callers fall back to
 /// cgroup-only identity.
@@ -73,7 +96,15 @@ pub async fn inspect_with_timeout(
     config: &HandlerConfig,
     timeout_secs: u64,
 ) -> Option<ContainerInfo> {
-    let mut cmd = tokio::process::Command::new(&config.crictl_path);
+    let Some(crictl) = find_crictl(config.crictl_path.as_deref(), CRICTL_CANDIDATES) else {
+        warn!(
+            container_id,
+            candidates = ?CRICTL_CANDIDATES,
+            "no crictl found on the node; identity will be cgroup-only"
+        );
+        return None;
+    };
+    let mut cmd = tokio::process::Command::new(&crictl);
     cmd.arg("inspect").arg(container_id);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
@@ -89,13 +120,13 @@ pub async fn inspect_with_timeout(
     let output = match run_command(&mut cmd, timeout_dur).await {
         Ok(o) => o,
         Err(RunError::Io(e)) => {
-            warn!(error = %e, container_id, crictl = %config.crictl_path.display(), "crictl inspect failed; identity will be cgroup-only");
+            warn!(error = %e, container_id, crictl = %crictl.display(), "crictl inspect failed; identity will be cgroup-only");
             return None;
         }
         Err(RunError::Timeout) => {
             warn!(
                 container_id,
-                crictl = %config.crictl_path.display(),
+                crictl = %crictl.display(),
                 timeout_secs,
                 "crictl inspect timed out; identity will be cgroup-only"
             );
@@ -166,6 +197,23 @@ fn str_field(obj: &Value, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn find_crictl_prefers_the_configured_path_then_the_first_existing_candidate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("missing");
+        let second = dir.path().join("second");
+        let third = dir.path().join("third");
+        std::fs::write(&second, "").unwrap();
+        std::fs::write(&third, "").unwrap();
+        std::fs::create_dir(&missing).unwrap(); // a directory is not crictl
+        let candidates = [&missing, &second, &third];
+
+        assert_eq!(find_crictl(None, &candidates), Some(second.clone()));
+        let set = Path::new("/opt/bin/crictl");
+        assert_eq!(find_crictl(Some(set), &candidates), Some(set.to_path_buf()));
+        assert_eq!(find_crictl(None, &[&missing]), None);
+    }
 
     fn crictl_inspect_response(
         namespace: &str,

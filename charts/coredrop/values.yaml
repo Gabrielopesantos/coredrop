@@ -139,10 +139,12 @@ cri:
   # -- CRI endpoint for crictl enrichment; when set, its `unix://` path is also the socket mounted from the host. Empty lets crictl self-resolve on the node.
   runtimeEndpoint: ""
   # Path to crictl ON THE NODE: the kernel-exec'd handler runs in the host
-  # mount namespace and shells out to the node's own crictl (k3s and most
-  # kubeadm nodes install it here), not a binary from this image.
-  # -- Path to the crictl binary on the node (host mount ns), for the handler's enrichment.
-  crictlPath: "/usr/local/bin/crictl"
+  # mount namespace and shells out to the node's own crictl, not a binary
+  # from this image. Empty tries /usr/local/bin/crictl (k3s, binary
+  # installs), /usr/bin/crictl (distribution packages, kubeadm) and
+  # /home/kubernetes/bin/crictl (GKE COS), in that order.
+  # -- Path to the crictl binary on the node (host mount ns), for the handler's enrichment. Empty uses the first of the usual node paths that exists.
+  crictlPath: ""
 
 # Post-delete hook that removes the handler binary, runtime config/state, and
 # hostPath directories from every node on `helm uninstall`.

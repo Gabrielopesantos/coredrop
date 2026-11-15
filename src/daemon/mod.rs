@@ -353,7 +353,7 @@ mod tests {
             no_redact: false,
             proc_root: "/proc".into(),
             store_url: None,
-            crictl_path: "/usr/local/bin/crictl".into(),
+            crictl_path: None,
             cri_runtime_endpoint: None,
             max_core_bytes: 0,
             max_cores_per_hour: 0,

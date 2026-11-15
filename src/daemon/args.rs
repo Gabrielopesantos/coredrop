@@ -64,9 +64,11 @@ pub(crate) struct DaemonArgs {
     #[arg(long)]
     pub(crate) store_url: Option<String>,
 
-    /// Path to the `crictl` binary for post-drain container enrichment.
-    #[arg(long, default_value = crate::config::DEFAULT_CRICTL_PATH)]
-    pub(crate) crictl_path: PathBuf,
+    /// Path to the `crictl` binary on the node, for post-drain container
+    /// enrichment. Unset uses the first of
+    /// [`crate::handler::crictl::CRICTL_CANDIDATES`] that exists.
+    #[arg(long)]
+    pub(crate) crictl_path: Option<PathBuf>,
 
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     #[arg(long)]

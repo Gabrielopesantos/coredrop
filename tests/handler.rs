@@ -160,7 +160,7 @@ async fn run_enriches_identity_via_crictl_and_reports_the_capture() {
     let (listener, sock_path) = bind_events_listener(tmp.path());
 
     let mut config = base_config(tmp.path());
-    config.crictl_path = crictl;
+    config.crictl_path = Some(crictl);
     config.crictl_timeout_secs = 10;
     config.event_socket_path = sock_path;
 
@@ -701,7 +701,7 @@ async fn run_filtered_capture_does_not_read_the_core_and_spools_nothing() {
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let (listener, sock_path) = bind_events_listener(tmp.path());
     let mut config = base_config(tmp.path());
-    config.crictl_path = counting_crictl(tmp.path(), "kube-system");
+    config.crictl_path = Some(counting_crictl(tmp.path(), "kube-system"));
     config.crictl_timeout_secs = 10;
     config.event_socket_path = sock_path;
     config.filter = exclude(r#"{"namespace":"kube-*"}"#);
@@ -732,7 +732,7 @@ async fn run_kept_by_the_filter_spools_and_runs_crictl_once() {
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.crictl_path = counting_crictl(tmp.path(), "production");
+    config.crictl_path = Some(counting_crictl(tmp.path(), "production"));
     config.crictl_timeout_secs = 10;
     config.filter = exclude(r#"{"namespace":"kube-*"}"#);
 

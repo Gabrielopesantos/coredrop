@@ -94,9 +94,6 @@ pub fn check_cluster(name: &str) -> Result<(), String> {
 /// Default `/proc` root.
 pub const DEFAULT_PROC_ROOT: &str = "/proc";
 
-/// Default path of the node's `crictl`.
-pub const DEFAULT_CRICTL_PATH: &str = "/usr/local/bin/crictl";
-
 /// Default cap on stored (uncompressed) core bytes per crash: 2 GiB.
 pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -158,7 +155,9 @@ pub struct HandlerConfig {
     /// handler discard cores instead of spooling them.
     pub store_configured: bool,
     /// Path to the `crictl` binary for post-drain container enrichment.
-    pub crictl_path: PathBuf,
+    /// `None` uses the first of [`crate::handler::crictl::CRICTL_CANDIDATES`]
+    /// that exists on the node.
+    pub crictl_path: Option<PathBuf>,
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     /// `None` lets crictl use its own default/`CONTAINER_RUNTIME_ENDPOINT`.
     pub cri_runtime_endpoint: Option<String>,
@@ -204,7 +203,7 @@ impl Default for HandlerConfig {
             no_redact: false,
             proc_root: PathBuf::from(DEFAULT_PROC_ROOT),
             store_configured: false,
-            crictl_path: PathBuf::from(DEFAULT_CRICTL_PATH),
+            crictl_path: None,
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
             max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
@@ -247,7 +246,9 @@ impl HandlerConfig {
             }
         };
 
-        must_be_absolute(&self.crictl_path, "crictl_path")?;
+        if let Some(crictl) = &self.crictl_path {
+            must_be_absolute(crictl, "crictl_path")?;
+        }
         must_be_absolute(&self.proc_root, "proc_root")?;
         must_be_absolute(&self.rate_state_path, "rate_state_path")?;
         must_be_absolute(&self.event_socket_path, "event_socket_path")?;
@@ -395,7 +396,7 @@ mod tests {
             no_redact: true,
             proc_root: "/proc".into(),
             store_configured: true,
-            crictl_path: "/usr/local/bin/crictl".into(),
+            crictl_path: Some("/usr/local/bin/crictl".into()),
             cri_runtime_endpoint: Some("unix:///run/containerd/containerd.sock".into()),
             max_core_bytes: 1024,
             max_cores_per_hour: 5,
@@ -416,7 +417,7 @@ mod tests {
     #[test]
     fn write_rejects_a_config_the_handler_would_ignore() {
         let cfg = HandlerConfig {
-            crictl_path: "crictl".into(),
+            crictl_path: Some("crictl".into()),
             ..HandlerConfig::default()
         };
         let (_dir, path) = tmp_config();
@@ -503,7 +504,7 @@ mod tests {
         // `write` rejects it too, so serialize it directly.
         let (_dir, path) = tmp_config();
         let cfg = HandlerConfig {
-            crictl_path: "relative".into(),
+            crictl_path: Some("relative".into()),
             ..Default::default()
         };
         std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).unwrap();
@@ -541,7 +542,7 @@ mod tests {
     fn validate_rejects_relative_paths() {
         let relative = [
             HandlerConfig {
-                crictl_path: "crictl".into(),
+                crictl_path: Some("crictl".into()),
                 ..Default::default()
             },
             HandlerConfig {

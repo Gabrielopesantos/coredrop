@@ -60,9 +60,10 @@
             env = {
               RUST_SRC_PATH = "${devPkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
             };
+            # To stderr: `nix develop -c <cmd>` output is often captured or piped.
             shellHook = ''
-              echo "dev shell"
-              cargo --version
+              echo "dev shell" >&2
+              cargo --version >&2
             '';
           };
         }

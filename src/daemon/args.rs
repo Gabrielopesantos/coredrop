@@ -326,9 +326,52 @@ mod tests {
         doc["data"]["config.yaml"].as_str().unwrap().to_string()
     }
 
+    /// The chart refuses bad values: malformed or out-of-range values, unknown
+    /// keys, paths whose cleanup would delete host files, a secret rendered
+    /// as plain env, and labels that break the `DaemonSet` selector. Needs
+    /// `helm`, so CI runs it on its own: `cargo test --lib -- --ignored chart_`.
+    #[test]
+    #[ignore = "needs helm"]
+    fn chart_rejects_bad_values() {
+        let chart = concat!(env!("CARGO_MANIFEST_DIR"), "/charts/coredrop");
+        let template = |set: &[&str]| {
+            let mut cmd = std::process::Command::new("helm");
+            cmd.args(["template", "t", chart]);
+            for s in set {
+                cmd.args(["--set", s]);
+            }
+            cmd.output().expect("helm runs (use `nix develop`)")
+        };
+        // Each bad value must be the only reason for a failure.
+        let ok = template(&[]);
+        assert!(
+            ok.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+        for bad in [
+            "spool.maxSize=10GB",
+            "upload.concurrency=0",
+            "capture.maxCoresPerHour=1.5",
+            "spool.minFreePercent=101",
+            "capture.cluster=a/b",
+            "capture.objectStore.config.TYPO=x",
+            "capture.filter.exlude=x",
+            "spool.hostDir=/",
+            "corePattern.hostBinDir=/bin",
+            "capture.objectStore.config.AWS_SECRET_ACCESS_KEY=x",
+            "podLabels.app\\.kubernetes\\.io/name=x",
+        ] {
+            assert!(
+                !template(&[bad]).status.success(),
+                "the chart accepted {bad}"
+            );
+        }
+    }
+
     /// Every config the chart renders loads in the daemon: the chart and the
     /// daemon agree on key names and value formats. Needs `helm`, so CI runs
-    /// it on its own: `cargo test --lib -- --ignored chart_config`.
+    /// it on its own: `cargo test --lib -- --ignored chart_`.
     #[test]
     #[ignore = "needs helm"]
     fn chart_config_loads_in_the_daemon() {

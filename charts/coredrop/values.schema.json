@@ -229,7 +229,13 @@
     "resources": { "type": "object" },
     "tolerations": { "type": "array" },
     "nodeSelector": { "$ref": "#/definitions/stringMap" },
-    "podLabels": { "$ref": "#/definitions/stringMap" },
+    "podLabels": {
+      "description": "Must not set the selector labels: the pods would then not match the DaemonSet selector.",
+      "allOf": [
+        { "$ref": "#/definitions/stringMap" },
+        { "propertyNames": { "not": { "enum": ["app.kubernetes.io/name", "app.kubernetes.io/instance"] } } }
+      ]
+    },
     "priorityClassName": { "type": "string" }
   }
 }

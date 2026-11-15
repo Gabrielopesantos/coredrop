@@ -22,6 +22,9 @@ stopped_pid=""
 
 [ -f "$ORIG_FILE" ] || die "no recorded pre-install core_pattern ($ORIG_FILE); run ./up.sh"
 orig="$(cat "$ORIG_FILE")"
+[ -f "$ORIG_PIPE_LIMIT_FILE" ] \
+  || die "no recorded pre-install core_pipe_limit ($ORIG_PIPE_LIMIT_FILE); run ./down.sh, then ./up.sh"
+orig_pipe_limit="$(cat "$ORIG_PIPE_LIMIT_FILE")"
 
 node_pattern() { node_exec cat /proc/sys/kernel/core_pattern; }
 # Kernel log lines for crashes routed to a missing handler binary. The demo
@@ -44,6 +47,7 @@ cleanup() {
     kubectl -n "$NAMESPACE" delete daemonset -l coredrop.io/cleanup=true \
       --ignore-not-found --wait --timeout=60s >/dev/null 2>&1 || true
     set_node_pattern "$orig" || true
+    set_node_pipe_limit "$orig_pipe_limit" || true
     install_coredrop || warn "reinstall failed; run ./up.sh"
   fi
 }
@@ -105,7 +109,7 @@ assert_node_clean() {
 pipe_failures_before="$(pipe_failures)"
 
 # --- A. clean uninstall ------------------------------------------------------
-log "A: clean uninstall restores core_pattern + post-delete cleanup"
+log "A: clean uninstall restores core_pattern, core_pipe_limit + post-delete cleanup"
 uninstall_and_wait 60s
 sleep 2
 restored="$(node_pattern)"
@@ -114,13 +118,18 @@ if [ "$restored" = "$orig" ]; then
 else
   warn "  core_pattern is '$restored', pre-install value was '$orig'"; fail=1
 fi
+restored_pipe_limit="$(node_pipe_limit)"
+if [ "$restored_pipe_limit" = "$orig_pipe_limit" ]; then
+  log "  core_pipe_limit matches its pre-install value: $restored_pipe_limit"
+else
+  warn "  core_pipe_limit is '$restored_pipe_limit', pre-install value was '$orig_pipe_limit'"; fail=1
+fi
 assert_node_clean
 install_coredrop >/dev/null
 assert_installed
 
 # --- B. unclean uninstall ----------------------------------------------------
 log "B: daemon dies without restoring core_pattern; the cleanup worker resets it"
-orig_pipe_limit="$(node_pipe_limit)"
 stopped_pid="$(daemon_host_pid)"
 node_exec kill -STOP "$stopped_pid"
 log "  daemon (host pid $stopped_pid) frozen with SIGSTOP"

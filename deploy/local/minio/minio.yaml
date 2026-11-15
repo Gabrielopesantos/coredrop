@@ -65,7 +65,7 @@ spec:
 ---
 # One-shot bucket creation (minio does not auto-create buckets). Retries until
 # minio is reachable, then is idempotent (`mb --ignore-existing`). The bucket
-# name must match capture.objectStore.url in the Helm overlay (coredrop-cores).
+# name must match objectStore.url in the Helm overlay (coredrop-cores).
 apiVersion: batch/v1
 kind: Job
 metadata:

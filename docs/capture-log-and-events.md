@@ -10,7 +10,7 @@ ended without an upload. Failures, non-pod crashes and crashes the
 
 ```sh
 $ kubectl -n <namespace> logs ds/coredrop | grep 'capture complete'
-INFO coredrop::daemon::k8s_events::log: capture complete outcome="uploaded" namespace="default" pod="my-app-7f8b9c" container="app" ... manifest_key="local/<podUID>/<containerID>/1717000000-4242-manifest.json"
+INFO coredrop::daemon::k8s_events::log: capture complete outcome="uploaded" namespace="default" pod="my-app-7f8b9c" container="app" ... manifest_key="<podUID>/<containerID>/1717000000-4242-manifest.json"
 WARN coredrop::daemon::k8s_events::log: capture complete outcome="failed" ... error="draining core stream: ..."
 ```
 
@@ -37,7 +37,7 @@ capture as a Kubernetes Event on the crashing pod.
 ```sh
 $ kubectl get events --field-selector reason=CoreDumped
 LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
-2m          Warning   CoreDumped   pod/my-app-7f8b9c   core dumped (signal SIGSEGV); artifacts at local/<podUID>/<containerID>/1717000000-4242-manifest.json
+2m          Warning   CoreDumped   pod/my-app-7f8b9c   core dumped (signal SIGSEGV); artifacts at <podUID>/<containerID>/1717000000-4242-manifest.json
 ```
 
 | Outcome | Event reason |
@@ -45,13 +45,13 @@ LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
 | Core uploaded | `CoreDumped` |
 | Rate-limit budget exhausted | `CoreDumpSuppressed` |
 | Spool full, core dropped | `CoreDumpSpoolFull` |
-| Drain deadline passed, core dropped | `CoreDumpDrainDeadline` |
+| Core write timeout passed, core dropped | `CoreDumpWriteTimeout` |
 | No object store configured | `CoreDiscardedNoStore` |
 
 A spooled capture gets its Event once it is uploaded, so the manifest key in
 the message always exists in the store. Keys in Events, log lines and
 manifests are relative to the store URL: with `s3://bucket/coredumps`, the
-key `local/...` is the object `coredumps/local/...` in the bucket.
+key `<podUID>/...` is the object `coredumps/<podUID>/...` in the bucket.
 
 Only the daemon touches the API server, so the ServiceAccount token never
 reaches the handler. A crash-looping pod bumps one Event's `series.count`

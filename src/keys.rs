@@ -2,7 +2,8 @@
 //! the daemon uploads each object to its key.
 
 /// Object keys for one capture. Every object of a capture shares the prefix
-/// `{cluster}/{podUID}/{containerID}/{timestamp}-{hostPid}`; the suffix names
+/// `[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPid}`, where the
+/// cluster name segment is there only when one is set; the suffix names
 /// the object. Handler-derivable from the cgroup - no UUIDs; the manifest
 /// carries the human-readable identity from crictl. The host PID
 /// disambiguates two crashes in the same container within the same second
@@ -15,17 +16,21 @@ pub struct ObjectKeys {
 
 impl ObjectKeys {
     /// Build the key prefix for one capture:
-    /// `{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}`.
+    /// `[{cluster_name}/]{pod_uid}/{container_id}/{timestamp}-{host_pid}`.
     #[must_use]
     pub fn new(
-        cluster: &str,
+        cluster_name: Option<&str>,
         pod_uid: &str,
         container_id: &str,
         timestamp: i64,
         host_pid: i32,
     ) -> Self {
+        let key = format!("{pod_uid}/{container_id}/{timestamp}-{host_pid}");
         Self {
-            prefix: format!("{cluster}/{pod_uid}/{container_id}/{timestamp}-{host_pid}"),
+            prefix: match cluster_name {
+                Some(name) => format!("{name}/{key}"),
+                None => key,
+            },
         }
     }
 
@@ -55,24 +60,54 @@ mod tests {
     #[test]
     fn builds_object_keys() {
         assert_eq!(
-            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242).core(),
+            ObjectKeys::new(
+                Some("prod"),
+                "pod-uid-123",
+                "abc123def",
+                1_749_600_000,
+                4242
+            )
+            .core(),
             "prod/pod-uid-123/abc123def/1749600000-4242-core.zst"
         );
         assert_eq!(
-            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242)
-                .proc_snapshot(),
+            ObjectKeys::new(
+                Some("prod"),
+                "pod-uid-123",
+                "abc123def",
+                1_749_600_000,
+                4242
+            )
+            .proc_snapshot(),
             "prod/pod-uid-123/abc123def/1749600000-4242-procsnapshot.tar"
         );
         assert_eq!(
-            ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 4242).manifest(),
+            ObjectKeys::new(
+                Some("prod"),
+                "pod-uid-123",
+                "abc123def",
+                1_749_600_000,
+                4242
+            )
+            .manifest(),
             "prod/pod-uid-123/abc123def/1749600000-4242-manifest.json"
         );
     }
 
     #[test]
+    fn leaves_out_an_unset_cluster_name() {
+        assert_eq!(
+            ObjectKeys::new(None, "pod-uid-123", "abc123def", 1_749_600_000, 4242).core(),
+            "pod-uid-123/abc123def/1749600000-4242-core.zst"
+        );
+    }
+
+    #[test]
     fn distinct_pids_yield_distinct_keys_within_the_same_second() {
-        let a = ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 111).core();
-        let b = ObjectKeys::new("prod", "pod-uid-123", "abc123def", 1_749_600_000, 222).core();
+        let a =
+            ObjectKeys::new(Some("prod"), "pod-uid-123", "abc123def", 1_749_600_000, 111).core();
+        let b =
+            ObjectKeys::new(Some("prod"), "pod-uid-123", "abc123def", 1_749_600_000, 222).core();
         assert_ne!(a, b);
     }
 }

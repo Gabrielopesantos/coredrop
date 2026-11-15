@@ -88,12 +88,12 @@ mc alias set "$MC_ALIAS" "http://127.0.0.1:$LOCAL_PORT" minioadmin minioadmin >/
 # satisfy (or break) the assertions below.
 mc rm --recursive --force "$MC_ALIAS/$BUCKET" >/dev/null 2>&1 || true
 # Restart the demo after the purge: a new pod uploads its first
-# max-cores-per-hour cores within seconds, and a purge after them would leave
+# max-cores-per-pod-per-hour cores within seconds, and a purge after them would leave
 # only rate-limited manifests, which have no core.
 restart_demo
 
 # Scope the k8s Events (8c/8d below) to this run's crash pod. A CoreDumped
-# Event fires only for the first max-cores-per-hour captures of a pod, so it
+# Event fires only for the first max-cores-per-pod-per-hour captures of a pod, so it
 # can be older than this point. `regarding.name` is a selectable field on
 # events.k8s.io/v1 Events.
 # Use the running pod of the active ReplicaSet (replicas > 0). During a
@@ -110,7 +110,7 @@ crash_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods \
            | select(.metadata.deletionTimestamp == null)
            | .metadata.name' | head -n1)"
 [ -n "$crash_pod" ] || die "could not resolve a running crash-segfault pod in $DEMO_NAMESPACE"
-# Object keys start with {cluster}/{podUID}/. Match only this pod's objects: the
+# Object keys start with {clusterName}/{podUID}/ (the overlay sets clusterName). Match only this pod's objects: the
 # daemon can still be uploading a spooled capture of the previous
 # (rate-limited) pod after the purge above.
 crash_uid="$(kubectl -n "$DEMO_NAMESPACE" get pod "$crash_pod" -o jsonpath='{.metadata.uid}')"

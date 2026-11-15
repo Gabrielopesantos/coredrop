@@ -69,17 +69,14 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{s:?}: larger than {} bytes", u64::MAX))
 }
 
-/// Default cluster name, the first segment of every object key.
-pub const DEFAULT_CLUSTER: &str = "local";
-
-/// Check a cluster name. It is the first segment of every object key, so it
+/// Check a cluster name. It is the first segment of the object keys, so it
 /// must be one non-empty segment: ASCII letters, digits, `.`, `_` and `-`,
 /// and not `.` or `..`.
 ///
 /// # Errors
 ///
 /// Returns the reason when `name` is not a valid cluster name.
-pub fn check_cluster(name: &str) -> Result<(), String> {
+pub fn check_cluster_name(name: &str) -> Result<(), String> {
     let chars_ok = name
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
@@ -94,19 +91,16 @@ pub fn check_cluster(name: &str) -> Result<(), String> {
 /// Default `/proc` root.
 pub const DEFAULT_PROC_ROOT: &str = "/proc";
 
-/// Default path of the node's `crictl`.
-pub const DEFAULT_CRICTL_PATH: &str = "/usr/local/bin/crictl";
-
 /// Default cap on stored (uncompressed) core bytes per crash: 2 GiB.
 pub const DEFAULT_MAX_CORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Default per-pod core-upload budget per hour.
-pub const DEFAULT_MAX_CORES_PER_HOUR: u32 = 3;
+pub const DEFAULT_MAX_CORES_PER_POD_PER_HOUR: u32 = 3;
 
 /// Default deadline for draining one core into the spool: 1 minute.
 /// The handler holds one of the node's `core_pipe_limit` slots while it
 /// drains, so a hung disk must not be able to hold it indefinitely.
-pub const DEFAULT_DRAIN_DEADLINE_SECS: u64 = 60;
+pub const DEFAULT_CORE_WRITE_TIMEOUT_SECS: u64 = 60;
 
 /// Default timeout for `crictl inspect` in the handler.
 pub const DEFAULT_CRICTL_TIMEOUT_SECS: u64 = 10;
@@ -148,17 +142,20 @@ pub fn event_socket_path_for(config_path: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HandlerConfig {
-    /// Cluster name - the first path segment of the object key.
-    pub cluster: String,
-    /// Pass `environ` and `cmdline` through un-redacted.
-    pub no_redact: bool,
+    /// Cluster name: the first segment of the object keys, and the
+    /// manifest's `cluster_name`. `None` leaves both out.
+    pub cluster_name: Option<String>,
+    /// Redact secrets in the snapshot's `environ` and `cmdline`.
+    pub redact: bool,
     /// `/proc` root (overridable for tests/non-standard layouts).
     pub proc_root: PathBuf,
     /// Whether the daemon has an object store to upload to. `false` makes the
     /// handler discard cores instead of spooling them.
     pub store_configured: bool,
     /// Path to the `crictl` binary for post-drain container enrichment.
-    pub crictl_path: PathBuf,
+    /// `None` uses the first of [`crate::handler::crictl::CRICTL_CANDIDATES`]
+    /// that exists on the node.
+    pub crictl_path: Option<PathBuf>,
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     /// `None` lets crictl use its own default/`CONTAINER_RUNTIME_ENDPOINT`.
     pub cri_runtime_endpoint: Option<String>,
@@ -167,12 +164,12 @@ pub struct HandlerConfig {
     pub max_core_bytes: u64,
     /// Max core uploads per pod per hour; `0` = unlimited. Suppressed
     /// crashes still get a manifest, but no core and no proc snapshot.
-    pub max_cores_per_hour: u32,
+    pub max_cores_per_pod_per_hour: u32,
     /// Deadline in seconds for draining the core into the spool; `0` = no
     /// deadline. On expiry the handler stops reading, keeps a core that was
     /// already truncated (else drops it), spools the manifest and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
-    pub drain_deadline_secs: u64,
+    pub core_write_timeout_secs: u64,
     /// Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout.
     /// crictl runs after the handler releases the core pipe, so this only
     /// bounds how long the capture takes to reach the spool. A capture filter
@@ -200,15 +197,15 @@ pub struct HandlerConfig {
 impl Default for HandlerConfig {
     fn default() -> Self {
         Self {
-            cluster: DEFAULT_CLUSTER.to_string(),
-            no_redact: false,
+            cluster_name: None,
+            redact: true,
             proc_root: PathBuf::from(DEFAULT_PROC_ROOT),
             store_configured: false,
-            crictl_path: PathBuf::from(DEFAULT_CRICTL_PATH),
+            crictl_path: None,
             cri_runtime_endpoint: None,
             max_core_bytes: DEFAULT_MAX_CORE_BYTES,
-            max_cores_per_hour: DEFAULT_MAX_CORES_PER_HOUR,
-            drain_deadline_secs: DEFAULT_DRAIN_DEADLINE_SECS,
+            max_cores_per_pod_per_hour: DEFAULT_MAX_CORES_PER_POD_PER_HOUR,
+            core_write_timeout_secs: DEFAULT_CORE_WRITE_TIMEOUT_SECS,
             crictl_timeout_secs: DEFAULT_CRICTL_TIMEOUT_SECS,
             spool_dir: PathBuf::from(spool::DEFAULT_SPOOL_DIR),
             spool_max_bytes: spool::DEFAULT_SPOOL_MAX_BYTES,
@@ -247,13 +244,17 @@ impl HandlerConfig {
             }
         };
 
-        must_be_absolute(&self.crictl_path, "crictl_path")?;
+        if let Some(crictl) = &self.crictl_path {
+            must_be_absolute(crictl, "crictl_path")?;
+        }
         must_be_absolute(&self.proc_root, "proc_root")?;
         must_be_absolute(&self.rate_state_path, "rate_state_path")?;
         must_be_absolute(&self.event_socket_path, "event_socket_path")?;
         must_be_absolute(&self.spool_dir, "spool_dir")?;
-        if let Err(e) = check_cluster(&self.cluster) {
-            bail!("cluster: {e}");
+        if let Some(name) = &self.cluster_name
+            && let Err(e) = check_cluster_name(name)
+        {
+            bail!("cluster_name: {e}");
         }
         self.filter.validate()?;
         if self.spool_min_free_percent > 100 {
@@ -391,15 +392,15 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let cfg = HandlerConfig {
-            cluster: "prod".into(),
-            no_redact: true,
+            cluster_name: Some("prod".into()),
+            redact: false,
             proc_root: "/proc".into(),
             store_configured: true,
-            crictl_path: "/usr/local/bin/crictl".into(),
+            crictl_path: Some("/usr/local/bin/crictl".into()),
             cri_runtime_endpoint: Some("unix:///run/containerd/containerd.sock".into()),
             max_core_bytes: 1024,
-            max_cores_per_hour: 5,
-            drain_deadline_secs: 60,
+            max_cores_per_pod_per_hour: 5,
+            core_write_timeout_secs: 60,
             crictl_timeout_secs: 15,
             spool_dir: "/var/lib/coredrop/spool".into(),
             spool_max_bytes: 1 << 30,
@@ -416,7 +417,7 @@ mod tests {
     #[test]
     fn write_rejects_a_config_the_handler_would_ignore() {
         let cfg = HandlerConfig {
-            crictl_path: "crictl".into(),
+            crictl_path: Some("crictl".into()),
             ..HandlerConfig::default()
         };
         let (_dir, path) = tmp_config();
@@ -503,7 +504,7 @@ mod tests {
         // `write` rejects it too, so serialize it directly.
         let (_dir, path) = tmp_config();
         let cfg = HandlerConfig {
-            crictl_path: "relative".into(),
+            crictl_path: Some("relative".into()),
             ..Default::default()
         };
         std::fs::write(&path, serde_json::to_vec(&cfg).unwrap()).unwrap();
@@ -541,7 +542,7 @@ mod tests {
     fn validate_rejects_relative_paths() {
         let relative = [
             HandlerConfig {
-                crictl_path: "crictl".into(),
+                crictl_path: Some("crictl".into()),
                 ..Default::default()
             },
             HandlerConfig {

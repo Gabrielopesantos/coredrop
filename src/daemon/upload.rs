@@ -424,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn put_object_round_trips_a_buffered_blob() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let key = ObjectKeys::new("local", "pod-a", "cid-b", 7, 4242).proc_snapshot();
+        let key = ObjectKeys::new(Some("local"), "pod-a", "cid-b", 7, 4242).proc_snapshot();
         let tar = b"a-small-tar-bundle".to_vec();
         put_object(&store, &key, tar.clone()).await.unwrap();
 

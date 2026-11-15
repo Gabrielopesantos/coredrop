@@ -67,10 +67,12 @@ manifest, so a manifest in the bucket always points at complete artifacts.
 Objects land at:
 
 ```sh
-{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-core.zst
-{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-procsnapshot.tar
-{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-manifest.json
+[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPID}-core.zst
+[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPID}-procsnapshot.tar
+[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPID}-manifest.json
 ```
+
+The `{clusterName}/` segment is there only when `capture.clusterName` is set.
 
 ## Safety rails
 
@@ -78,7 +80,7 @@ Defaults are in [docs/configuration.md](docs/configuration.md).
 
 - **Secret redaction** - `environ` values and `cmdline` secrets are redacted
   by keyword list plus an entropy/shape heuristic (JWTs, PEM blocks, URL
-  credentials). `--no-redact` opts out. Cores themselves are secret-bearing
+  credentials). `capture.redact: false` (`--redact=false`) opts out. Cores themselves are secret-bearing
   regardless; treat the bucket accordingly.
 - **Size cap** - stored core bytes are capped per crash; the rest of the
   stream is drained but not stored. The manifest records `truncated`.
@@ -112,7 +114,7 @@ retention.
 
 ```sh
 helm install coredrop charts/coredrop -n coredrop-system --create-namespace \
-  --set capture.objectStore.url=s3://crash-artifacts
+  --set objectStore.url=s3://crash-artifacts
 ```
 
 Without a store URL, coredrop runs observe-only: crashes are logged and
@@ -122,7 +124,7 @@ reported, no cores are kept.
 
 ```sh
 kubectl get events --field-selector reason=CoreDumped
-prefix='local/<podUID>/<containerID>/1717000000-4242'  # manifest key without -manifest.json
+prefix='<podUID>/<containerID>/1717000000-4242'  # manifest key without -manifest.json
 aws s3 cp "s3://crash-artifacts/${prefix}-core.zst" core.zst && zstd -d core.zst
 ```
 

@@ -143,16 +143,15 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cluster": {
+        "clusterName": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9._-]+$",
+          "pattern": "^[A-Za-z0-9._-]*$",
           "not": { "enum": [".", ".."] }
         },
         "maxCoreSize": { "$ref": "#/definitions/size" },
-        "maxCoresPerHour": { "$ref": "#/definitions/uint32" },
-        "drainDeadlineSeconds": { "$ref": "#/definitions/uint" },
-        "crictlTimeoutSeconds": { "$ref": "#/definitions/uint" },
-        "noRedact": { "type": "boolean" },
+        "maxCoresPerPodPerHour": { "$ref": "#/definitions/uint32" },
+        "coreWriteTimeoutSeconds": { "$ref": "#/definitions/uint" },
+        "redact": { "type": "boolean" },
         "filter": {
           "type": ["object", "null"],
           "additionalProperties": false,
@@ -160,28 +159,28 @@
             "include": { "$ref": "#/definitions/filterList" },
             "exclude": { "$ref": "#/definitions/filterList" }
           }
-        },
-        "objectStore": {
+        }
+      }
+    },
+    "objectStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string" },
+        "config": {
           "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "url": { "type": "string" },
-            "config": {
-              "type": "object",
-              "propertyNames": { "$ref": "#/definitions/storeConfigKey" },
-              "additionalProperties": { "$ref": "#/definitions/storeOptionValue" }
-            },
-            "credentials": {
-              "type": "object",
-              "propertyNames": {
-                "anyOf": [
-                  { "$ref": "#/definitions/storeSecretKey" },
-                  { "$ref": "#/definitions/storeConfigKey" }
-                ]
-              },
-              "additionalProperties": { "$ref": "#/definitions/storeOptionValue" }
-            }
-          }
+          "propertyNames": { "$ref": "#/definitions/storeConfigKey" },
+          "additionalProperties": { "$ref": "#/definitions/storeOptionValue" }
+        },
+        "credentials": {
+          "type": "object",
+          "propertyNames": {
+            "anyOf": [
+              { "$ref": "#/definitions/storeSecretKey" },
+              { "$ref": "#/definitions/storeConfigKey" }
+            ]
+          },
+          "additionalProperties": { "$ref": "#/definitions/storeOptionValue" }
         }
       }
     },
@@ -190,7 +189,8 @@
       "additionalProperties": false,
       "properties": {
         "runtimeEndpoint": { "type": "string" },
-        "crictlPath": { "type": "string", "pattern": "^/" }
+        "crictlPath": { "type": "string", "pattern": "^(/.*)?$" },
+        "timeoutSeconds": { "$ref": "#/definitions/uint" }
       }
     },
     "cleanup": {

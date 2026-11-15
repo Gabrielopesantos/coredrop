@@ -3,7 +3,7 @@
 //! After core drain + `/proc` snapshot + crictl enrichment, the handler
 //! assembles a `Manifest` and writes it into the capture's spool bundle. The
 //! daemon uploads it to
-//! `{cluster}/{podUID}/{containerID}/{ts}-{hostPid}-manifest.json` - sibling
+//! `[{clusterName}/]{podUID}/{containerID}/{ts}-{hostPid}-manifest.json` - sibling
 //! to the core at `...-core.zst`. The manifest is the "record": a manifest pointing at a
 //! missing core is a real bug; an orphan core with no manifest is GC-able.
 //!
@@ -18,7 +18,9 @@ pub struct Manifest {
     pub schema_version: u32,
     /// RFC3339 timestamp of the crash (from the kernel's `%t` specifier).
     pub captured_at: String,
-    pub cluster: String,
+    /// The configured cluster name; absent when none is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_name: Option<String>,
     /// Node hostname.
     pub node: String,
     pub signal: i32,
@@ -80,7 +82,7 @@ pub struct CoreRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated_reason: Option<TruncatedReason>,
     /// Why no core was stored despite a configured store: `rate_limit` |
-    /// `spool_full` | `drain_deadline`. Absent when a core is present.
+    /// `spool_full` | `core_write_timeout`. Absent when a core is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_reason: Option<String>,
     /// Compression codec applied to the stored object.
@@ -105,7 +107,7 @@ mod tests {
         Manifest {
             schema_version: 1,
             captured_at: "2026-06-27T12:00:00+00:00".into(),
-            cluster: "prod".into(),
+            cluster_name: Some("prod".into()),
             node: "node-a".into(),
             signal: 11,
             signal_name: Some("SIGSEGV".into()),

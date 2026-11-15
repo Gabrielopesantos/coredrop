@@ -11,11 +11,11 @@ For the Helm values that set these flags, see the
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--config` | unset | YAML config file that sets the other flags |
-| `--cluster` | `local` | First segment of the object key: ASCII letters, digits, `.`, `_` and `-` |
+| `--cluster-name` | unset | Name of the cluster: the first segment of the object keys and the manifest's `cluster_name`; ASCII letters, digits, `.`, `_` and `-`. Unset leaves both out |
 | `--store-url` | unset | `s3://bucket`/`gs://...`/`az://...`; a path after the bucket (`s3://bucket/coredumps`) is a key prefix, and keys in manifests and Events are relative to it; unset = observe-only: crashes are logged and reported, no cores are kept |
 | `--max-core-size` | `2Gi` | Stored core cap per crash; 0 = unlimited |
-| `--max-cores-per-hour` | 3 | Per-pod core budget; 0 = unlimited |
-| `--drain-deadline-secs` | 60 | Deadline for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled. A core already truncated by the size cap or the spool budget keeps its stored part; 0 = no deadline |
+| `--max-cores-per-pod-per-hour` | 3 | Per-pod core budget; 0 = unlimited |
+| `--core-write-timeout-secs` | 60 | Time limit for writing one core into the spool; past it the core is dropped to free the `core_pipe_limit` slot, and the snapshot and manifest are still spooled. A core already truncated by the size cap or the spool budget keeps its stored part; 0 = no deadline |
 | `--spool-dir` | `/var/lib/coredrop/spool` | Spool root on the node |
 | `--spool-max-size` | `10Gi` | Spool size cap; 0 = no cap |
 | `--spool-min-free-percent` | 15 | Free-space floor of the spool's filesystem |
@@ -26,12 +26,12 @@ For the Helm values that set these flags, see the
 | `--crictl-timeout-secs` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
 | `--capture-filter` | empty | JSON (in the config file, YAML) include/exclude lists of crashes to capture; empty = all. See [Capture filter](#capture-filter) |
 | `--pipe-limit` | 128 | `core_pipe_limit` sysctl the daemon installs |
-| `--no-redact` | off | Pass `environ` and `cmdline` through un-redacted |
+| `--redact` | `true` | Redact secrets in the snapshot's `environ` and `cmdline`; `--redact=false` turns it off |
 | `--cri-runtime-endpoint` | unset | CRI socket for crictl enrichment |
 | `--no-events` | off | Disable k8s Event emission on capture; captures are still logged |
 | `--metrics-addr` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |
 | `--handler-path` | `/opt/coredrop/bin/coredrop` | Host path of the handler binary that `core_pattern` runs; absolute, no whitespace |
-| `--crictl-path` | `/usr/local/bin/crictl` | Path of crictl on the node, for the handler |
+| `--crictl-path` | unset | Path of crictl on the node, for the handler; unset uses the first that exists of `/usr/local/bin/crictl`, `/usr/bin/crictl` and `/home/kubernetes/bin/crictl` |
 | `--proc-root` | `/proc` | `/proc` root the handler reads |
 | `--core-pattern-path` | `/proc/sys/kernel/core_pattern` | File the `core_pattern` sysctl is written through |
 | `--core-pipe-limit-path` | `/proc/sys/kernel/core_pipe_limit` | File the `core_pipe_limit` sysctl is written through |
@@ -45,10 +45,10 @@ mapping instead of JSON. A `null` value keeps the default. The daemon stops at
 startup on an unknown key or a bad value.
 
 ```yaml
-cluster: prod
+cluster-name: prod
 store-url: s3://crash-artifacts
 max-core-size: 2Gi
-max-cores-per-hour: 3
+max-cores-per-pod-per-hour: 3
 no-events: false
 capture-filter:
   exclude:

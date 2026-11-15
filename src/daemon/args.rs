@@ -47,12 +47,13 @@ pub(crate) struct DaemonArgs {
 
     /// Cluster name - the first path segment of the object key. ASCII
     /// letters, digits, `.`, `_` and `-`.
-    #[arg(long, default_value = crate::config::DEFAULT_CLUSTER, value_parser = parse_cluster)]
-    pub(crate) cluster: String,
+    #[arg(long, value_parser = parse_cluster_name)]
+    pub(crate) cluster_name: Option<String>,
 
-    /// Pass `environ` and `cmdline` through un-redacted.
-    #[arg(long)]
-    pub(crate) no_redact: bool,
+    /// Redact secrets in the snapshot's `environ` and `cmdline`
+    /// (`--redact=false` turns it off).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) redact: bool,
 
     /// `/proc` root (overridable for tests/non-standard layouts).
     #[arg(long, default_value = crate::config::DEFAULT_PROC_ROOT)]
@@ -64,9 +65,11 @@ pub(crate) struct DaemonArgs {
     #[arg(long)]
     pub(crate) store_url: Option<String>,
 
-    /// Path to the `crictl` binary for post-drain container enrichment.
-    #[arg(long, default_value = crate::config::DEFAULT_CRICTL_PATH)]
-    pub(crate) crictl_path: PathBuf,
+    /// Path to the `crictl` binary on the node, for post-drain container
+    /// enrichment. Unset uses the first of
+    /// [`crate::handler::crictl::CRICTL_CANDIDATES`] that exists.
+    #[arg(long)]
+    pub(crate) crictl_path: Option<PathBuf>,
 
     /// CRI runtime endpoint (e.g. `unix:///run/containerd/containerd.sock`).
     #[arg(long)]
@@ -80,15 +83,15 @@ pub(crate) struct DaemonArgs {
 
     /// Max core uploads per pod per hour; 0 = unlimited. Suppressed
     /// crashes still get a manifest, but no core and no proc snapshot.
-    #[arg(long, default_value_t = crate::config::DEFAULT_MAX_CORES_PER_HOUR)]
-    pub(crate) max_cores_per_hour: u32,
+    #[arg(long, default_value_t = crate::config::DEFAULT_MAX_CORES_PER_POD_PER_HOUR)]
+    pub(crate) max_cores_per_pod_per_hour: u32,
 
     /// Wall-clock deadline (seconds) for draining one core into the spool;
     /// 0 = no deadline. On expiry the handler drops the core and exits,
     /// freeing its `core_pipe_limit` slot instead of letting a hung disk hold it.
     /// A core already truncated by a size limit keeps its stored part.
-    #[arg(long, default_value_t = crate::config::DEFAULT_DRAIN_DEADLINE_SECS)]
-    pub(crate) drain_deadline_secs: u64,
+    #[arg(long, default_value_t = crate::config::DEFAULT_CORE_WRITE_TIMEOUT_SECS)]
+    pub(crate) core_write_timeout_secs: u64,
 
     /// Spool root on the node: the handler writes capture bundles here and
     /// the daemon uploads them.
@@ -177,8 +180,8 @@ pub(crate) struct DaemonArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetricsAddr(pub(crate) Option<SocketAddr>);
 
-fn parse_cluster(s: &str) -> Result<String, String> {
-    crate::config::check_cluster(s).map(|()| s.to_string())
+fn parse_cluster_name(s: &str) -> Result<String, String> {
+    crate::config::check_cluster_name(s).map(|()| s.to_string())
 }
 
 fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
@@ -255,15 +258,15 @@ impl DaemonArgs {
 
     pub(crate) fn to_handler_config(&self, store_configured: bool) -> HandlerConfig {
         HandlerConfig {
-            cluster: self.cluster.clone(),
-            no_redact: self.no_redact,
+            cluster_name: self.cluster_name.clone(),
+            redact: self.redact,
             proc_root: self.proc_root.clone(),
             store_configured,
             crictl_path: self.crictl_path.clone(),
             cri_runtime_endpoint: self.cri_runtime_endpoint.clone(),
             max_core_bytes: self.max_core_bytes,
-            max_cores_per_hour: self.max_cores_per_hour,
-            drain_deadline_secs: self.drain_deadline_secs,
+            max_cores_per_pod_per_hour: self.max_cores_per_pod_per_hour,
+            core_write_timeout_secs: self.core_write_timeout_secs,
             crictl_timeout_secs: self.crictl_timeout_secs,
             spool_dir: self.spool_dir.clone(),
             spool_max_bytes: self.spool_max_bytes,
@@ -352,14 +355,14 @@ mod tests {
         for bad in [
             "spool.maxSize=10GB",
             "upload.concurrency=0",
-            "capture.maxCoresPerHour=1.5",
+            "capture.maxCoresPerPodPerHour=1.5",
             "spool.minFreePercent=101",
-            "capture.cluster=a/b",
-            "capture.objectStore.config.TYPO=x",
+            "capture.clusterName=a/b",
+            "objectStore.config.TYPO=x",
             "capture.filter.exlude=x",
             "spool.hostDir=/",
             "corePattern.hostBinDir=/bin",
-            "capture.objectStore.config.AWS_SECRET_ACCESS_KEY=x",
+            "objectStore.config.AWS_SECRET_ACCESS_KEY=x",
             "podLabels.app\\.kubernetes\\.io/name=x",
         ] {
             assert!(
@@ -377,28 +380,37 @@ mod tests {
     fn chart_config_loads_in_the_daemon() {
         let defaults = load_with_file(&render_chart_config(&[]), &[]).unwrap();
         assert_eq!(defaults.max_core_bytes, 2 << 30);
+        assert!(defaults.redact);
+        // Helm deletes a null value: redaction keeps its default, on.
+        for (set, redact) in [
+            ("capture.redact=null", true),
+            ("capture.redact=false", false),
+        ] {
+            let args = load_with_file(&render_chart_config(&[set]), &[]).unwrap();
+            assert_eq!(args.redact, redact, "{set}");
+        }
         assert_eq!(defaults.spool_max_bytes, 10 << 30);
 
         let edges = [
             "spool.maxSize=8Ei",
             "capture.maxCoreSize=0",
-            "capture.maxCoresPerHour=4294967295",
+            "capture.maxCoresPerPodPerHour=4294967295",
             "corePattern.pipeLimit=4294967295",
             "corePattern.hostBinDir=/opt/coredrop/bin/",
             "upload.concurrency=64",
             "upload.timeoutSeconds=0",
             "spool.minFreePercent=100",
             "spool.maxAgeSeconds=0",
-            "capture.cluster=eu-west_1.prod",
+            "capture.clusterName=eu-west_1.prod",
             "capture.filter.exclude[0].namespace=kube-*",
             "capture.filter.include[0].exe=*/server",
-            "capture.objectStore.url=s3://bucket",
+            "objectStore.url=s3://bucket",
             "cri.runtimeEndpoint=unix:///run/containerd/containerd.sock",
             "metrics.enabled=false",
             "events.enabled=false",
         ];
         let args = load_with_file(&render_chart_config(&edges), &[]).unwrap();
-        assert_eq!(args.max_cores_per_hour, u32::MAX);
+        assert_eq!(args.max_cores_per_pod_per_hour, u32::MAX);
         assert_eq!(args.upload_concurrency, 64);
         assert_eq!(
             args.handler_path,
@@ -432,20 +444,20 @@ mod tests {
     #[test]
     fn config_file_sets_the_flags() {
         let args = load_with_file(
-            "cluster: prod\n\
+            "cluster-name: prod\n\
              max-core-size: 1Gi\n\
-             max-cores-per-hour: 7\n\
-             no-redact: true\n\
+             max-cores-per-pod-per-hour: 7\n\
+             redact: false\n\
              store-url: s3://bucket\n\
              metrics-addr: \"\"\n\
              capture-filter:\n  exclude:\n    - namespace: kube-system\n",
             &[],
         )
         .unwrap();
-        assert_eq!(args.cluster, "prod");
+        assert_eq!(args.cluster_name.as_deref(), Some("prod"));
         assert_eq!(args.max_core_bytes, 1 << 30);
-        assert_eq!(args.max_cores_per_hour, 7);
-        assert!(args.no_redact);
+        assert_eq!(args.max_cores_per_pod_per_hour, 7);
+        assert!(!args.redact);
         assert_eq!(args.store_url.as_deref(), Some("s3://bucket"));
         assert_eq!(args.metrics_addr, MetricsAddr(None));
         assert_eq!(
@@ -461,23 +473,24 @@ mod tests {
 
     #[test]
     fn a_config_file_value_can_start_with_a_dash() {
-        let args = load_with_file("cluster: \"-x\"\n", &[]).unwrap();
-        assert_eq!(args.cluster, "-x");
+        let args = load_with_file("cluster-name: \"-x\"\n", &[]).unwrap();
+        assert_eq!(args.cluster_name.as_deref(), Some("-x"));
     }
 
     #[test]
     fn a_cluster_name_must_be_one_key_segment() {
         for bad in ["", ".", "..", "a/b", "prod cluster"] {
             assert!(
-                load_with_file(&format!("cluster: {bad:?}\n"), &[]).is_err(),
+                load_with_file(&format!("cluster-name: {bad:?}\n"), &[]).is_err(),
                 "{bad:?}"
             );
         }
         assert_eq!(
-            load_with_file("cluster: eu-west_1.prod\n", &[])
+            load_with_file("cluster-name: eu-west_1.prod\n", &[])
                 .unwrap()
-                .cluster,
-            "eu-west_1.prod"
+                .cluster_name
+                .as_deref(),
+            Some("eu-west_1.prod")
         );
     }
 
@@ -488,27 +501,27 @@ mod tests {
         let _guard = crate::testutil::ENV_LOCK.lock().unwrap();
         // SAFETY: ENV_LOCK serializes every test that touches the env.
         unsafe { std::env::set_var("CAPTURE_CLUSTER", "from-env") };
-        let args = load_with_file("cluster: from-file\n", &[]);
+        let args = load_with_file("cluster-name: from-file\n", &[]);
         unsafe { std::env::remove_var("CAPTURE_CLUSTER") };
-        assert_eq!(args.unwrap().cluster, "from-file");
+        assert_eq!(args.unwrap().cluster_name.as_deref(), Some("from-file"));
     }
 
     #[test]
     fn a_flag_wins_over_the_config_file() {
         let args = load_with_file(
-            "cluster: prod\nmax-cores-per-hour: 7\n",
-            &["--cluster", "dev"],
+            "cluster-name: prod\nmax-cores-per-pod-per-hour: 7\n",
+            &["--cluster-name", "dev"],
         )
         .unwrap();
-        assert_eq!(args.cluster, "dev");
-        assert_eq!(args.max_cores_per_hour, 7);
+        assert_eq!(args.cluster_name.as_deref(), Some("dev"));
+        assert_eq!(args.max_cores_per_pod_per_hour, 7);
     }
 
     #[test]
     fn an_empty_config_file_or_a_null_value_keeps_the_defaults() {
-        for yaml in ["", "# nothing\n", "cluster: null\n"] {
+        for yaml in ["", "# nothing\n", "cluster-name: null\n"] {
             let args = load_with_file(yaml, &[]).unwrap();
-            assert_eq!(args.cluster, crate::config::DEFAULT_CLUSTER, "{yaml:?}");
+            assert_eq!(args.cluster_name, None, "{yaml:?}");
         }
     }
 
@@ -519,10 +532,13 @@ mod tests {
             ("clusters: null\n", "unknown key `clusters`"),
             ("config: /other.yaml\n", "unknown key `config`"),
             ("help: true\n", "unknown key `help`"),
-            ("max-cores-per-hour: many\n", "`max-cores-per-hour`"),
+            (
+                "max-cores-per-pod-per-hour: many\n",
+                "`max-cores-per-pod-per-hour`",
+            ),
             ("max-core-size: 2Zi\n", "`max-core-size`"),
             ("spool-min-free-percent: 101\n", "`spool-min-free-percent`"),
-            ("no-redact: yes please\n", "`no-redact`"),
+            ("redact: yes please\n", "`redact`"),
             ("capture-filter:\n  exclude: [{}]\n", "`capture-filter`"),
             ("- cluster\n", "top level must be a mapping"),
             ("cluster: [\n", "config file"),

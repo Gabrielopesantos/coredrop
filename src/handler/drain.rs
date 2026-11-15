@@ -45,18 +45,18 @@ pub struct CoreStats {
 
 /// The drain passed its deadline before the core stream ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DrainDeadline {
+pub struct CoreWriteTimeout {
     /// Bytes drained before the deadline.
     pub bytes: u64,
 }
 
-impl std::fmt::Display for DrainDeadline {
+impl std::fmt::Display for CoreWriteTimeout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("core drain exceeded the deadline")
     }
 }
 
-impl std::error::Error for DrainDeadline {}
+impl std::error::Error for CoreWriteTimeout {}
 
 /// Where and how much of a core is stored: the core goes through zstd into
 /// the bundle's [`CORE_FILE`](crate::spool::CORE_FILE). A core that is not
@@ -98,7 +98,7 @@ impl CoreDrain {
     ///
     /// # Errors
     ///
-    /// [`DrainDeadline`] when `deadline` passes before a core is truncated,
+    /// [`CoreWriteTimeout`] when `deadline` passes before a core is truncated,
     /// and otherwise only when the core file cannot be created or written.
     pub async fn drain_core<R>(
         &self,
@@ -156,7 +156,7 @@ async fn encoder_step(
     match race(fut, deadline_at).await {
         Err(_elapsed) => {
             warn!(drained, "core drain exceeded the deadline while {what}");
-            Err(DrainDeadline { bytes: drained }.into())
+            Err(CoreWriteTimeout { bytes: drained }.into())
         }
         Ok(result) => result.with_context(|| format!("{what} the zstd stream")),
     }
@@ -227,14 +227,14 @@ where
             Err(_elapsed) => {
                 if truncated_reason.is_none() {
                     warn!(drained, "core drain exceeded the deadline while reading");
-                    return Err(DrainDeadline { bytes: drained }.into());
+                    return Err(CoreWriteTimeout { bytes: drained }.into());
                 }
                 // Past the size cap or the spool budget, the rest is only read
                 // to count it. The stored prefix is complete: keep it, and
                 // give the encoder a short time to finish it.
                 warn!(
                     drained,
-                    "drain deadline passed after truncation; keeping the stored part"
+                    "core write timeout passed after truncation; keeping the stored part"
                 );
                 finalize_by = Some(Instant::now() + FINALIZE_GRACE);
                 break;
@@ -585,8 +585,8 @@ mod tests {
         .await;
         let err = result.unwrap_err();
         assert_eq!(
-            err.downcast_ref::<DrainDeadline>(),
-            Some(&DrainDeadline { bytes: 0 }),
+            err.downcast_ref::<CoreWriteTimeout>(),
+            Some(&CoreWriteTimeout { bytes: 0 }),
             "{err:#}"
         );
     }

@@ -10,11 +10,11 @@ uploads the spool to an object store.
 ```sh
 helm install coredrop oci://ghcr.io/gabrielopesantos/charts/coredrop \
   -n coredrop-system --create-namespace \
-  --set capture.objectStore.url=s3://crash-artifacts \
-  --set capture.objectStore.config.AWS_REGION=us-east-1
+  --set objectStore.url=s3://crash-artifacts \
+  --set objectStore.config.AWS_REGION=us-east-1
 ```
 
-Leaving `capture.objectStore.url` empty runs coredrop **observe-only**. The
+Leaving `objectStore.url` empty runs coredrop **observe-only**. The
 handler writes nothing to the spool and does not read the core. Each crash is
 still logged (`outcome="no-store-discard"`) and reported as a
 `CoreDiscardedNoStore` Event. A URL that is set but unusable stops the daemon
@@ -24,23 +24,20 @@ at startup.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. ASCII letters, digits, `.`, `_` and `-`. |
-| capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
-| capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables. |
+| capture.clusterName | string | `""` | Name of the cluster, for deployments that share one bucket or one Prometheus: the first segment of the object keys, the manifest's `cluster_name` and the `PodMonitor`'s `cluster` label. ASCII letters, digits, `.`, `_` and `-`. Empty leaves all three out. |
+| capture.coreWriteTimeoutSeconds | int | `60` | Time limit in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables. |
 | capture.filter.exclude | list | `[]` | Never capture crashes that match one of these entries; wins over `include`. Example: `[{namespace: kube-system}, {container: istio-proxy}]`. |
 | capture.filter.include | list | `[]` | Capture only crashes that match one of these entries; empty captures all. Example: `[{namespace: "team-*"}]`. |
 | capture.maxCoreSize | string | `"2Gi"` | Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit. |
-| capture.maxCoresPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep the manifest only. |
-| capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
-| capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
-| capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
-| capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix; keys in manifests and Events are relative to it. Empty disables upload. |
+| capture.maxCoresPerPodPerHour | int | `3` | Per-pod core upload budget per hour; excess crashes keep the manifest only. |
+| capture.redact | bool | `true` | Redact secrets in the `environ` and `cmdline` of the /proc snapshot. Leave true; the snapshot would carry the process's secrets. The core itself is never redacted. |
 | cleanup.enabled | bool | `true` | Run the post-delete cleanup DaemonSet on `helm uninstall`. |
 | cleanup.image | string | `"rancher/kubectl:v1.35.6"` | Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl. |
 | corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
 | corePattern.pipeLimit | int | `128` | `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`. |
-| cri.crictlPath | string | `"/usr/local/bin/crictl"` | Path to the crictl binary on the node (host mount ns), for the handler's enrichment. |
+| cri.crictlPath | string | `""` | Path to the crictl binary on the node (host mount ns), for the handler's enrichment. Empty uses the first of the usual node paths that exists. |
 | cri.runtimeEndpoint | string | `""` | CRI endpoint for crictl enrichment; when set, its `unix://` path is also the socket mounted from the host. Empty lets crictl self-resolve on the node. |
+| cri.timeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
 | events.enabled | bool | `true` | Post a k8s Event on the crashing pod per capture; `false` also skips the events RBAC. |
 | fullnameOverride | string | `""` | Override the full generated name of chart resources. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
@@ -54,6 +51,9 @@ at startup.
 | metrics.port | int | `9464` | Container port of the `/metrics` endpoint. |
 | nameOverride | string | `""` | Override the chart name segment of resource names. |
 | nodeSelector | object | `{}` | Pod node selector. |
+| objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
+| objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
+| objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix; keys in manifests and Events are relative to it. Empty disables upload. |
 | podLabels | object | `{}` | Extra labels merged onto the daemon pod template. |
 | priorityClassName | string | `""` | PriorityClass of the daemon pods. A node agent that should survive node pressure can use `system-node-critical`. |
 | resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | DaemonSet resource requests/limits. |
@@ -73,7 +73,7 @@ Only allowlisted object-store keys are read by the daemon. The chart's
 key in `config`, so `helm install`/`template` fails before a typo reaches the
 cluster. `credentials` also takes the non-secret keys:
 
-- `capture.objectStore.config` (non-secret):
+- `objectStore.config` (non-secret):
   - `AWS_REGION`
   - `AWS_DEFAULT_REGION`
   - `AWS_ENDPOINT`
@@ -89,7 +89,7 @@ cluster. `credentials` also takes the non-secret keys:
   - `AZURE_TENANT_ID`
   - `AZURE_FEDERATED_TOKEN_FILE`
   - `AZURE_AUTHORITY_HOST`
-- `capture.objectStore.credentials` (Secret):
+- `objectStore.credentials` (Secret):
   - `AWS_ACCESS_KEY_ID`
   - `AWS_SECRET_ACCESS_KEY`
   - `AWS_SESSION_TOKEN`
@@ -138,8 +138,10 @@ daemon still listens on its socket and logs every capture.
 coredrop only writes artifacts - it never deletes them or sweeps the bucket.
 Expire old crashes with your object store's native lifecycle policy, scoped
 to the coredrop key prefix so it doesn't reach into unrelated bucket
-contents. The prefix is the path of `capture.objectStore.url` (if any), then
-`capture.cluster`:
+contents. The prefix is the path of `objectStore.url`, then
+`capture.clusterName`, each only when set. With neither, the keys start at
+the bucket root, and a rule can only cover the whole bucket: give coredrop
+its own bucket or a URL path. The examples use `s3://bucket/coredumps`:
 
 **S3** (bucket lifecycle rule, e.g. via Terraform/`aws s3api`):
 
@@ -147,7 +149,7 @@ contents. The prefix is the path of `capture.objectStore.url` (if any), then
 {
   "Rules": [{
     "ID": "coredrop-expire",
-    "Filter": { "Prefix": "local/" },
+    "Filter": { "Prefix": "coredumps/" },
     "Status": "Enabled",
     "Expiration": { "Days": 30 },
     "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
@@ -161,7 +163,7 @@ contents. The prefix is the path of `capture.objectStore.url` (if any), then
 {
   "rule": [{
     "action": { "type": "Delete" },
-    "condition": { "age": 30, "matchesPrefix": ["local/"] }
+    "condition": { "age": 30, "matchesPrefix": ["coredumps/"] }
   }]
 }
 ```
@@ -174,17 +176,15 @@ contents. The prefix is the path of `capture.objectStore.url` (if any), then
     "name": "coredrop-expire",
     "type": "Lifecycle",
     "definition": {
-      "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["local/"] },
+      "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["coredumps/"] },
       "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 30 } } }
     }
   }]
 }
 ```
 
-Replace `local/` with your prefix: `<capture.cluster>/`, or
-`<url path>/<capture.cluster>/` when `capture.objectStore.url` has a path.
-For example, `s3://bucket/coredumps` with `capture.cluster=local` gives
-`coredumps/local/`.
+Replace `coredumps/` with your prefix: `<url path>/`, `<clusterName>/`, or
+`<url path>/<clusterName>/` when both are set.
 
 The daemon aborts a multipart upload that fails or passes
 `upload.timeoutSeconds`. Some cases can still leave an incomplete multipart
@@ -233,7 +233,7 @@ daemon --> uploads ready/ (upload.concurrency at a time) --> deletes the capture
 
 ## Rate limit
 
-`capture.maxCoresPerHour` (default 3) is a per-pod sliding-window budget. The
+`capture.maxCoresPerPodPerHour` (default 3) is a per-pod sliding-window budget. The
 daemon stores the window state in `recent.json` on the same hostPath as the
 handler config (`/run/coredrop`). The daemon keeps that
 state across its own restarts, upgrades and node drains: otherwise a
@@ -245,7 +245,7 @@ its existing window rather than getting a new one.
 ## Workload identity
 
 For IRSA/GKE Workload Identity/AKS Workload Identity, leave
-`capture.objectStore.credentials` empty and annotate the service account:
+`objectStore.credentials` empty and annotate the service account:
 
 ```yaml
 serviceAccount:

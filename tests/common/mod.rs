@@ -70,15 +70,15 @@ pub fn write_fixture_proc(root: &Path, pid: i32, pod_uid: &str, container_id: &s
 /// wants the reports binds a listener and sets `event_socket_path`.
 pub fn base_config(root: &Path) -> HandlerConfig {
     HandlerConfig {
-        cluster: "test".into(),
-        no_redact: false,
+        cluster_name: Some("test".into()),
+        redact: true,
         proc_root: proc_root(root),
         store_configured: true,
-        crictl_path: "/bin/false".into(),
+        crictl_path: Some("/bin/false".into()),
         cri_runtime_endpoint: None,
         max_core_bytes: 0,
-        max_cores_per_hour: 0,
-        drain_deadline_secs: 0,
+        max_cores_per_pod_per_hour: 0,
+        core_write_timeout_secs: 0,
         crictl_timeout_secs: 0,
         spool_dir: root.join("spool"),
         spool_max_bytes: 0,
@@ -161,7 +161,7 @@ pub async fn is_absent(store: &Arc<dyn ObjectStore>, key: &str) -> bool {
 }
 
 /// A core stream that never yields data nor EOF - stands in for a hung kernel
-/// pipe when exercising the drain deadline.
+/// pipe when exercising the core write timeout.
 pub struct StallReader;
 
 impl tokio::io::AsyncRead for StallReader {

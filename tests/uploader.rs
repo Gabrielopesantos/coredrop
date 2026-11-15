@@ -108,7 +108,7 @@ async fn uploads_bundles_deletes_them_and_reports_final_outcomes() {
     let tmp = TempDir::new().unwrap();
     write_fixture_proc(tmp.path(), pid, POD_UID, CONTAINER_ID);
     let mut config = base_config(tmp.path());
-    config.max_cores_per_hour = 1;
+    config.max_cores_per_pod_per_hour = 1;
 
     let core_payload = b"core payload for the uploader";
     capture(&config, pid, ts, core_payload).await;
@@ -120,14 +120,14 @@ async fn uploads_bundles_deletes_them_and_reports_final_outcomes() {
 
     assert!(ready(&config).is_empty(), "uploaded bundles are deleted");
 
-    let first = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
+    let first = ObjectKeys::new(Some("test"), POD_UID, CONTAINER_ID, ts, pid);
     let stored_core = get_object(&store, &first.core()).await;
     assert_eq!(unzstd(&stored_core).await, core_payload);
     get_object(&store, &first.proc_snapshot()).await;
     let m = manifest(&store, &first.manifest()).await;
     assert_eq!(m.core.object_key.as_deref(), Some(first.core().as_str()));
 
-    let second = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts + 1, pid);
+    let second = ObjectKeys::new(Some("test"), POD_UID, CONTAINER_ID, ts + 1, pid);
     assert!(is_absent(&store, &second.core()).await);
     assert!(is_absent(&store, &second.proc_snapshot()).await);
     let m = manifest(&store, &second.manifest()).await;
@@ -183,7 +183,7 @@ async fn a_failed_bundle_stays_in_the_spool_until_the_store_recovers() {
         metrics.contains("coredrop_upload_duration_seconds_count 0"),
         "a failed upload has no duration: {metrics}"
     );
-    let keys = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
+    let keys = ObjectKeys::new(Some("test"), POD_UID, CONTAINER_ID, ts, pid);
     let inner: Arc<dyn ObjectStore> = inner;
     assert!(
         is_absent(&inner, &keys.manifest()).await,
@@ -377,7 +377,7 @@ async fn retries_only_the_delete_of_an_uploaded_bundle() {
     );
     assert_eq!(reports[0].outcome, Outcome::Uploaded);
     assert!(ready(&config).is_empty(), "the delete is retried");
-    let keys = ObjectKeys::new("test", POD_UID, CONTAINER_ID, ts, pid);
+    let keys = ObjectKeys::new(Some("test"), POD_UID, CONTAINER_ID, ts, pid);
     get_object(&store, &keys.manifest()).await;
 }
 

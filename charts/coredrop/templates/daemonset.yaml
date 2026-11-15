@@ -94,13 +94,13 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             # Object-store client options; the client reads them from env.
-            {{- if .Values.capture.objectStore.url }}
-            {{- range $key, $value := .Values.capture.objectStore.config }}
+            {{- if .Values.objectStore.url }}
+            {{- range $key, $value := .Values.objectStore.config }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
             {{- end }}
-          {{- if and .Values.capture.objectStore.url .Values.capture.objectStore.credentials }}
+          {{- if and .Values.objectStore.url .Values.objectStore.credentials }}
           envFrom:
             - secretRef:
                 name: {{ include "coredrop.fullname" . }}-store

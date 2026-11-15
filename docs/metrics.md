@@ -41,9 +41,9 @@ daemon, and the daemon counts it.
 | `coredrop_build_info` | gauge | `version` | Always 1 |
 
 `outcome` is one of `uploaded`, `suppressed-rate-limit`, `spool-full`,
-`drain-deadline`, `skipped-non-k8s`, `filtered`, `no-store-discard`, `failed`. A spooled
+`core-write-timeout`, `skipped-non-k8s`, `filtered`, `no-store-discard`, `failed`. A spooled
 capture is counted once, when it is done: `uploaded`, its handler outcome
-(`suppressed-rate-limit`, `spool-full`, `drain-deadline`) after its upload,
+(`suppressed-rate-limit`, `spool-full`, `core-write-timeout`) after its upload,
 or `failed` when it expires. The core byte counters and
 `coredrop_cores_truncated_total` count at the same time. Every series starts
 at 0, so `increase()` sees the first capture. Prometheus sees only the
@@ -119,7 +119,7 @@ The dashboard has these variables:
 | Variable | Label | Source |
 | --- | --- | --- |
 | `datasource` | - | A Prometheus data source |
-| `cluster` | `cluster` | The `PodMonitor` sets it from `capture.cluster`. A Thanos or Mimir setup can also add it from external labels |
+| `cluster` | `cluster` | The `PodMonitor` sets it from `capture.clusterName`. A Thanos or Mimir setup can also add it from external labels |
 | `namespace` | `namespace` | The scrape |
 | `pod` | `pod` | The scrape |
 
@@ -135,7 +135,7 @@ and adds the `prometheus.io/scrape`, `prometheus.io/port` and
 `prometheus.io/path` pod annotations. With the Prometheus Operator, set
 `metrics.podMonitor.enabled: true` to render a `PodMonitor`. Add the labels
 your Prometheus selects on with `metrics.podMonitor.labels`. The `PodMonitor`
-adds the label `node` (the pod's node) and, when `capture.cluster` is set,
+adds the label `node` (the pod's node) and, when `capture.clusterName` is set,
 the label `cluster` to every series.
 
 Turn the endpoint off with `--metrics-addr=` (empty) or the chart's

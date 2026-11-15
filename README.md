@@ -67,10 +67,12 @@ manifest, so a manifest in the bucket always points at complete artifacts.
 Objects land at:
 
 ```sh
-{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-core.zst
-{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-procsnapshot.tar
-{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}-manifest.json
+[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPID}-core.zst
+[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPID}-procsnapshot.tar
+[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPID}-manifest.json
 ```
+
+The `{clusterName}/` segment is there only when `capture.clusterName` is set.
 
 ## Safety rails
 
@@ -122,7 +124,7 @@ reported, no cores are kept.
 
 ```sh
 kubectl get events --field-selector reason=CoreDumped
-prefix='local/<podUID>/<containerID>/1717000000-4242'  # manifest key without -manifest.json
+prefix='<podUID>/<containerID>/1717000000-4242'  # manifest key without -manifest.json
 aws s3 cp "s3://crash-artifacts/${prefix}-core.zst" core.zst && zstd -d core.zst
 ```
 

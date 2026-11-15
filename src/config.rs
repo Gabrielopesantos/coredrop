@@ -69,17 +69,14 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{s:?}: larger than {} bytes", u64::MAX))
 }
 
-/// Default cluster name, the first segment of every object key.
-pub const DEFAULT_CLUSTER: &str = "local";
-
-/// Check a cluster name. It is the first segment of every object key, so it
+/// Check a cluster name. It is the first segment of the object keys, so it
 /// must be one non-empty segment: ASCII letters, digits, `.`, `_` and `-`,
 /// and not `.` or `..`.
 ///
 /// # Errors
 ///
 /// Returns the reason when `name` is not a valid cluster name.
-pub fn check_cluster(name: &str) -> Result<(), String> {
+pub fn check_cluster_name(name: &str) -> Result<(), String> {
     let chars_ok = name
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
@@ -145,8 +142,9 @@ pub fn event_socket_path_for(config_path: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HandlerConfig {
-    /// Cluster name - the first path segment of the object key.
-    pub cluster: String,
+    /// Cluster name: the first segment of the object keys, and the
+    /// manifest's `cluster_name`. `None` leaves both out.
+    pub cluster_name: Option<String>,
     /// Pass `environ` and `cmdline` through un-redacted.
     pub no_redact: bool,
     /// `/proc` root (overridable for tests/non-standard layouts).
@@ -199,7 +197,7 @@ pub struct HandlerConfig {
 impl Default for HandlerConfig {
     fn default() -> Self {
         Self {
-            cluster: DEFAULT_CLUSTER.to_string(),
+            cluster_name: None,
             no_redact: false,
             proc_root: PathBuf::from(DEFAULT_PROC_ROOT),
             store_configured: false,
@@ -253,8 +251,10 @@ impl HandlerConfig {
         must_be_absolute(&self.rate_state_path, "rate_state_path")?;
         must_be_absolute(&self.event_socket_path, "event_socket_path")?;
         must_be_absolute(&self.spool_dir, "spool_dir")?;
-        if let Err(e) = check_cluster(&self.cluster) {
-            bail!("cluster: {e}");
+        if let Some(name) = &self.cluster_name
+            && let Err(e) = check_cluster_name(name)
+        {
+            bail!("cluster_name: {e}");
         }
         self.filter.validate()?;
         if self.spool_min_free_percent > 100 {
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let cfg = HandlerConfig {
-            cluster: "prod".into(),
+            cluster_name: Some("prod".into()),
             no_redact: true,
             proc_root: "/proc".into(),
             store_configured: true,

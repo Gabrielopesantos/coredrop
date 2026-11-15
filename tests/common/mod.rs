@@ -70,7 +70,7 @@ pub fn write_fixture_proc(root: &Path, pid: i32, pod_uid: &str, container_id: &s
 /// wants the reports binds a listener and sets `event_socket_path`.
 pub fn base_config(root: &Path) -> HandlerConfig {
     HandlerConfig {
-        cluster: "test".into(),
+        cluster_name: Some("test".into()),
         no_redact: false,
         proc_root: proc_root(root),
         store_configured: true,

@@ -74,8 +74,8 @@ upload:
 # What happens to a crash once the handler captures it: where it's counted
 # against, how much of it is kept, and where it's uploaded.
 capture:
-  # -- Cluster name - the first segment of every object key. ASCII letters, digits, `.`, `_` and `-`.
-  cluster: "local"
+  # -- Name of the cluster, for deployments that share one bucket or one Prometheus: the first segment of the object keys, the manifest's `cluster_name` and the `PodMonitor`'s `cluster` label. ASCII letters, digits, `.`, `_` and `-`. Empty leaves all three out.
+  clusterName: ""
   # -- Truncate stored cores at this size, as a Kubernetes quantity (`2Gi`, `500M`) or a byte count. `0` = no limit.
   maxCoreSize: 2Gi
   # -- Per-pod core upload budget per hour; excess crashes keep the manifest only.

@@ -24,7 +24,7 @@ at startup.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| capture.cluster | string | `"local"` | Cluster name - the first segment of every object key. ASCII letters, digits, `.`, `_` and `-`. |
+| capture.clusterName | string | `""` | Name of the cluster, for deployments that share one bucket or one Prometheus: the first segment of the object keys, the manifest's `cluster_name` and the `PodMonitor`'s `cluster` label. ASCII letters, digits, `.`, `_` and `-`. Empty leaves all three out. |
 | capture.crictlTimeoutSeconds | int | `10` | Timeout in seconds for `crictl inspect` in the handler; `0` = no timeout. |
 | capture.drainDeadlineSeconds | int | `60` | Deadline in seconds for the handler to write a core into the spool; past it the core is dropped, and the snapshot and manifest are still spooled. `0` disables. |
 | capture.filter.exclude | list | `[]` | Never capture crashes that match one of these entries; wins over `include`. Example: `[{namespace: kube-system}, {container: istio-proxy}]`. |
@@ -138,8 +138,10 @@ daemon still listens on its socket and logs every capture.
 coredrop only writes artifacts - it never deletes them or sweeps the bucket.
 Expire old crashes with your object store's native lifecycle policy, scoped
 to the coredrop key prefix so it doesn't reach into unrelated bucket
-contents. The prefix is the path of `capture.objectStore.url` (if any), then
-`capture.cluster`:
+contents. The prefix is the path of `capture.objectStore.url`, then
+`capture.clusterName`, each only when set. With neither, the keys start at
+the bucket root, and a rule can only cover the whole bucket: give coredrop
+its own bucket or a URL path. The examples use `s3://bucket/coredumps`:
 
 **S3** (bucket lifecycle rule, e.g. via Terraform/`aws s3api`):
 
@@ -147,7 +149,7 @@ contents. The prefix is the path of `capture.objectStore.url` (if any), then
 {
   "Rules": [{
     "ID": "coredrop-expire",
-    "Filter": { "Prefix": "local/" },
+    "Filter": { "Prefix": "coredumps/" },
     "Status": "Enabled",
     "Expiration": { "Days": 30 },
     "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
@@ -161,7 +163,7 @@ contents. The prefix is the path of `capture.objectStore.url` (if any), then
 {
   "rule": [{
     "action": { "type": "Delete" },
-    "condition": { "age": 30, "matchesPrefix": ["local/"] }
+    "condition": { "age": 30, "matchesPrefix": ["coredumps/"] }
   }]
 }
 ```
@@ -174,17 +176,15 @@ contents. The prefix is the path of `capture.objectStore.url` (if any), then
     "name": "coredrop-expire",
     "type": "Lifecycle",
     "definition": {
-      "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["local/"] },
+      "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["coredumps/"] },
       "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 30 } } }
     }
   }]
 }
 ```
 
-Replace `local/` with your prefix: `<capture.cluster>/`, or
-`<url path>/<capture.cluster>/` when `capture.objectStore.url` has a path.
-For example, `s3://bucket/coredumps` with `capture.cluster=local` gives
-`coredumps/local/`.
+Replace `coredumps/` with your prefix: `<url path>/`, `<clusterName>/`, or
+`<url path>/<clusterName>/` when both are set.
 
 The daemon aborts a multipart upload that fails or passes
 `upload.timeoutSeconds`. Some cases can still leave an incomplete multipart

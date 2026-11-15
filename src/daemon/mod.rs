@@ -63,7 +63,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!(
         handler = %args.handler_path.display(),
         config = %args.handler_config_path.display(),
-        cluster = %args.cluster,
+        cluster_name = ?args.cluster_name,
         "coredrop starting"
     );
     // Take over SIGTERM/SIGINT before core_pattern is installed. A signal
@@ -349,7 +349,7 @@ mod tests {
             handler_path: "/opt/coredrop/bin/coredrop".into(),
             config: None,
             handler_config_path: config_path.to_path_buf(),
-            cluster: "test".into(),
+            cluster_name: None,
             no_redact: false,
             proc_root: "/proc".into(),
             store_url: None,

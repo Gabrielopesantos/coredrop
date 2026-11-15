@@ -10,7 +10,6 @@ credentials come from the Secret, the node name from the downward API.
   "pipe-limit" (int64 .Values.corePattern.pipeLimit)
   "core-pattern-path" "/host/sysctl/core_pattern"
   "core-pipe-limit-path" "/host/sysctl/core_pipe_limit"
-  "cluster" .Values.capture.cluster
   "no-redact" .Values.capture.noRedact
   "max-core-size" (include "coredrop.size" (dict "value" .Values.capture.maxCoreSize))
   "max-cores-per-hour" (int64 .Values.capture.maxCoresPerHour)
@@ -29,6 +28,9 @@ credentials come from the Secret, the node name from the downward API.
 }}
 {{- with .Values.capture.objectStore.url }}
 {{- $_ := set $config "store-url" . }}
+{{- end }}
+{{- with .Values.capture.clusterName }}
+{{- $_ := set $config "cluster-name" . }}
 {{- end }}
 {{- with .Values.cri.crictlPath }}
 {{- $_ := set $config "crictl-path" . }}

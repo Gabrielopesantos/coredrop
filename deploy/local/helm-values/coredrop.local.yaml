@@ -12,7 +12,7 @@ cleanup:
   image: "docker.io/rancher/kubectl:v1.35.6"
 
 capture:
-  cluster: "local"
+  clusterName: "local"
   objectStore:
     url: "s3://coredrop-cores"
     config:

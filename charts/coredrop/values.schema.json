@@ -143,9 +143,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cluster": {
+        "clusterName": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9._-]+$",
+          "pattern": "^[A-Za-z0-9._-]*$",
           "not": { "enum": [".", ".."] }
         },
         "maxCoreSize": { "$ref": "#/definitions/size" },

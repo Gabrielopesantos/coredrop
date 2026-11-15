@@ -110,7 +110,7 @@ crash_pod="$(kubectl -n "$DEMO_NAMESPACE" get pods \
            | select(.metadata.deletionTimestamp == null)
            | .metadata.name' | head -n1)"
 [ -n "$crash_pod" ] || die "could not resolve a running crash-segfault pod in $DEMO_NAMESPACE"
-# Object keys start with {cluster}/{podUID}/. Match only this pod's objects: the
+# Object keys start with {clusterName}/{podUID}/ (the overlay sets clusterName). Match only this pod's objects: the
 # daemon can still be uploading a spooled capture of the previous
 # (rate-limited) pod after the purge above.
 crash_uid="$(kubectl -n "$DEMO_NAMESPACE" get pod "$crash_pod" -o jsonpath='{.metadata.uid}')"

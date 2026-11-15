@@ -225,7 +225,7 @@ pub async fn run(
         warn!("crictl identity unknown; capture filter keeps this crash");
     }
 
-    let cluster = config.cluster.as_str();
+    let cluster_name = config.cluster_name.as_deref();
     let spool = Spool::new(&config.spool_dir);
 
     // A bundle needs an identity (for its object keys) and a store to go to.
@@ -240,7 +240,7 @@ pub async fn run(
                 Ok(bundle) => Some(Target {
                     identity: id,
                     keys: ObjectKeys::new(
-                        cluster,
+                        cluster_name,
                         &id.pod_uid,
                         &id.container_id,
                         args.timestamp,
@@ -482,7 +482,7 @@ pub async fn run(
     let manifest = Manifest {
         schema_version: 1,
         captured_at: format_timestamp(args.timestamp),
-        cluster: cluster.to_string(),
+        cluster_name: cluster_name.map(str::to_string),
         node: crate::host::node_hostname(),
         signal: args.signal,
         signal_name: signal_name(args.signal).map(str::to_string),

@@ -49,7 +49,7 @@ fn capture_args(pid: i32, signal: i32, timestamp: i64) -> CaptureArgs {
 
 /// The three object keys one capture produces, for the standard fixture identity.
 fn keys(container_id: &str, ts: i64, pid: i32) -> (String, String, String) {
-    let keys = ObjectKeys::new("test", POD_UID, container_id, ts, pid);
+    let keys = ObjectKeys::new(Some("test"), POD_UID, container_id, ts, pid);
     (keys.core(), keys.proc_snapshot(), keys.manifest())
 }
 
@@ -119,7 +119,7 @@ async fn run_spools_core_snapshot_and_manifest() {
     assert!(manifest.core.present, "core.present must be true");
     assert_eq!(manifest.signal, 11);
     assert_eq!(manifest.signal_name.as_deref(), Some("SIGSEGV"));
-    assert_eq!(manifest.cluster, "test");
+    assert_eq!(manifest.cluster_name.as_deref(), Some("test"));
     assert_eq!(manifest.identity.pod_uid, POD_UID);
     assert_eq!(manifest.identity.container_id, CONTAINER_ID);
     assert_eq!(manifest.core.object_key.as_deref(), Some(core_key.as_str()));

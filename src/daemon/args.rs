@@ -47,8 +47,8 @@ pub(crate) struct DaemonArgs {
 
     /// Cluster name - the first path segment of the object key. ASCII
     /// letters, digits, `.`, `_` and `-`.
-    #[arg(long, default_value = crate::config::DEFAULT_CLUSTER, value_parser = parse_cluster)]
-    pub(crate) cluster: String,
+    #[arg(long, value_parser = parse_cluster_name)]
+    pub(crate) cluster_name: Option<String>,
 
     /// Pass `environ` and `cmdline` through un-redacted.
     #[arg(long)]
@@ -179,8 +179,8 @@ pub(crate) struct DaemonArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetricsAddr(pub(crate) Option<SocketAddr>);
 
-fn parse_cluster(s: &str) -> Result<String, String> {
-    crate::config::check_cluster(s).map(|()| s.to_string())
+fn parse_cluster_name(s: &str) -> Result<String, String> {
+    crate::config::check_cluster_name(s).map(|()| s.to_string())
 }
 
 fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
@@ -257,7 +257,7 @@ impl DaemonArgs {
 
     pub(crate) fn to_handler_config(&self, store_configured: bool) -> HandlerConfig {
         HandlerConfig {
-            cluster: self.cluster.clone(),
+            cluster_name: self.cluster_name.clone(),
             no_redact: self.no_redact,
             proc_root: self.proc_root.clone(),
             store_configured,
@@ -356,7 +356,7 @@ mod tests {
             "upload.concurrency=0",
             "capture.maxCoresPerHour=1.5",
             "spool.minFreePercent=101",
-            "capture.cluster=a/b",
+            "capture.clusterName=a/b",
             "capture.objectStore.config.TYPO=x",
             "capture.filter.exlude=x",
             "spool.hostDir=/",
@@ -391,7 +391,7 @@ mod tests {
             "upload.timeoutSeconds=0",
             "spool.minFreePercent=100",
             "spool.maxAgeSeconds=0",
-            "capture.cluster=eu-west_1.prod",
+            "capture.clusterName=eu-west_1.prod",
             "capture.filter.exclude[0].namespace=kube-*",
             "capture.filter.include[0].exe=*/server",
             "capture.objectStore.url=s3://bucket",
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn config_file_sets_the_flags() {
         let args = load_with_file(
-            "cluster: prod\n\
+            "cluster-name: prod\n\
              max-core-size: 1Gi\n\
              max-cores-per-hour: 7\n\
              no-redact: true\n\
@@ -444,7 +444,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(args.cluster, "prod");
+        assert_eq!(args.cluster_name.as_deref(), Some("prod"));
         assert_eq!(args.max_core_bytes, 1 << 30);
         assert_eq!(args.max_cores_per_hour, 7);
         assert!(args.no_redact);
@@ -463,23 +463,24 @@ mod tests {
 
     #[test]
     fn a_config_file_value_can_start_with_a_dash() {
-        let args = load_with_file("cluster: \"-x\"\n", &[]).unwrap();
-        assert_eq!(args.cluster, "-x");
+        let args = load_with_file("cluster-name: \"-x\"\n", &[]).unwrap();
+        assert_eq!(args.cluster_name.as_deref(), Some("-x"));
     }
 
     #[test]
     fn a_cluster_name_must_be_one_key_segment() {
         for bad in ["", ".", "..", "a/b", "prod cluster"] {
             assert!(
-                load_with_file(&format!("cluster: {bad:?}\n"), &[]).is_err(),
+                load_with_file(&format!("cluster-name: {bad:?}\n"), &[]).is_err(),
                 "{bad:?}"
             );
         }
         assert_eq!(
-            load_with_file("cluster: eu-west_1.prod\n", &[])
+            load_with_file("cluster-name: eu-west_1.prod\n", &[])
                 .unwrap()
-                .cluster,
-            "eu-west_1.prod"
+                .cluster_name
+                .as_deref(),
+            Some("eu-west_1.prod")
         );
     }
 
@@ -490,27 +491,27 @@ mod tests {
         let _guard = crate::testutil::ENV_LOCK.lock().unwrap();
         // SAFETY: ENV_LOCK serializes every test that touches the env.
         unsafe { std::env::set_var("CAPTURE_CLUSTER", "from-env") };
-        let args = load_with_file("cluster: from-file\n", &[]);
+        let args = load_with_file("cluster-name: from-file\n", &[]);
         unsafe { std::env::remove_var("CAPTURE_CLUSTER") };
-        assert_eq!(args.unwrap().cluster, "from-file");
+        assert_eq!(args.unwrap().cluster_name.as_deref(), Some("from-file"));
     }
 
     #[test]
     fn a_flag_wins_over_the_config_file() {
         let args = load_with_file(
-            "cluster: prod\nmax-cores-per-hour: 7\n",
-            &["--cluster", "dev"],
+            "cluster-name: prod\nmax-cores-per-hour: 7\n",
+            &["--cluster-name", "dev"],
         )
         .unwrap();
-        assert_eq!(args.cluster, "dev");
+        assert_eq!(args.cluster_name.as_deref(), Some("dev"));
         assert_eq!(args.max_cores_per_hour, 7);
     }
 
     #[test]
     fn an_empty_config_file_or_a_null_value_keeps_the_defaults() {
-        for yaml in ["", "# nothing\n", "cluster: null\n"] {
+        for yaml in ["", "# nothing\n", "cluster-name: null\n"] {
             let args = load_with_file(yaml, &[]).unwrap();
-            assert_eq!(args.cluster, crate::config::DEFAULT_CLUSTER, "{yaml:?}");
+            assert_eq!(args.cluster_name, None, "{yaml:?}");
         }
     }
 

@@ -3,11 +3,11 @@
 coredrop has no retrieval command - artifacts are plain objects at a
 predictable key, so any object-store CLI works. Given a manifest key (from a
 k8s Event's message, or listing the bucket) or its
-`{cluster}/{podUID}/{containerID}/{timestamp}-{hostPID}` prefix, set it once
+`[{clusterName}/]{podUID}/{containerID}/{timestamp}-{hostPID}` prefix, set it once
 and use it in the commands below:
 
 ```sh
-prefix='local/<podUID>/<containerID>/1717000000-4242'
+prefix='<podUID>/<containerID>/1717000000-4242'
 ```
 
 ## S3/S3-compatible (MinIO, etc.)

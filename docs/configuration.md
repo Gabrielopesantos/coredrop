@@ -11,7 +11,7 @@ For the Helm values that set these flags, see the
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--config` | unset | YAML config file that sets the other flags |
-| `--cluster` | `local` | First segment of the object key: ASCII letters, digits, `.`, `_` and `-` |
+| `--cluster-name` | unset | Name of the cluster: the first segment of the object keys and the manifest's `cluster_name`; ASCII letters, digits, `.`, `_` and `-`. Unset leaves both out |
 | `--store-url` | unset | `s3://bucket`/`gs://...`/`az://...`; a path after the bucket (`s3://bucket/coredumps`) is a key prefix, and keys in manifests and Events are relative to it; unset = observe-only: crashes are logged and reported, no cores are kept |
 | `--max-core-size` | `2Gi` | Stored core cap per crash; 0 = unlimited |
 | `--max-cores-per-hour` | 3 | Per-pod core budget; 0 = unlimited |
@@ -45,7 +45,7 @@ mapping instead of JSON. A `null` value keeps the default. The daemon stops at
 startup on an unknown key or a bad value.
 
 ```yaml
-cluster: prod
+cluster-name: prod
 store-url: s3://crash-artifacts
 max-core-size: 2Gi
 max-cores-per-hour: 3

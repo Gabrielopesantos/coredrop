@@ -7,7 +7,6 @@ credentials come from the Secret, the node name from the downward API.
 */ -}}
 {{- $config := dict
   "handler-path" (printf "%s/coredrop" (clean .Values.corePattern.hostBinDir))
-  "handler-config-path" (printf "%s/handler.json" (clean .Values.corePattern.hostRunDir))
   "pipe-limit" (int64 .Values.corePattern.pipeLimit)
   "core-pattern-path" "/host/sysctl/core_pattern"
   "core-pipe-limit-path" "/host/sysctl/core_pipe_limit"

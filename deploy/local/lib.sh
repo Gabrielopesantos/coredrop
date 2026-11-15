@@ -36,8 +36,8 @@ SEGFAULT_IMAGE="${SEGFAULT_IMAGE:-docker.io/library/coredrop-segfault:dev}"
 CLEANUP_IMAGE="${CLEANUP_IMAGE:-docker.io/rancher/kubectl:v1.35.6}"
 
 # The node paths the chart's post-delete hook is supposed to remove; lifecycle.sh
-# asserts they are gone. Must match `corePattern.hostBinDir`/`hostRunDir` and
-# `spool.hostDir`.
+# asserts they are gone. Must match `corePattern.hostBinDir`, the fixed
+# /run/coredrop, and `spool.hostDir`.
 HOST_BIN_DIR="${HOST_BIN_DIR:-/opt/coredrop/bin}"
 HOST_RUN_DIR="${HOST_RUN_DIR:-/run/coredrop}"
 HOST_SPOOL_DIR="${HOST_SPOOL_DIR:-/var/lib/coredrop/spool}"
@@ -73,9 +73,11 @@ source "$SCRIPT_DIR/cluster-lima-k3s.sh"
 
 # A node core_pattern that contains this points at our handler.
 HANDLER_MARK="coredrop capture"
-# The node's pre-install core_pattern, recorded by install_coredrop. The test
-# scripts assert that an uninstall gives this value back.
+# The node's pre-install core_pattern and core_pipe_limit, recorded by
+# install_coredrop. The test scripts assert that an uninstall gives these
+# values back.
 ORIG_FILE="$SCRIPT_DIR/.tmp/orig_core_pattern"
+ORIG_PIPE_LIMIT_FILE="$SCRIPT_DIR/.tmp/orig_core_pipe_limit"
 
 # Die unless the coredrop release is installed.
 require_release() {
@@ -84,7 +86,8 @@ require_release() {
 }
 
 # Install (or upgrade) the coredrop release against the in-cluster MinIO and
-# wait for it. Records the node's pre-install core_pattern to $ORIG_FILE.
+# wait for it. Records the node's pre-install core_pattern to $ORIG_FILE and
+# core_pipe_limit to $ORIG_PIPE_LIMIT_FILE.
 # Extra arguments go to `helm upgrade` (for example `--set-json ...`).
 install_coredrop() {
   # The daemon uploads from its pod network, so a ClusterIP is reachable. Point
@@ -117,6 +120,7 @@ install_coredrop() {
     fi
     mkdir -p "$(dirname "$ORIG_FILE")"
     printf '%s' "$orig_core_pattern" > "$ORIG_FILE"
+    node_exec cat /proc/sys/kernel/core_pipe_limit > "$ORIG_PIPE_LIMIT_FILE"
   fi
 
   # With the monitoring stack installed (monitoring.sh), also render the

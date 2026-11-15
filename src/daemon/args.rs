@@ -20,9 +20,8 @@ use crate::filter::CaptureFilter;
 const DEFAULT_SHUTDOWN_FLUSH_SECS: u64 = 25;
 
 /// `coredrop` daemon config. Every knob is a flag, and `--config` names a
-/// YAML file that sets the same knobs (see [`DaemonArgs::load`]). Only
-/// `--node-name` also reads an env var (`NODE_NAME`, from the downward API).
-/// Secrets (store creds) stay env-only: never flags
+/// YAML file that sets the same knobs (see [`DaemonArgs::load`]). No knob
+/// reads an env var. Secrets (store creds) stay env-only: never flags
 /// (they leak via `ps`/cmdline) and never the file (a `ConfigMap` in the
 /// chart). The kernel-exec'd `capture` subcommand reads the daemon-written
 /// hostPath config file (see `src/main.rs`), not these flags.
@@ -38,8 +37,12 @@ pub(crate) struct DaemonArgs {
     #[arg(long, default_value = crate::DEFAULT_HANDLER_PATH)]
     pub(crate) handler_path: PathBuf,
 
-    /// hostPath the daemon serializes the handler config to.
-    #[arg(long, default_value = crate::config::DEFAULT_CONFIG_PATH)]
+    /// Host path the daemon writes the handler config to. Not a flag: the
+    /// kernel runs the handler with an empty environment and only the
+    /// `core_pattern` arguments, so the handler can only find the config at
+    /// [`DEFAULT_CONFIG_PATH`](crate::config::DEFAULT_CONFIG_PATH). Tests set
+    /// a temp path.
+    #[arg(skip = PathBuf::from(crate::config::DEFAULT_CONFIG_PATH))]
     pub(crate) handler_config_path: PathBuf,
 
     /// Cluster name - the first path segment of the object key. ASCII
@@ -149,7 +152,7 @@ pub(crate) struct DaemonArgs {
     /// Node name reported on k8s Events (the chart sets it from
     /// `spec.nodeName`). Unset falls back to the hostname, which in a pod
     /// without `hostNetwork` is the pod name, not the node.
-    #[arg(long, env = "NODE_NAME")]
+    #[arg(long)]
     pub(crate) node_name: Option<String>,
 
     /// File the `core_pattern` sysctl is written through. The chart points it
@@ -190,7 +193,7 @@ fn parse_metrics_addr(s: &str) -> Result<MetricsAddr, String> {
 impl DaemonArgs {
     /// Parse `argv` (program name first). With `--config`, the file's values
     /// replace the built-in defaults, so the order is: flag, file, built-in
-    /// default. `--node-name` also reads `NODE_NAME`.
+    /// default.
     ///
     /// # Errors
     ///

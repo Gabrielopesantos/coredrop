@@ -1,5 +1,6 @@
 {{- $binDir := clean .Values.corePattern.hostBinDir }}
-{{- $runDir := clean .Values.corePattern.hostRunDir }}
+{{- /* Fixed: the kernel-exec'd handler reads its config only here. */}}
+{{- $runDir := "/run/coredrop" }}
 {{- $spoolDir := clean .Values.spool.hostDir }}
 {{- $criUnixSocket := "" }}
 {{- if hasPrefix "unix://" .Values.cri.runtimeEndpoint }}
@@ -36,7 +37,8 @@ spec:
     spec:
       serviceAccountName: {{ include "coredrop.serviceAccountName" . }}
       # The daemon keeps uploading the spool for shutdownFlushSeconds after
-      # SIGTERM; the margin covers restoring core_pattern and exiting.
+      # SIGTERM, after it restores core_pattern; the 10 s margin covers the
+      # multipart aborts (2 s), the last Events (3 s) and exiting.
       terminationGracePeriodSeconds: {{ add .Values.upload.shutdownFlushSeconds 10 }}
       automountServiceAccountToken: {{ .Values.events.enabled }}
       {{- with .Values.priorityClassName }}
@@ -78,9 +80,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          # Every daemon setting is in the config file (configmap.yaml); env
-          # holds only what the file must not or cannot hold.
-          args: ["--config", "/etc/coredrop/config.yaml"]
+          # Every daemon setting is in the config file (configmap.yaml), except
+          # the node name, which only the downward API knows. Kubernetes
+          # expands $(NODE_NAME) from the env below. Env holds only what the
+          # file must not or cannot hold.
+          args: ["--config", "/etc/coredrop/config.yaml", "--node-name=$(NODE_NAME)"]
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
@@ -132,8 +136,8 @@ spec:
               mountPath: /etc/coredrop/config.yaml
               subPath: config.yaml
               readOnly: true
-            # hostPath for the daemon-written handler config and the handler binary
-            # install dir (the handler reads the config path from here).
+            # hostPath for the daemon-written handler config, events.sock and the
+            # rate-limit state. The handler reads its config from this fixed path.
             - name: host-run
               mountPath: {{ $runDir | quote }}
             # The spool, at its host path: the handler writes host paths, and

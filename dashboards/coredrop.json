@@ -1397,7 +1397,7 @@
       "type": "timeseries",
       "id": 23,
       "title": "Events posted",
-      "description": "Kubernetes Event create and patch requests per minute, by result, and Events dropped because the post queue was full.",
+      "description": "Captures posted as a Kubernetes Event per minute, by result, and Events dropped because the post queue was full.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

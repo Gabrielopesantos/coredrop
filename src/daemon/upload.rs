@@ -90,6 +90,8 @@ pub async fn upload_file(
     .await;
     // `BufWriter` does not abort its multipart upload on drop, and S3/GCS
     // keep (and bill) the parts of an upload nobody completes or aborts.
+    // A cancel while `BufWriter` still creates the upload makes `abort` a
+    // no-op; parts of such an upload stay for the bucket's lifecycle rule.
     // `abort` panics once `shutdown` has been polled, so abort only here.
     let copied = copied.and_then(|r| r.map_err(anyhow::Error::from));
     if let Err(e) = copied {
@@ -188,7 +190,8 @@ fn retry_config() -> object_store::RetryConfig {
     }
 }
 
-/// Build an object store from a store URL (e.g. `s3://crash-artifacts`) plus
+/// Build an object store from a store URL (e.g. `s3://crash-artifacts`, or
+/// `s3://crash-artifacts/prefix` to write every key under `prefix/`) plus
 /// `object_store` config options.
 ///
 /// Dispatches on scheme rather than `parse_url_opts` because retry config is
@@ -207,7 +210,7 @@ pub fn object_store_from_url_opts(
     use object_store::{aws, azure, gcp};
 
     let url = url::Url::parse(raw_url).context("the store URL is not a valid URL")?;
-    let (scheme, _path) =
+    let (scheme, prefix) =
         Scheme::parse(&url).context("the store URL scheme has no object store")?;
     let url_str = url.to_string();
     let store: Arc<dyn ObjectStore> = match scheme {
@@ -237,7 +240,14 @@ pub fn object_store_from_url_opts(
         // daemon's RAM and lose it on exit.
         other => bail!("the store URL scheme {other:?} is not supported"),
     };
-    Ok(store)
+    // The path after the bucket (`s3://bucket/coredumps`) is a key prefix.
+    // `file://` already roots the store at its path.
+    if prefix.as_ref().is_empty() || scheme == Scheme::Local {
+        return Ok(store);
+    }
+    Ok(Arc::new(object_store::prefix::PrefixStore::new(
+        store, prefix,
+    )))
 }
 
 /// Apply each option whose lowercase key names a config key of the builder;
@@ -438,7 +448,14 @@ mod tests {
             ("AWS_REGION".to_string(), "us-east-1".to_string()),
             ("NOT_A_REAL_KEY".to_string(), "ignored".to_string()),
         ];
-        assert!(object_store_from_url_opts("s3://some-bucket", s3_opts).is_ok());
+        assert!(object_store_from_url_opts("s3://some-bucket", s3_opts.clone()).is_ok());
+
+        // A path after the bucket becomes a key prefix, not dropped.
+        let prefixed =
+            object_store_from_url_opts("s3://some-bucket/coredumps/prod", s3_opts.clone()).unwrap();
+        assert_eq!(prefixed.to_string(), "PrefixObjectStore(coredumps/prod)");
+        let bare = object_store_from_url_opts("s3://some-bucket/", s3_opts).unwrap();
+        assert!(!bare.to_string().starts_with("PrefixObjectStore"), "{bare}");
 
         // Not a URL, a URL whose scheme has no backend, and RAM.
         assert!(object_store_from_url_opts("not a url", vec![]).is_err());

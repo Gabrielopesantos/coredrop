@@ -30,6 +30,13 @@ pub const CORE_PIPE_LIMIT_PATH: &str = "/proc/sys/kernel/core_pipe_limit";
 /// The kernel's own `core_pattern` default.
 const KERNEL_DEFAULT_PATTERN: &str = "core";
 
+/// The kernel's own `core_pipe_limit` default.
+const KERNEL_DEFAULT_PIPE_LIMIT: &str = "0";
+
+/// The kernel keeps at most this many bytes of `core_pattern`
+/// (`CORENAME_MAX_SIZE`, with the terminating NUL) and cuts the rest.
+const MAX_PATTERN_LEN: usize = 127;
+
 /// Build the `core_pattern` value routing cores to our handler:
 /// `|<handler> capture %P %s %t %E`.
 #[must_use]
@@ -53,8 +60,8 @@ impl CorePatternGuard {
     ///
     /// # Errors
     ///
-    /// Fails when `handler_path` is not absolute or contains whitespace (the
-    /// kernel would not run it), or when the pattern file cannot be read (to
+    /// Fails when `handler_path` is not absolute, contains whitespace or `%`,
+    /// or makes the pattern too long (the kernel would not run it), or when the pattern file cannot be read (to
     /// save the previous value) or written. A failed `core_pipe_limit` write
     /// only warns.
     pub fn install_at(
@@ -63,28 +70,40 @@ impl CorePatternGuard {
         pattern_path: PathBuf,
         pipe_limit_path: PathBuf,
     ) -> Result<Self> {
-        // The kernel splits core_pattern on whitespace and runs the first
-        // word as an absolute path. Any other value installs fine but loses
-        // every crash.
+        // The kernel splits core_pattern on whitespace, expands `%`
+        // specifiers, cuts it at MAX_PATTERN_LEN, and runs the first word as
+        // an absolute path. Any other value installs fine but loses every
+        // crash.
         let handler = handler_path.to_string_lossy();
         ensure!(
-            handler_path.is_absolute() && !handler.contains(char::is_whitespace),
-            "handler path {handler:?} must be absolute and contain no whitespace"
+            handler_path.is_absolute()
+                && !handler.contains(char::is_whitespace)
+                && !handler.contains('%'),
+            "handler path {handler:?} must be absolute and contain no whitespace or `%`"
+        );
+        let pattern = build_pattern(handler_path);
+        ensure!(
+            pattern.len() <= MAX_PATTERN_LEN,
+            "handler path {handler:?} is too long: core_pattern {pattern:?} is {} bytes, the kernel keeps {MAX_PATTERN_LEN}",
+            pattern.len()
         );
         let mut prev_pattern = std::fs::read_to_string(&pattern_path)
             .with_context(|| format!("reading {}", pattern_path.display()))?;
-        // A daemon killed without a clean shutdown leaves our pattern in place.
-        // Saving it as the previous value would point the node at the handler
-        // after we stop. The real previous value is lost, so use the default.
-        if prev_pattern.trim_end() == build_pattern(handler_path) {
+        let mut prev_pipe_limit = std::fs::read_to_string(&pipe_limit_path).unwrap_or_default();
+        // A daemon killed without a clean shutdown leaves our pattern and
+        // pipe limit in place. Saving them as the previous values would keep
+        // the node on our settings after we stop. The real previous values
+        // are lost, so use the kernel defaults.
+        if prev_pattern.trim_end() == pattern {
             warn!(
-                "core_pattern already routes to our handler (previous daemon did not restore it); will restore the kernel default `core`"
+                "core_pattern already routes to our handler (previous daemon did not restore it); will restore the kernel defaults"
             );
             prev_pattern = KERNEL_DEFAULT_PATTERN.to_string();
+            if !prev_pipe_limit.is_empty() {
+                prev_pipe_limit = KERNEL_DEFAULT_PIPE_LIMIT.to_string();
+            }
         }
-        let prev_pipe_limit = std::fs::read_to_string(&pipe_limit_path).unwrap_or_default();
 
-        let pattern = build_pattern(handler_path);
         std::fs::write(&pattern_path, &pattern)
             .with_context(|| format!("writing {}", pattern_path.display()))?;
         if let Err(e) = std::fs::write(&pipe_limit_path, pipe_limit.to_string()) {
@@ -257,7 +276,13 @@ mod tests {
         let pattern = dir.path().join("core_pattern");
         let pipe = dir.path().join("core_pipe_limit");
         std::fs::write(&pattern, "core\n").unwrap();
-        for bad in ["bin/coredrop", "/opt/core drop/coredrop"] {
+        let too_long = format!("/{}/coredrop", "d".repeat(100));
+        for bad in [
+            "bin/coredrop",
+            "/opt/core drop/coredrop",
+            "/opt/%p/coredrop",
+            &too_long,
+        ] {
             let result =
                 CorePatternGuard::install_at(Path::new(bad), 16, pattern.clone(), pipe.clone());
             assert!(result.is_err(), "{bad}");
@@ -303,10 +328,16 @@ mod tests {
         std::fs::write(&pipe, "128\n").unwrap();
 
         drop(
-            CorePatternGuard::install_at(Path::new("/h/coredrop"), 16, pattern.clone(), pipe)
-                .unwrap(),
+            CorePatternGuard::install_at(
+                Path::new("/h/coredrop"),
+                16,
+                pattern.clone(),
+                pipe.clone(),
+            )
+            .unwrap(),
         );
 
         assert_eq!(std::fs::read_to_string(&pattern).unwrap(), "core");
+        assert_eq!(std::fs::read_to_string(&pipe).unwrap(), "0");
     }
 }

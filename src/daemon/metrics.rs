@@ -156,7 +156,7 @@ impl Metrics {
         );
         registry.register(
             "events_posted",
-            "Kubernetes Event create and patch requests, by result",
+            "Captures posted as a Kubernetes Event (one create or patch, a patch that falls back to a create counts once), by result",
             events_posted.clone(),
         );
 
@@ -278,7 +278,7 @@ impl Metrics {
     }
 }
 
-/// Register a metric with no labels and return it.
+/// Register `coredrop_build_info` with the crate version.
 fn register_build_info(registry: &mut Registry) {
     registry.register(
         "build",

@@ -163,16 +163,32 @@ impl Uploader {
             let next_retry = next_retry(&pending, tasks.len(), self.settings.concurrency.max(1));
 
             tokio::select! {
+                // A task that finished is recorded before the flush deadline
+                // ends the loop, so its capture is reported.
+                biased;
+                Some(joined) = tasks.join_next_with_id() => {
+                    self.joined(joined, &mut task_names, &mut pending);
+                }
                 () = &mut shutdown, if flush_deadline.is_none() => {
                     info!(pending = pending.len(), flush_secs = flush.as_secs(), "flushing the spool before exit");
                     flush_deadline = Some(Instant::now() + flush);
                     self.scan(&mut pending);
+                    // The flush is the last chance: do not wait out a backoff.
+                    let now = Instant::now();
+                    for p in pending.values_mut() {
+                        p.next_at = now;
+                    }
                 }
                 () = sleep_until(flush_deadline), if flush_deadline.is_some() => {
                     warn!(pending = pending.len(), "flush time is up; remaining bundles stay in the spool");
                     let _ = cancel_tx.send(true);
+                    // Record the tasks that still finish, an upload whose
+                    // manifest was already on its way or a delete, so their
+                    // captures are reported too.
                     let aborted = tokio::time::timeout(ABORT_WAIT, async {
-                        while tasks.join_next().await.is_some() {}
+                        while let Some(joined) = tasks.join_next_with_id().await {
+                            self.joined(joined, &mut task_names, &mut pending);
+                        }
                     })
                     .await;
                     if aborted.is_err() {
@@ -182,17 +198,24 @@ impl Uploader {
                 }
                 () = wake.notified() => self.scan(&mut pending),
                 _ = scan.tick() => self.scan(&mut pending),
-                Some(joined) = tasks.join_next_with_id() => {
-                    let (id, result) = match joined {
-                        Ok((id, result)) => (id, result),
-                        Err(e) => (e.id(), Err(anyhow!("upload task failed: {e}"))),
-                    };
-                    if let Some(name) = task_names.remove(&id) {
-                        self.finish(&name, result, &mut pending);
-                    }
-                }
                 () = sleep_until(next_retry), if next_retry.is_some() => {}
             }
+        }
+    }
+
+    /// Record a task that ended.
+    fn joined(
+        &self,
+        joined: Result<(tokio::task::Id, Result<Attempt>), tokio::task::JoinError>,
+        task_names: &mut HashMap<tokio::task::Id, String>,
+        pending: &mut BTreeMap<String, Pending>,
+    ) {
+        let (id, result) = match joined {
+            Ok((id, result)) => (id, result),
+            Err(e) => (e.id(), Err(anyhow!("upload task failed: {e}"))),
+        };
+        if let Some(name) = task_names.remove(&id) {
+            self.finish(&name, result, pending);
         }
     }
 
@@ -200,7 +223,16 @@ impl Uploader {
     /// stale bundles from `incoming/`, and update the spool gauges.
     fn scan(&self, pending: &mut BTreeMap<String, Pending>) {
         let ready_dir = self.spool.ready_dir();
-        let ready = list_names(&ready_dir);
+        // On a read error, keep the state: forgetting the entries would lose
+        // their backoff, and upload and report a bundle whose delete failed
+        // a second time.
+        let ready = match list_names(&ready_dir) {
+            Ok(ready) => ready,
+            Err(e) => {
+                warn!(error = %e, dir = %ready_dir.display(), "cannot list the spool; will retry");
+                return;
+            }
+        };
         // A reported bundle waits only for its delete, not for an upload.
         let waiting: Vec<&String> = ready
             .iter()
@@ -271,6 +303,7 @@ impl Uploader {
     fn finish(&self, name: &str, result: Result<Attempt>, pending: &mut BTreeMap<String, Pending>) {
         match result {
             Ok(Attempt { report, deleted }) => {
+                let uploaded_now = report.is_some();
                 if let Some((payload, took)) = report {
                     self.metrics.upload_attempt(true);
                     self.metrics.upload_duration(took);
@@ -288,6 +321,10 @@ impl Uploader {
                 };
                 p.in_flight = false;
                 p.reported = true;
+                // Delete retries count from 1, not from the upload failures.
+                if uploaded_now {
+                    p.attempts = 0;
+                }
                 p.attempts += 1;
                 let backoff = backoff(self.settings.retry_backoff, p.attempts);
                 p.next_at = Instant::now() + backoff;
@@ -434,20 +471,22 @@ fn read_capture(dir: &Path) -> Result<CaptureEventPayload> {
     serde_json::from_slice(&bytes).context("parsing the bundle capture event")
 }
 
-/// The bundle names in `dir`. Empty when it cannot be read.
-fn list_names(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok()?.file_name().into_string().ok())
-                .collect()
-        })
-        .unwrap_or_default()
+/// The bundle names in `dir`.
+/// An entry error fails the listing: a short list would make
+/// `Uploader::scan` forget the state of the bundles it misses.
+fn list_names(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        if let Ok(name) = entry?.file_name().into_string() {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 /// Delete bundles in `incoming/` older than [`INCOMING_MAX_AGE`].
 fn sweep_incoming(dir: &Path) {
-    for name in list_names(dir) {
+    for name in list_names(dir).unwrap_or_default() {
         let path = dir.join(&name);
         let stale = newest_mtime(&path)
             .and_then(|mtime| mtime.elapsed().ok())

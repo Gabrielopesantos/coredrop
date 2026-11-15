@@ -114,7 +114,7 @@ pub struct CaptureEventPayload {
     pub outcome: Outcome,
     pub manifest_key: Option<String>,
     /// Uncompressed core bytes the handler read from the kernel; `0` when
-    /// the core is not kept, because the handler does not read it.
+    /// the handler did not read the core (rate limit, filter, no store).
     pub core_bytes: u64,
     pub stored_bytes: Option<u64>,
     pub truncated: bool,

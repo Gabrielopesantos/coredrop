@@ -335,8 +335,8 @@ async fn run_size_cap_truncates_stored_core() {
     );
 }
 
-/// Rate limit: with a budget of 1, the second crash gets no core but still
-/// gets a proc snapshot and a manifest marked `rate_limit`.
+/// Rate limit: with a budget of 1, the second crash gets no core and no proc
+/// snapshot, only a manifest marked `rate_limit`.
 #[tokio::test]
 async fn run_rate_limit_suppresses_core_keeps_manifest() {
     let _guard = common::SPAWN_LOCK.lock().await;
@@ -507,8 +507,8 @@ async fn run_drain_deadline_keeps_metadata_and_refunds_budget() {
     assert!(bundle.join(spool::CORE_FILE).exists());
 }
 
-/// A rate-limited capture does not read the core pipe, and still gets its
-/// snapshot and a `rate_limit` manifest.
+/// A rate-limited capture does not read the core pipe, and gets only a
+/// `rate_limit` manifest, no snapshot.
 #[tokio::test]
 async fn run_rate_limited_capture_does_not_read_the_core() {
     let _guard = common::SPAWN_LOCK.lock().await;

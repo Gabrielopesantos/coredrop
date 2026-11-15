@@ -34,11 +34,10 @@ at startup.
 | capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
-| capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`); empty disables upload. |
+| capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix; keys in manifests and Events are relative to it. Empty disables upload. |
 | cleanup.enabled | bool | `true` | Run the post-delete cleanup DaemonSet on `helm uninstall`. |
 | cleanup.image | string | `"rancher/kubectl:v1.35.6"` | Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl. |
 | corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
-| corePattern.hostRunDir | string | `"/run/coredrop"` | Host path for the handler config and rate-limit state. |
 | corePattern.pipeLimit | int | `128` | `core_pipe_limit` sysctl the daemon installs alongside `core_pattern`. |
 | cri.crictlPath | string | `"/usr/local/bin/crictl"` | Path to the crictl binary on the node (host mount ns), for the handler's enrichment. |
 | cri.runtimeEndpoint | string | `""` | CRI endpoint for crictl enrichment; when set, its `unix://` path is also the socket mounted from the host. Empty lets crictl self-resolve on the node. |
@@ -138,8 +137,9 @@ daemon still listens on its socket and logs every capture.
 
 coredrop only writes artifacts - it never deletes them or sweeps the bucket.
 Expire old crashes with your object store's native lifecycle policy, scoped
-to the `capture.cluster` prefix so it doesn't reach into unrelated bucket
-contents:
+to the coredrop key prefix so it doesn't reach into unrelated bucket
+contents. The prefix is the path of `capture.objectStore.url` (if any), then
+`capture.cluster`:
 
 **S3** (bucket lifecycle rule, e.g. via Terraform/`aws s3api`):
 
@@ -181,7 +181,10 @@ contents:
 }
 ```
 
-Replace `local/` with your `capture.cluster` value.
+Replace `local/` with your prefix: `<capture.cluster>/`, or
+`<url path>/<capture.cluster>/` when `capture.objectStore.url` has a path.
+For example, `s3://bucket/coredumps` with `capture.cluster=local` gives
+`coredumps/local/`.
 
 The daemon aborts a multipart upload that fails or passes
 `upload.timeoutSeconds`. Some cases can still leave an incomplete multipart
@@ -232,7 +235,7 @@ daemon --> uploads ready/ (upload.concurrency at a time) --> deletes the capture
 
 `capture.maxCoresPerHour` (default 3) is a per-pod sliding-window budget. The
 daemon stores the window state in `recent.json` on the same hostPath as the
-handler config (`corePattern.hostRunDir`). The daemon keeps that
+handler config (`/run/coredrop`). The daemon keeps that
 state across its own restarts, upgrades and node drains: otherwise a
 crash-looping pod could evade its budget by forcing a daemon restart. Only
 `helm uninstall` clears it, via the post-delete cleanup hook below. A workload
@@ -299,7 +302,7 @@ kernel-exec'd processes and survive the restart.
 
 The pods run as root with all capabilities dropped. `install-handler` copies
 the binary to `corePattern.hostBinDir`. The daemon writes `handler.json`,
-binds `events.sock` in `corePattern.hostRunDir`, reads and deletes captures
+binds `events.sock` in `/run/coredrop`, reads and deletes captures
 in `spool.hostDir`, and writes two node-global sysctls:
 
 ```
@@ -326,7 +329,7 @@ daemons through the `checksum/config` pod annotation. Store credentials stay
 in the Secret.
 
 The kernel-exec'd handler does not see env vars on the pod, so its config
-and the rate-limit state live on a hostPath (`corePattern.hostRunDir`). The
+and the rate-limit state live on a fixed hostPath, `/run/coredrop`. The
 config holds no credentials. The handler never reaches the network; the
 daemon uploads from its pod, so the object-store endpoint can be a cluster
 DNS name.
@@ -367,9 +370,10 @@ applies a short-lived DaemonSet, waits for it to roll out on every
 node, then deletes it. On each node that worker removes the handler binary,
 `handler.json`, `events.sock` and `recent.json`, the spool's `incoming/` and
 `ready/` directories, then the `corePattern.hostBinDir`,
-`corePattern.hostRunDir` and `spool.hostDir` directories themselves.
+`/run/coredrop` and `spool.hostDir` directories themselves.
 If the daemon was killed without a clean shutdown, the worker also resets
-`core_pattern` to the kernel default `core` if it still points at the handler.
+`core_pattern` to the kernel default `core` and `core_pipe_limit` to `0` if
+the pattern still points at the handler.
 
 Uninstalling deletes every capture still in the spool. Wait for the spool to
 drain first if those captures matter: the daemon logs `capture complete` for

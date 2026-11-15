@@ -350,7 +350,7 @@ mod tests {
             config: None,
             handler_config_path: config_path.to_path_buf(),
             cluster_name: None,
-            no_redact: false,
+            redact: true,
             proc_root: "/proc".into(),
             store_url: None,
             crictl_path: None,

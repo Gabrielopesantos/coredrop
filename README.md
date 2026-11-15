@@ -80,7 +80,7 @@ Defaults are in [docs/configuration.md](docs/configuration.md).
 
 - **Secret redaction** - `environ` values and `cmdline` secrets are redacted
   by keyword list plus an entropy/shape heuristic (JWTs, PEM blocks, URL
-  credentials). `--no-redact` opts out. Cores themselves are secret-bearing
+  credentials). `capture.redact: false` (`--redact=false`) opts out. Cores themselves are secret-bearing
   regardless; treat the bucket accordingly.
 - **Size cap** - stored core bytes are capped per crash; the rest of the
   stream is drained but not stored. The manifest records `truncated`.

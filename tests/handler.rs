@@ -250,9 +250,9 @@ async fn run_reports_each_outcome_on_the_events_socket() {
 }
 
 /// The fixture adds `SECRET_KEY=hunter2`. The spooled proc-snapshot tar must
-/// not contain it, unless `no_redact` is set.
+/// not contain it, unless `redact` is off.
 #[tokio::test]
-async fn run_redacts_snapshot_environ_unless_no_redact_is_set() {
+async fn run_redacts_snapshot_environ_unless_redact_is_off() {
     let _guard = common::SPAWN_LOCK.lock().await;
     let (redacting_pid, raw_pid) = (4252, 4253);
 
@@ -284,16 +284,16 @@ async fn run_redacts_snapshot_environ_unless_no_redact_is_set() {
         "innocuous vars survive: {environ:?}"
     );
 
-    // `--no-redact` keeps the raw blob.
-    config.no_redact = true;
-    let core_in: &[u8] = b"core payload for the no-redact test";
+    // `--redact=false` keeps the raw blob.
+    config.redact = false;
+    let core_in: &[u8] = b"core payload for the unredacted test";
     run(capture_args(raw_pid, 11, TS), &config, core_in)
         .await
         .unwrap();
     let environ = snapshot_environ(&config, raw_pid);
     assert!(
         environ.contains("SECRET_KEY=hunter2"),
-        "no_redact must pass the raw value through: {environ:?}"
+        "redact=false must pass the raw value through: {environ:?}"
     );
 }
 

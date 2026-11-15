@@ -50,9 +50,10 @@ pub(crate) struct DaemonArgs {
     #[arg(long, value_parser = parse_cluster_name)]
     pub(crate) cluster_name: Option<String>,
 
-    /// Pass `environ` and `cmdline` through un-redacted.
-    #[arg(long)]
-    pub(crate) no_redact: bool,
+    /// Redact secrets in the snapshot's `environ` and `cmdline`
+    /// (`--redact=false` turns it off).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) redact: bool,
 
     /// `/proc` root (overridable for tests/non-standard layouts).
     #[arg(long, default_value = crate::config::DEFAULT_PROC_ROOT)]
@@ -258,7 +259,7 @@ impl DaemonArgs {
     pub(crate) fn to_handler_config(&self, store_configured: bool) -> HandlerConfig {
         HandlerConfig {
             cluster_name: self.cluster_name.clone(),
-            no_redact: self.no_redact,
+            redact: self.redact,
             proc_root: self.proc_root.clone(),
             store_configured,
             crictl_path: self.crictl_path.clone(),
@@ -379,6 +380,15 @@ mod tests {
     fn chart_config_loads_in_the_daemon() {
         let defaults = load_with_file(&render_chart_config(&[]), &[]).unwrap();
         assert_eq!(defaults.max_core_bytes, 2 << 30);
+        assert!(defaults.redact);
+        // Helm deletes a null value: redaction keeps its default, on.
+        for (set, redact) in [
+            ("capture.redact=null", true),
+            ("capture.redact=false", false),
+        ] {
+            let args = load_with_file(&render_chart_config(&[set]), &[]).unwrap();
+            assert_eq!(args.redact, redact, "{set}");
+        }
         assert_eq!(defaults.spool_max_bytes, 10 << 30);
 
         let edges = [
@@ -437,7 +447,7 @@ mod tests {
             "cluster-name: prod\n\
              max-core-size: 1Gi\n\
              max-cores-per-pod-per-hour: 7\n\
-             no-redact: true\n\
+             redact: false\n\
              store-url: s3://bucket\n\
              metrics-addr: \"\"\n\
              capture-filter:\n  exclude:\n    - namespace: kube-system\n",
@@ -447,7 +457,7 @@ mod tests {
         assert_eq!(args.cluster_name.as_deref(), Some("prod"));
         assert_eq!(args.max_core_bytes, 1 << 30);
         assert_eq!(args.max_cores_per_pod_per_hour, 7);
-        assert!(args.no_redact);
+        assert!(!args.redact);
         assert_eq!(args.store_url.as_deref(), Some("s3://bucket"));
         assert_eq!(args.metrics_addr, MetricsAddr(None));
         assert_eq!(
@@ -528,7 +538,7 @@ mod tests {
             ),
             ("max-core-size: 2Zi\n", "`max-core-size`"),
             ("spool-min-free-percent: 101\n", "`spool-min-free-percent`"),
-            ("no-redact: yes please\n", "`no-redact`"),
+            ("redact: yes please\n", "`redact`"),
             ("capture-filter:\n  exclude: [{}]\n", "`capture-filter`"),
             ("- cluster\n", "top level must be a mapping"),
             ("cluster: [\n", "config file"),

@@ -1,5 +1,5 @@
 //! `environ` and `cmdline` redaction: redact-by-default with a curated keyword
-//! list plus a value-shape/entropy heuristic, `--no-redact` opts into raw.
+//! list plus a value-shape/entropy heuristic, `--redact=false` opts into raw.
 //!
 //! `/proc/<pid>/environ` is NUL-separated `KEY=VALUE` entries. We redact an
 //! entry's value (never the key) when either the key matches a curated
@@ -51,7 +51,7 @@ const MIN_HEURISTIC_LEN: usize = 20;
 const ENTROPY_BITS: f64 = 3.5;
 
 /// Decides which `environ` values to redact. `enabled: false` is the
-/// `--no-redact` passthrough.
+/// `--redact=false` passthrough.
 #[derive(Debug, Clone)]
 pub struct Redactor {
     enabled: bool,
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn no_redact_passes_everything_through() {
+    fn disabled_redaction_passes_everything_through() {
         let raw = environ(&["DB_PASSWORD=hunter2", "API_TIMEOUT=30"]);
         assert_eq!(Redactor::disabled().redact_environ(&raw), raw);
         let argv = environ(&["myapp", "--password", "hunter2"]);

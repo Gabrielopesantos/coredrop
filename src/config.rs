@@ -145,8 +145,8 @@ pub struct HandlerConfig {
     /// Cluster name: the first segment of the object keys, and the
     /// manifest's `cluster_name`. `None` leaves both out.
     pub cluster_name: Option<String>,
-    /// Pass `environ` and `cmdline` through un-redacted.
-    pub no_redact: bool,
+    /// Redact secrets in the snapshot's `environ` and `cmdline`.
+    pub redact: bool,
     /// `/proc` root (overridable for tests/non-standard layouts).
     pub proc_root: PathBuf,
     /// Whether the daemon has an object store to upload to. `false` makes the
@@ -198,7 +198,7 @@ impl Default for HandlerConfig {
     fn default() -> Self {
         Self {
             cluster_name: None,
-            no_redact: false,
+            redact: true,
             proc_root: PathBuf::from(DEFAULT_PROC_ROOT),
             store_configured: false,
             crictl_path: None,
@@ -393,7 +393,7 @@ mod tests {
     fn write_then_read_round_trips() {
         let cfg = HandlerConfig {
             cluster_name: Some("prod".into()),
-            no_redact: true,
+            redact: false,
             proc_root: "/proc".into(),
             store_configured: true,
             crictl_path: Some("/usr/local/bin/crictl".into()),

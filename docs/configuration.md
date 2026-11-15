@@ -26,7 +26,7 @@ For the Helm values that set these flags, see the
 | `--crictl-timeout-secs` | 10 | `crictl inspect` timeout in the handler; 0 = no timeout |
 | `--capture-filter` | empty | JSON (in the config file, YAML) include/exclude lists of crashes to capture; empty = all. See [Capture filter](#capture-filter) |
 | `--pipe-limit` | 128 | `core_pipe_limit` sysctl the daemon installs |
-| `--no-redact` | off | Pass `environ` and `cmdline` through un-redacted |
+| `--redact` | `true` | Redact secrets in the snapshot's `environ` and `cmdline`; `--redact=false` turns it off |
 | `--cri-runtime-endpoint` | unset | CRI socket for crictl enrichment |
 | `--no-events` | off | Disable k8s Event emission on capture; captures are still logged |
 | `--metrics-addr` | `0.0.0.0:9464` | Address of the Prometheus `/metrics` endpoint; empty = no endpoint. See [Metrics](metrics.md) |

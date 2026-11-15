@@ -171,10 +171,10 @@ pub async fn run(
     );
 
     let proc_root = Path::new(&config.proc_root);
-    let redactor = if config.no_redact {
-        Redactor::disabled()
-    } else {
+    let redactor = if config.redact {
         Redactor::default()
+    } else {
+        Redactor::disabled()
     };
 
     // Step 1: Pre-reap snapshot (must complete while kernel waits).

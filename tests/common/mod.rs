@@ -71,7 +71,7 @@ pub fn write_fixture_proc(root: &Path, pid: i32, pod_uid: &str, container_id: &s
 pub fn base_config(root: &Path) -> HandlerConfig {
     HandlerConfig {
         cluster_name: Some("test".into()),
-        no_redact: false,
+        redact: true,
         proc_root: proc_root(root),
         store_configured: true,
         crictl_path: Some("/bin/false".into()),

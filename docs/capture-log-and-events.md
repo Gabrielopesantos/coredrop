@@ -49,7 +49,9 @@ LAST SEEN   TYPE      REASON       OBJECT              MESSAGE
 | No object store configured | `CoreDiscardedNoStore` |
 
 A spooled capture gets its Event once it is uploaded, so the manifest key in
-the message always exists in the bucket.
+the message always exists in the store. Keys in Events, log lines and
+manifests are relative to the store URL: with `s3://bucket/coredumps`, the
+key `local/...` is the object `coredumps/local/...` in the bucket.
 
 Only the daemon touches the API server, so the ServiceAccount token never
 reaches the handler. A crash-looping pod bumps one Event's `series.count`

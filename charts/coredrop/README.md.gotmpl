@@ -91,8 +91,9 @@ daemon still listens on its socket and logs every capture.
 
 coredrop only writes artifacts - it never deletes them or sweeps the bucket.
 Expire old crashes with your object store's native lifecycle policy, scoped
-to the `capture.cluster` prefix so it doesn't reach into unrelated bucket
-contents:
+to the coredrop key prefix so it doesn't reach into unrelated bucket
+contents. The prefix is the path of `capture.objectStore.url` (if any), then
+`capture.cluster`:
 
 **S3** (bucket lifecycle rule, e.g. via Terraform/`aws s3api`):
 
@@ -134,7 +135,10 @@ contents:
 }
 ```
 
-Replace `local/` with your `capture.cluster` value.
+Replace `local/` with your prefix: `<capture.cluster>/`, or
+`<url path>/<capture.cluster>/` when `capture.objectStore.url` has a path.
+For example, `s3://bucket/coredumps` with `capture.cluster=local` gives
+`coredumps/local/`.
 
 The daemon aborts a multipart upload that fails or passes
 `upload.timeoutSeconds`. Some cases can still leave an incomplete multipart

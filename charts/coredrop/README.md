@@ -34,7 +34,7 @@ at startup.
 | capture.noRedact | bool | `false` | Pass `environ` and `cmdline` through un-redacted. Leave false; cores are secret-bearing. |
 | capture.objectStore.config | object | `{}` | Non-secret object-store client options, rendered as plain env vars (allowlisted). |
 | capture.objectStore.credentials | object | `{}` | Secret-bearing object-store options, rendered into a Secret and injected via envFrom (allowlisted). |
-| capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix. Empty disables upload. |
+| capture.objectStore.url | string | `""` | Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix; keys in manifests and Events are relative to it. Empty disables upload. |
 | cleanup.enabled | bool | `true` | Run the post-delete cleanup DaemonSet on `helm uninstall`. |
 | cleanup.image | string | `"rancher/kubectl:v1.35.6"` | Image for the post-delete cleanup Job that drives the cleanup DaemonSet via kubectl. |
 | corePattern.hostBinDir | string | `"/opt/coredrop/bin"` | Host path the handler binary is installed to (resolved in the host mount ns). |
@@ -137,8 +137,9 @@ daemon still listens on its socket and logs every capture.
 
 coredrop only writes artifacts - it never deletes them or sweeps the bucket.
 Expire old crashes with your object store's native lifecycle policy, scoped
-to the `capture.cluster` prefix so it doesn't reach into unrelated bucket
-contents:
+to the coredrop key prefix so it doesn't reach into unrelated bucket
+contents. The prefix is the path of `capture.objectStore.url` (if any), then
+`capture.cluster`:
 
 **S3** (bucket lifecycle rule, e.g. via Terraform/`aws s3api`):
 
@@ -180,7 +181,10 @@ contents:
 }
 ```
 
-Replace `local/` with your `capture.cluster` value.
+Replace `local/` with your prefix: `<capture.cluster>/`, or
+`<url path>/<capture.cluster>/` when `capture.objectStore.url` has a path.
+For example, `s3://bucket/coredumps` with `capture.cluster=local` gives
+`coredumps/local/`.
 
 The daemon aborts a multipart upload that fails or passes
 `upload.timeoutSeconds`. Some cases can still leave an incomplete multipart

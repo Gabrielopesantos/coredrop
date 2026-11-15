@@ -110,7 +110,7 @@ capture:
   # values.schema.json rejects an unknown key, so a typo fails the install.
   # Keys that hold a secret are accepted only in `credentials`.
   objectStore:
-    # -- Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix. Empty disables upload.
+    # -- Object store URL (`s3://bucket`, `gs://bucket` or `az://container`). A path after the bucket (`s3://bucket/coredumps`) is a key prefix; keys in manifests and Events are relative to it. Empty disables upload.
     url: ""
     # Non-secret client options, rendered as plain env vars on the daemon.
     # An `http://` endpoint (with `AWS_ALLOW_HTTP`) sends cores - and whatever

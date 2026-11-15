@@ -31,7 +31,7 @@ SEGFAULT_IMAGE="${SEGFAULT_IMAGE:-docker.io/library/coredrop-segfault:dev}"
 
 # The chart's post-delete cleanup Job image. Not built here - pulled on the host
 # and imported like the others so `helm uninstall` never waits on a registry
-# (the hook has a 180s deadline). Must match `cleanup.image` in the chart's
+# (the hook has a 300s deadline). Must match `cleanup.image` in the chart's
 # values.yaml and in helm-values/coredrop.local.yaml.
 CLEANUP_IMAGE="${CLEANUP_IMAGE:-docker.io/rancher/kubectl:v1.35.6}"
 

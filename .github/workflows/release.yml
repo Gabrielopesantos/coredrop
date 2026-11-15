@@ -1,9 +1,11 @@
 name: Release
 
 # Two independent tag prefixes:
-#   app-v<ver>   -> build + push the multi-arch image ghcr.io/gabrielopesantos/coredrop:<ver> (+ latest)
+#   app-v<ver>   -> build + push the multi-arch image ghcr.io/gabrielopesantos/coredrop:<ver>
+#                   (+ latest, unless <ver> is a pre-release such as 1.1.0-rc1)
 #   chart-v<ver> -> package + push the chart to oci://ghcr.io/gabrielopesantos/charts
-# The chart's appVersion (-> image tag) is bumped by a prior commit, not here.
+# <ver> must equal the version in Cargo.toml (app) or Chart.yaml (chart), and
+# the chart's appVersion image must exist. Bump them in a commit first.
 on:
   push:
     tags:
@@ -20,8 +22,26 @@ env:
 
 jobs:
   # --- image: native per-arch build, then a merged manifest list --------------
-  build-image:
+  check-app-version:
     if: startsWith(github.ref, 'refs/tags/app-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - name: Guard tag matches Cargo.toml version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TAG_VER="${TAG#app-v}"
+          CARGO_VER="$(nix develop -c yq -p toml '.package.version' Cargo.toml)"
+          if [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "tag $TAG_VER != Cargo.toml version $CARGO_VER" >&2
+            exit 1
+          fi
+
+  build-image:
+    needs: check-app-version
     strategy:
       matrix:
         include:
@@ -39,10 +59,11 @@ jobs:
       - name: Push per-arch image
         env:
           VERSION: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${VERSION#app-v}"
-          nix develop -c skopeo login ghcr.io \
-            -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          printf '%s' "$GH_TOKEN" | nix develop -c skopeo login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
           nix develop -c skopeo copy \
             "docker-archive:$(readlink -f result)" \
             "docker://${IMAGE}:${VERSION}-${{ matrix.arch }}"
@@ -59,9 +80,13 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION#app-v}"
-          docker buildx imagetools create \
-            -t "${IMAGE}:${VERSION}" \
-            -t "${IMAGE}:latest" \
+          tags=(-t "${IMAGE}:${VERSION}")
+          # A pre-release (a `-` in the version) does not move latest.
+          case "$VERSION" in
+            *-*) ;;
+            *) tags+=(-t "${IMAGE}:latest") ;;
+          esac
+          docker buildx imagetools create "${tags[@]}" \
             "${IMAGE}:${VERSION}-amd64" \
             "${IMAGE}:${VERSION}-arm64"
 
@@ -83,9 +108,24 @@ jobs:
             echo "tag $TAG_VER != Chart.yaml version $CHART_VER" >&2
             exit 1
           fi
-      - name: Package and push chart
+      # The chart's default image tag must exist, or a default install
+      # pulls nothing.
+      - name: Guard appVersion image exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          nix develop -c helm registry login ghcr.io \
-            -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          APP_VER="$(nix develop -c yq '.appVersion' charts/coredrop/Chart.yaml)"
+          printf '%s' "$GH_TOKEN" | nix develop -c skopeo login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+          if ! nix develop -c skopeo inspect --raw "docker://${IMAGE}:${APP_VER}" >/dev/null; then
+            echo "image ${IMAGE}:${APP_VER} (Chart.yaml appVersion) does not exist; push app-v${APP_VER} first" >&2
+            exit 1
+          fi
+      - name: Package and push chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" | nix develop -c helm registry login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
           nix develop -c helm package charts/coredrop
           nix develop -c helm push coredrop-*.tgz "${CHART_REPO}"
